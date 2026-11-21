@@ -161,6 +161,24 @@ jobs:
             GITHUB_ACTIONS=true "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" \
             "$(command -v python)" tests_runtime/lab/runtime_boundary.py --isolated-vm
 
+  provisioning-faults:
+    name: Provisioning fault injection / disposable SSH namespace
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - *checkout
+      - *setup_python
+      - name: Install SSH, namespace and privilege tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends openssh-server iproute2 sudo
+          sudo systemctl enable --now ssh.service
+      - name: Inject disconnects, partial accounts, helpers, keys and postcondition failures
+        run: |
+          sudo -n /usr/bin/env "PATH=$PATH" "PYTHONPATH=$PWD" PYTHONDONTWRITEBYTECODE=1 \
+            GITHUB_ACTIONS=true "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" \
+            "$(command -v python)" tests_tools/lab/provisioning_faults.py --isolated-vm
+
   prototypes:
     name: Stage 0 prototypes / Python 3.15
     runs-on: ubuntu-24.04

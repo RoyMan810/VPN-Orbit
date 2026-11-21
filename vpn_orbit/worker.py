@@ -4,17 +4,19 @@ from threading import Event
 
 from .database import identifier
 from .errors import Denied
+from .firewall_requests import FirewallOperations
 from .queue import JobQueue
 from .restart_requests import RestartOperations
-from .runtime.protocol import checksum, docker_summary, fields, integer, software_summary, text
+from .runtime.protocol import checksum, docker_summary, fields, firewall_rules, integer, software_summary, text
 from .runtime.storage import process_lock
 
 
 class Worker:
-    def __init__(self, queue: JobQueue, gate, broker, *, secret_refs, observe=None, restart_refs=None):
+    def __init__(self, queue: JobQueue, gate, broker, *, secret_refs, observe=None, restart_refs=None, firewall_refs=None):
         self.queue, self.gate, self.broker = queue, gate, broker
         self.secret_refs = secret_refs
         self.restart = RestartOperations(queue, gate, broker, restart_refs if restart_refs is not None else {})
+        self.firewall = FirewallOperations(queue, gate, broker, firewall_refs if firewall_refs is not None else {})
         self.id = identifier()
         self.observe = observe or (lambda _: None)
 
@@ -37,6 +39,8 @@ class Worker:
         try:
             if self.restart.reconcile_pending():
                 return True
+            if self.firewall.reconcile_pending():
+                return True
             claimed = self.queue.claim(self.id)
         except Denied as error:
             if error.code in {"WRITER_ADMISSION_CLOSED", "WRITER_BARRIER_TIMEOUT"}:
@@ -49,8 +53,11 @@ class Worker:
         permit = None
         try:
             restart = row["action"] == "docker.restart"
+            firewall = row["action"] == "firewall.apply"
             if restart:
                 binding, secret_ref, revalidate = self.restart.prepare(row)
+            elif firewall:
+                binding, secret_ref, revalidate = self.firewall.prepare(row)
             else:
                 binding, secret_ref, revalidate = self.queue.binding(row), self.secret_refs[row["resource_id"]], None
             permit = self.gate.call("permit.admit", binding)
@@ -75,6 +82,17 @@ class Worker:
                 if response["outcome"] not in ("SUCCEEDED", "FAILED", "UNKNOWN_OUTCOME") or response["observation"] is not None:
                     raise Denied("BROKER_RECEIPT_INVALID")
                 self.queue.finish(claim, response["outcome"], response["code"])
+            elif firewall:
+                if response["outcome"] not in ("SUCCEEDED", "FAILED", "UNKNOWN_OUTCOME") or response["observation"] is not None:
+                    raise Denied("BROKER_RECEIPT_INVALID")
+                result = None
+                if response["outcome"] == "SUCCEEDED":
+                    if response["code"] not in ("FIREWALL_CONFIRMED", "FIREWALL_ALREADY_CONFIRMED"):
+                        raise Denied("BROKER_RECEIPT_INVALID")
+                    result = {"rules": firewall_rules(binding["firewall"]["rules"]),
+                              "rules_digest": binding["firewall"]["rules_digest"],
+                              "ssh_port": binding["firewall"]["ssh_port"]}
+                self.queue.finish(claim, response["outcome"], response["code"], result=result)
             elif response["outcome"] == "SUCCEEDED":
                 value = response["observation"]
                 names = ("status", "source", "observed_at", "boot_id")
@@ -120,6 +138,7 @@ class Worker:
             if not recovery_profile():
                 self.queue.recover(self._recover_result)
                 self.restart.recover_legacy_requests()
+                self.firewall.recover_legacy_requests()
             while not stop.is_set():
                 found = False if recovery_profile() else self.run_one()
                 if once:

@@ -22,6 +22,8 @@ from .change_drafts import (get_draft, record_draft_approval, record_draft_backu
 from .config import Settings
 from .database import AuditIntegrityError, DataAccess, Store, canonical, identifier
 from .errors import Denied
+from .firewall_requests import (check_firewall_draft, firewall_timeline, record_firewall_approval,
+                                request_firewall_apply, request_firewall_reconciliation, save_firewall_draft)
 from .inventory import Inventory
 from .queue import JobQueue
 from .restart_requests import request_reconciliation, request_restart, restart_timeline
@@ -141,7 +143,7 @@ class Login(Input):
 
 
 class Grant(Input):
-    permission: Literal["users:manage", "audit:read", "vps:read", "vps:probe", "vps:restart", "secrets:View Metadata", "secrets:Use", "secrets:Manage"]
+    permission: Literal["users:manage", "audit:read", "vps:read", "vps:probe", "vps:restart", "vps:firewall", "secrets:View Metadata", "secrets:Use", "secrets:Manage"]
     resource_id: Annotated[str, Field(min_length=1, max_length=26)]
 
 
@@ -191,6 +193,27 @@ class DraftApproval(DraftPreflight):
 
 
 class DraftExecution(DraftPreflight):
+    approval_id: Annotated[str, Field(pattern="^" + ULID + "$", max_length=26)]
+
+
+class FirewallRule(Input):
+    action: Literal["allow", "deny"]
+    direction: Literal["in", "out"]
+    protocol: Literal["tcp", "udp"]
+    port: Annotated[int, Field(ge=1, le=65535)]
+    cidr: Annotated[str, Field(min_length=3, max_length=49)]
+
+
+class FirewallDraftInput(Input):
+    rules: Annotated[list[FirewallRule], Field(min_length=1, max_length=32)]
+    ssh_port: Annotated[int, Field(ge=1, le=65535)]
+
+
+class FirewallApproval(Input):
+    reauth_id: Annotated[str, Field(pattern="^" + ULID + "$", max_length=26)]
+
+
+class FirewallExecution(Input):
     approval_id: Annotated[str, Field(pattern="^" + ULID + "$", max_length=26)]
 
 
@@ -467,6 +490,61 @@ def create_app(settings: Settings, *, auth: AuthService | None = None, enrollmen
     def get_restart_timeline(draft_id: str, request: Request, actor=Depends(principal)):
         with service.store.read() as db:
             return restart_timeline(db, service, token(request), draft_id)
+
+    @app.post("/api/v1/resources/{resource_id}/firewall-drafts", status_code=201)
+    def create_firewall_draft(resource_id: str, body: FirewallDraftInput, request: Request, response: Response,
+                              actor=Depends(principal)):
+        with service.store.write() as db:
+            result, tag = save_firewall_draft(db, service, token(request), csrf(request), resource_id,
+                                              [rule.model_dump() for rule in body.rules], body.ssh_port)
+        response.headers["ETag"] = tag
+        response.headers["Location"] = f'/api/v1/change-plans/{result["id"]}'
+        return result
+
+    @app.put("/api/v1/change-plans/{draft_id}/firewall-draft")
+    def revise_firewall_draft(draft_id: str, body: FirewallDraftInput, request: Request, response: Response,
+                              actor=Depends(principal)):
+        with service.store.write() as db:
+            current, _ = get_draft(db, service, token(request), draft_id)
+            if current["action"] != "firewall.apply":
+                raise Denied("RESOURCE_NOT_FOUND", 404)
+            result, tag = save_firewall_draft(db, service, token(request), csrf(request), current["baseline"]["resource_id"],
+                                              [rule.model_dump() for rule in body.rules], body.ssh_port,
+                                              draft_id=draft_id, if_match=request.headers.get("if-match"))
+        response.headers["ETag"] = tag
+        return result
+
+    @app.get("/api/v1/change-plans/{draft_id}/firewall-preview")
+    def preview_firewall_draft(draft_id: str, request: Request, actor=Depends(principal)):
+        with service.store.read() as db:
+            return check_firewall_draft(db, service, token(request), draft_id, if_match=request.headers.get("if-match"))
+
+    @app.post("/api/v1/change-plans/{draft_id}/firewall-approval")
+    def approve_firewall_draft(draft_id: str, body: FirewallApproval, request: Request, actor=Depends(principal)):
+        with service.store.write() as db:
+            return record_firewall_approval(db, service, token(request), csrf(request), draft_id,
+                                            if_match=request.headers.get("if-match"), reauth_id=body.reauth_id)
+
+    @app.post("/api/v1/change-plans/{draft_id}/firewall-execution-requests", status_code=202)
+    def enqueue_firewall_apply(draft_id: str, body: FirewallExecution, request: Request, response: Response,
+                               actor=Depends(principal)):
+        with service.store.write() as db:
+            result = request_firewall_apply(db, queue, service, token(request), csrf(request), draft_id,
+                                            if_match=request.headers.get("if-match"), approval_id=body.approval_id)
+        response.headers["Location"] = f"/api/v1/change-plans/{draft_id}/firewall-timeline"
+        return result
+
+    @app.post("/api/v1/change-plans/{draft_id}/firewall-execution-requests/{operation_id}/reconciliations/{attempt}",
+              status_code=202)
+    def reconcile_firewall_apply(draft_id: str, operation_id: str, attempt: int, body: Input, request: Request,
+                                 actor=Depends(principal)):
+        with service.store.write() as db:
+            return request_firewall_reconciliation(db, service, token(request), csrf(request), draft_id, operation_id, attempt)
+
+    @app.get("/api/v1/change-plans/{draft_id}/firewall-timeline")
+    def get_firewall_timeline(draft_id: str, request: Request, actor=Depends(principal)):
+        with service.store.read() as db:
+            return firewall_timeline(db, service, token(request), draft_id)
 
     @app.get("/api/v1/jobs/{job_id}")
     def get_job(job_id: str, request: Request, response: Response, actor=Depends(principal)):

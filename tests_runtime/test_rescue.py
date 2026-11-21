@@ -79,7 +79,7 @@ class RescueTests(unittest.TestCase):
                         outcome="SUCCEEDED", correlation=draft, details={"revision": 1, "plan_hash": "b" * 64})
         self.source = self.fixture.backup.create(self.fixture.recipient)
         self.envelope = json.loads(Path(self.source["provenance"]).read_bytes())
-        self.assertEqual(self.envelope["claims"]["manifest"]["schema"], 4)
+        self.assertEqual(self.envelope["claims"]["manifest"]["schema"], 5)
         request = self.issue("drafts")
         review = self.pack(request)
         RecoveryTarget(self.root / "drafts-state", owner=os.geteuid(), age_path=self.age).accept(

@@ -29,7 +29,7 @@ class JobQueue:
 
     @staticmethod
     def _schema(db):
-        if db.execute("PRAGMA user_version").fetchone()[0] not in (2, 3, 4):
+        if db.execute("PRAGMA user_version").fetchone()[0] not in (2, 3, 4, 5):
             raise Denied("QUEUE_SCHEMA_REQUIRES_VERIFIED_MIGRATION", 503)
 
     @staticmethod
@@ -40,29 +40,46 @@ class JobQueue:
             AND request.event='change_plan.restart_requested'
             AND json_extract(request.details,'$.operation_id')=approval.id""", (job_id,)).fetchone()
 
-    def enqueue_restart(self, db, job_id, actor, target, scope, policy_revision, plan_hash):
-        if db.execute("PRAGMA user_version").fetchone()[0] != 4:
-            raise Denied("QUEUE_SCHEMA_REQUIRES_VERIFIED_MIGRATION", 503)
+    @staticmethod
+    def firewall_request(db, job_id):
+        return db.execute("""SELECT request.* FROM audit approval JOIN audit request
+            ON request.correlation_id=approval.correlation_id AND request.target_id=approval.target_id
+            WHERE approval.id=? AND approval.event='change_plan.approval_recorded'
+            AND request.event='change_plan.firewall_requested'
+            AND json_extract(request.details,'$.operation_id')=approval.id""", (job_id,)).fetchone()
+
+    def _enqueue_mutation(self, db, job_id, actor, target, scope, policy_revision, plan_hash, action):
         now = int(self.clock())
         db.execute("""INSERT INTO jobs(id,actor_id,resource_id,action,payload_hash,scope_digest,policy_revision,status,created_at,updated_at)
-                      VALUES(?,?,?,'docker.restart',?,?,?,'QUEUED',?,?)""",
-                   (job_id, actor, target, plan_hash, scope, policy_revision, now, now))
+                      VALUES(?,?,?,?,?,?,?,'QUEUED',?,?)""",
+                   (job_id, actor, target, action, plan_hash, scope, policy_revision, now, now))
         self._event(db, db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone(), "job.accepted")
+
+    def enqueue_restart(self, db, job_id, actor, target, scope, policy_revision, plan_hash):
+        if db.execute("PRAGMA user_version").fetchone()[0] not in (4, 5):
+            raise Denied("QUEUE_SCHEMA_REQUIRES_VERIFIED_MIGRATION", 503)
+        self._enqueue_mutation(db, job_id, actor, target, scope, policy_revision, plan_hash, "docker.restart")
+
+    def enqueue_firewall(self, db, job_id, actor, target, scope, policy_revision, plan_hash):
+        if db.execute("PRAGMA user_version").fetchone()[0] != 5:
+            raise Denied("QUEUE_SCHEMA_REQUIRES_VERIFIED_MIGRATION", 503)
+        self._enqueue_mutation(db, job_id, actor, target, scope, policy_revision, plan_hash, "firewall.apply")
 
     def _event(self, db, row, event, *, reason=None):
         self.store.event(db, at=int(self.clock()), actor=row["actor_id"], kind=event,
                          target=row["resource_id"], outcome=row["status"], correlation=row["id"],
                          details={"job_id": row["id"], "revision": row["revision"], "reason": reason})
 
-        if row["action"] != "docker.restart":
+        if row["action"] not in ("docker.restart", "firewall.apply"):
             return
+        name = "restart" if row["action"] == "docker.restart" else "firewall"
         if event == "job.finished":
-            plan_event = "change_plan.restart_finished"
+            plan_event = f"change_plan.{name}_finished"
         elif row["status"] in ("INTENT_PREPARED", "DISPATCHING"):
-            plan_event = "change_plan.restart_prepared"
+            plan_event = f"change_plan.{name}_prepared"
         else:
             return
-        request = self.restart_request(db, row["id"])
+        request = self.restart_request(db, row["id"]) if name == "restart" else self.firewall_request(db, row["id"])
         if request is not None:
             self.store.event(db, at=int(self.clock()), actor=row["actor_id"], kind=plan_event,
                              target=row["resource_id"], outcome=row["status"], correlation=request["correlation_id"],
@@ -129,7 +146,7 @@ class JobQueue:
         AuthService.require(db, row, permission, resource)
 
     def _authorize_job(self, db, row):
-        permission = "vps:restart" if row["action"] == "docker.restart" else "vps:probe"
+        permission = {"docker.restart": "vps:restart", "firewall.apply": "vps:firewall"}.get(row["action"], "vps:probe")
         self._actor(db, row["actor_id"], row["resource_id"], permission)
 
     @staticmethod

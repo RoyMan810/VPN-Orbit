@@ -261,7 +261,7 @@ def import_data(destination, members, claims, request, owner_id, bundle_sha256, 
             db.execute(f"DELETE FROM {table}")
         if claims["manifest"]["schema"] >= 3:
             db.execute("DELETE FROM change_plan_drafts")
-        if claims["manifest"]["schema"] in (2, 3, 4):
+        if claims["manifest"]["schema"] in (2, 3, 4, 5):
             queue = JobQueue(Store(path))
             last_id = ""
             while jobs := db.execute(

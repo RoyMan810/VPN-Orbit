@@ -30,7 +30,7 @@ def verify_rehearsal(directory):
     before, after = report.get("schema_before"), report.get("schema_after")
     if (type(report.get("v")) is not int or report["v"] != 1 or report.get("status") != "REHEARSAL_PASSED"
             or report.get("applied_to_source") is not False or report.get("live_apply") != "BLOCKED"
-            or type(before) is not int or type(after) is not int or before not in (1, 2, 3) or after != before + 1):
+            or type(before) is not int or type(after) is not int or before not in (1, 2, 3, 4) or after != before + 1):
         raise Denied("MIGRATION_REVIEW_REPORT_INVALID")
 
     deadline = time.monotonic() + 30

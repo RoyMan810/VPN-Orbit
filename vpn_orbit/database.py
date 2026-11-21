@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 _ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _SCHEMA = """
 CREATE TABLE users (
@@ -95,7 +95,7 @@ CREATE TABLE job_incidents (
 PRAGMA user_version = 2;
 """
 
-_PLAN_SCHEMA = """
+_PLAN_TABLE = """
 CREATE TABLE change_plan_drafts (
     id TEXT NOT NULL,
     revision INTEGER NOT NULL CHECK(revision >= 1),
@@ -109,31 +109,52 @@ CREATE TABLE change_plan_drafts (
 ) STRICT;
 CREATE INDEX change_plan_drafts_resource ON change_plan_drafts(resource_id, id);
 CREATE INDEX change_plan_drafts_hash ON change_plan_drafts(plan_hash);
-PRAGMA user_version = 3;
 """
 
+_PLAN_SCHEMA = _PLAN_TABLE + "PRAGMA user_version = 3;\n"
 
-_OPERATION_SCHEMA = """
+_JOBS_TABLE = _SCHEMA[_SCHEMA.index("CREATE TABLE jobs"):].removesuffix("PRAGMA user_version = 2;\n")
+
+
+def _with_jobs_actions(block, actions):
+    return block.replace("CHECK(action='host.probe')",
+                         "CHECK(action IN (" + ",".join(f"'{name}'" for name in actions) + "))")
+
+
+def _rebuild_jobs(actions):
+    return """
 ALTER TABLE request_keys RENAME TO old_request_keys;
 ALTER TABLE job_incidents RENAME TO old_job_incidents;
 ALTER TABLE jobs RENAME TO old_jobs;
 DROP INDEX job_queue;
 DROP INDEX jobs_resource_time;
-""" + _SCHEMA[_SCHEMA.index("CREATE TABLE jobs"):].removesuffix("PRAGMA user_version = 2;\n").replace(
-    "CHECK(action='host.probe')", "CHECK(action IN ('host.probe','docker.restart'))"
-) + """
+""" + _with_jobs_actions(_JOBS_TABLE, actions) + """
 INSERT INTO jobs SELECT * FROM old_jobs;
 INSERT INTO request_keys SELECT * FROM old_request_keys;
 INSERT INTO job_incidents SELECT * FROM old_job_incidents;
 DROP TABLE old_request_keys;
 DROP TABLE old_job_incidents;
 DROP TABLE old_jobs;
-PRAGMA user_version = 4;
+"""
+
+
+_OPERATION_SCHEMA = _rebuild_jobs(("host.probe", "docker.restart")) + "PRAGMA user_version = 4;\n"
+
+_FIREWALL_SCHEMA = _rebuild_jobs(("host.probe", "docker.restart", "firewall.apply")) + """
+ALTER TABLE change_plan_drafts RENAME TO old_change_plan_drafts;
+DROP INDEX change_plan_drafts_resource;
+DROP INDEX change_plan_drafts_hash;
+""" + _PLAN_TABLE.replace("CHECK(action = 'docker.restart')",
+                          "CHECK(action IN ('docker.restart','firewall.apply'))") + """
+INSERT INTO change_plan_drafts SELECT * FROM old_change_plan_drafts;
+DROP TABLE old_change_plan_drafts;
+PRAGMA user_version = 5;
 """
 
 
 def application_schema(version):
-    return _SCHEMA + (_PLAN_SCHEMA if version >= 3 else "") + (_OPERATION_SCHEMA if version >= 4 else "")
+    return (_SCHEMA + (_PLAN_SCHEMA if version >= 3 else "") + (_OPERATION_SCHEMA if version >= 4 else "")
+            + (_FIREWALL_SCHEMA if version >= 5 else ""))
 
 
 def canonical(value):
@@ -178,7 +199,7 @@ class Store:
 
     @classmethod
     def initialize(cls, path: Path, *, access: DataAccess | None = None, schema=SCHEMA_VERSION):
-        if type(schema) is not int or schema not in (2, 3, SCHEMA_VERSION):
+        if type(schema) is not int or schema not in (2, 3, 4, SCHEMA_VERSION):
             raise RuntimeError("DATABASE_CONTRACT_MISMATCH")
         store = cls(path, access=access)
         shared = store.access.shared_gid is not None
@@ -220,7 +241,7 @@ class Store:
             for name, expected in {"journal_mode": "wal", "synchronous": 2, "foreign_keys": 1, "busy_timeout": 5000,
                                    "user_version": 0 if initializing else SCHEMA_VERSION}.items():
                 actual = db.execute(f"PRAGMA {name}").fetchone()[0]
-                if actual != expected and not (name == "user_version" and not initializing and actual in (1, 2, 3)):
+                if actual != expected and not (name == "user_version" and not initializing and actual in (1, 2, 3, 4)):
                     raise RuntimeError("DATABASE_CONTRACT_MISMATCH")
             try:
                 yield db

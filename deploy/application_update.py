@@ -116,7 +116,7 @@ class ComposeServices:
 
 def migrate_database(store, plan, deadline):
     before, after = plan["schema_before"], plan["schema_after"]
-    if after not in (2, 3, 4) or after != before + 1:
+    if after not in (2, 3, 4, 5) or after != before + 1:
         raise Denied("MIGRATION_SCHEMA_UNSUPPORTED")
     script, new_tables = migration_script(after)
     expected = plan["source_rows_sha256"]

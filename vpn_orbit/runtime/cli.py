@@ -72,6 +72,7 @@ def run(config, command, *, once=False, listener=None, import_args=None):
                 "rotate-key": config["broker_uid"], "revoke-key": config["broker_uid"],
                 "pin-vault": config["broker_uid"], "seal-controller": config["broker_uid"],
                 "import-backup-key": config["broker_uid"], "import-restart-key": config["broker_uid"], "publish-controller": config["broker_uid"],
+                 "import-firewall-key": config["broker_uid"],
                 "recovery-import-key": config["broker_uid"], "recovery-revoke-key": config["broker_uid"],
                 "recovery-key-facts": config["broker_uid"],
                 "enrollment-catalog": 0, "register-observations": 0, "initialize-time-health": 0, "time-health": 0,
@@ -162,7 +163,9 @@ def run(config, command, *, once=False, listener=None, import_args=None):
                         Client(config["broker_socket"], server_uids={0, config["broker_uid"]}, timeout=40),
                         secret_refs={t.id: t.value["secret_ref"] for t in policy.targets.values()},
                         restart_refs={t.id: t.value["restart_secret_ref"] for t in policy.targets.values()
-                                      if "docker.restart" in t.value["capabilities"]})
+                                      if "docker.restart" in t.value["capabilities"]},
+                        firewall_refs={t.id: t.value["firewall_secret_ref"] for t in policy.targets.values()
+                                       if "firewall.apply" in t.value["capabilities"]})
         with worker_shutdown() as stop:
             return worker.run(once=once, stop=stop)
     managed_credential = "CREDENTIALS_DIRECTORY" in os.environ
@@ -216,7 +219,7 @@ def run(config, command, *, once=False, listener=None, import_args=None):
             target = policy.targets.get(import_args.target)
             scope = target.value if target and purpose in target.value["capabilities"] else {}
             consumer = config["worker_uid"]
-        ref_field = "restart_secret_ref" if purpose == "docker.restart" else "secret_ref"
+        ref_field = {"docker.restart": "restart_secret_ref", "firewall.apply": "firewall_secret_ref"}.get(purpose, "secret_ref")
         if (scope.get("id") != import_args.target
                 or scope.get("policy_revision") != import_args.policy_revision):
             raise Denied("SECRET_SCOPE_DENIED")
@@ -227,19 +230,21 @@ def run(config, command, *, once=False, listener=None, import_args=None):
                                        consumer_uid=consumer, policy_revision=import_args.policy_revision, key=key)
         print(replacement or "REVOKED")
         return
-    if command in {"import-key", "import-backup-key", "import-restart-key"}:
+    if command in {"import-key", "import-backup-key", "import-restart-key", "import-firewall-key"}:
         key = protected_bytes(import_args.key_file, owner=config["broker_uid"], maximum=8192, private=True)
         if command == "import-key":
             reference = vault.import_ssh(import_args.secret_id, import_args.version, key, owner_id=import_args.owner_id,
                                          worker_uid=config["worker_uid"], target=import_args.target, policy_revision=import_args.policy_revision)
-        elif command == "import-restart-key":
+        elif command in ("import-restart-key", "import-firewall-key"):
+            field = "restart_secret_ref" if command == "import-restart-key" else "firewall_secret_ref"
             target = policy.targets.get(import_args.target)
-            if (target is None or target.value.get("restart_secret_ref") != f"{import_args.secret_id}:v{import_args.version}"
+            if (target is None or target.value.get(field) != f"{import_args.secret_id}:v{import_args.version}"
                     or target.revision != import_args.policy_revision):
                 raise Denied("CAPABILITY_DISABLED")
-            reference = vault.import_restart_ssh(import_args.secret_id, import_args.version, key, owner_id=import_args.owner_id,
-                                                 worker_uid=config["worker_uid"], target=import_args.target,
-                                                 policy_revision=import_args.policy_revision)
+            import_key = vault.import_restart_ssh if command == "import-restart-key" else vault.import_firewall_ssh
+            reference = import_key(import_args.secret_id, import_args.version, key, owner_id=import_args.owner_id,
+                                   worker_uid=config["worker_uid"], target=import_args.target,
+                                   policy_revision=import_args.policy_revision)
         else:
             reference = vault.import_backup_ssh(import_args.secret_id, import_args.version, key, owner_id=import_args.owner_id,
                                                 broker_uid=config["broker_uid"], target=import_args.target, policy_revision=import_args.policy_revision)
@@ -274,9 +279,11 @@ def main(argv=None):
     key.add_argument("--policy-revision", type=int, default=1)
     commands.add_parser("import-restart-key", parents=[key], add_help=False,
                                       help="Provision a dedicated Docker restart credential")
+    commands.add_parser("import-firewall-key", parents=[key], add_help=False,
+                                      help="Provision a dedicated typed firewall credential")
     for name in ("rotate-key", "revoke-key"):
         lifecycle = commands.add_parser(name, help="Retire the exact credential selected by the protected target policy")
-        lifecycle.add_argument("--purpose", choices=("host.probe", "docker.restart", "backup.sftp"), required=True)
+        lifecycle.add_argument("--purpose", choices=("host.probe", "docker.restart", "firewall.apply", "backup.sftp"), required=True)
         lifecycle.add_argument("--target", required=True)
         lifecycle.add_argument("--reference", required=True)
         lifecycle.add_argument("--policy-revision", type=int, required=True)

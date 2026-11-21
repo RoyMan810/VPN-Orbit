@@ -2,7 +2,7 @@
 
 from datetime import datetime
 import hashlib
-from ipaddress import ip_address
+from ipaddress import ip_address, ip_network
 import json
 import re
 
@@ -14,6 +14,51 @@ ULID = r"[0-7][0-9A-HJKMNP-TV-Z]{25}"
 SHA256 = r"[0-9a-f]{64}"
 BOOT_ID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
 DOCKER_STARTED_AT = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z"
+
+
+MAX_FIREWALL_RULES = 32
+
+
+def firewall_rules(value):
+    """Validate the complete typed rule set. No free-form nftables is accepted."""
+    if not isinstance(value, list) or not 1 <= len(value) <= MAX_FIREWALL_RULES:
+        raise Denied("FIREWALL_RULES_INVALID")
+    seen = set()
+    for rule in value:
+        fields(rule, ("action", "direction", "protocol", "port", "cidr"))
+        if rule["action"] not in ("allow", "deny") or rule["direction"] not in ("in", "out"):
+            raise Denied("FIREWALL_RULES_INVALID")
+        if rule["protocol"] not in ("tcp", "udp"):
+            raise Denied("FIREWALL_RULES_INVALID")
+        integer(rule["port"], 1, 65535)
+        cidr = rule["cidr"]
+        if not isinstance(cidr, str) or "%" in cidr:
+            raise Denied("FIREWALL_RULES_INVALID")
+        try:
+            parsed = ip_network(cidr, strict=True)
+        except ValueError:
+            raise Denied("FIREWALL_RULES_INVALID") from None
+        if str(parsed) != cidr:
+            raise Denied("FIREWALL_RULES_INVALID")
+        identity = (rule["action"], rule["direction"], rule["protocol"], rule["port"], cidr)
+        if identity in seen:
+            raise Denied("FIREWALL_RULES_INVALID")
+        seen.add(identity)
+    return value
+
+
+def firewall_payload(value):
+    fields(value, ("operation_id", "rules_digest", "rules", "ssh_port"))
+    text(value["operation_id"], ULID)
+    text(value["rules_digest"], SHA256)
+    rules = firewall_rules(value["rules"])
+    if checksum(rules) != value["rules_digest"]:
+        raise Denied("FIREWALL_RULES_INVALID")
+    integer(value["ssh_port"], 1, 65535)
+    if not any(rule["action"] == "allow" and rule["direction"] == "in" and rule["protocol"] == "tcp"
+               and rule["port"] == value["ssh_port"] for rule in rules):
+        raise Denied("FIREWALL_SSH_RULE_REQUIRED")
+    return value
 
 
 def restart_payload(value):

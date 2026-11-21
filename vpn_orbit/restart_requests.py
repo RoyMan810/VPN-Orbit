@@ -141,7 +141,7 @@ class RestartOperations:
     def recover_legacy_requests(self):
         # Requests from schema 3 lived only in audit. Never send them from the new queue.
         with self.store.write(kind="control") as db:
-            if db.execute("PRAGMA user_version").fetchone()[0] != 4:
+            if db.execute("PRAGMA user_version").fetchone()[0] not in (4, 5):
                 return
             for row in db.execute("""SELECT a.* FROM audit a WHERE a.event=?
                 AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.id=json_extract(a.details,'$.operation_id'))
@@ -208,7 +208,7 @@ class RestartOperations:
 
     def reconcile_pending(self):
         with self.store.write(kind="dispatch") as db:
-            if db.execute("PRAGMA user_version").fetchone()[0] not in (3, 4):
+            if db.execute("PRAGMA user_version").fetchone()[0] not in (3, 4, 5):
                 return False
             row = self.pending_reconciliation(db)
         return self.reconcile_one(row) if row is not None else False

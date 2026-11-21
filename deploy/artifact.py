@@ -149,7 +149,7 @@ def manifest(bundle, key=None, *, expected_sha256=None, allow_development=False)
             or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+\.dev[0-9]+", value["version"]) is None
             or value.get("application") != "VPN-Orbit" or value.get("platform") != "ubuntu-24.04-amd64"
             or value.get("python") not in ("3.13", "3.15") or type(value.get("sqlite_schema")) is not int
-            or value["sqlite_schema"] not in (2, 3, 4)
+            or value["sqlite_schema"] not in (2, 3, 4, 5)
             or value.get("remote_mutation_enabled") is not False or value.get("channel") != "development"
             or not isinstance(value.get("source_commit"), str)
             or re.fullmatch(r"[0-9a-f]{40}", value["source_commit"]) is None
