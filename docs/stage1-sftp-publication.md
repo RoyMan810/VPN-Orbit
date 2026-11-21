@@ -54,7 +54,7 @@ Contract tests вводят corruption, ENOSPC, lost final ACK, revoked credenti
 
 [Rescue data import](stage1-rescue.md) реализует preflight, одноразовый challenge, exact Owner digest/auth; [recovery installer](stage1-recovery-installation.md) запускает из этих данных службы в READ_ONLY_RECOVERY. Publication transport не открывает update/migration.
 
-[Проверка перед миграцией](stage1-migrations.md#предварительная-проверка-controllerbackup-для-рабочей-миграции) сверяет скачанный комплект с квитанцией и подписанным снимком. Для скачивания используйте отдельный доступ для восстановления.
+Проверка опубликованного комплекта выполняется отдельной процедурой восстановления; она не входит в первую версию. Для скачивания используйте отдельный доступ для восстановления.
 
 ### Ручное освобождение локальной копии
 
