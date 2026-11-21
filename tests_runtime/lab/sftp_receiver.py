@@ -12,6 +12,11 @@ import subprocess
 import time
 
 
+NAMESPACE = "vpn-orbit-sftp-lab"
+HOST_LINK = "vo-sftp-host"
+PEER_LINK = "vo-sftp-peer"
+
+
 def run(*args, check=True):
     value = subprocess.run([str(x) for x in args], capture_output=True, timeout=20)
     if check and value.returncode:
@@ -62,7 +67,7 @@ def receiver(root, public_key):
     base = root / "sftp-receiver"
     base.mkdir(mode=0o755)
     base.chmod(0o755)
-    namespace, link, peer = "vpn-orbit-sftp-lab", "vpn-orbit-sftp-host", "vpn-orbit-sftp-peer"
+    namespace, link, peer = NAMESPACE, HOST_LINK, PEER_LINK
     if namespace in run("/usr/sbin/ip", "netns", "list").stdout.decode():
         raise RuntimeError("SFTP fixture namespace already exists")
     account = "vpn-orbit-sftp-" + secrets.token_hex(3)
