@@ -18,7 +18,11 @@ class Capability:
 
 
 # New adapters enter this registry only after their preconditions/effect bounds are implemented.
-CAPABILITIES = {"host.probe": Capability(False, "vps:probe"), "docker.restart": Capability(True, "vps:restart")}
+CAPABILITIES = {
+    "host.probe": Capability(False, "vps:probe"),
+    "docker.restart": Capability(True, "vps:restart"),
+    "firewall.apply": Capability(True, "vps:firewall"),
+}
 
 
 @dataclass(frozen=True)
@@ -28,8 +32,9 @@ class Target:
     @classmethod
     def parse(cls, value):
         base = ("id", "ip", "port", "allowed_cidrs", "host_key", "secret_ref", "policy_revision", "dependencies", "capabilities")
-        extended = isinstance(value, dict) and "restart_secret_ref" in value
-        fields(value, base + (("restart_secret_ref",) if extended else ()))
+        optional = ("restart_secret_ref", "firewall_secret_ref")
+        present = tuple(name for name in optional if isinstance(value, dict) and name in value)
+        fields(value, base + present)
         text(value["id"], ULID)
         text(value["secret_ref"], ULID + r":v[1-9][0-9]{0,8}")
         integer(value["port"], 1, 65535)
@@ -57,12 +62,14 @@ class Target:
                 or any(not isinstance(v, str) or v not in CAPABILITIES for v in value["capabilities"])
                 or len(set(value["capabilities"])) != len(value["capabilities"])):
             raise Denied("CAPABILITY_DISABLED")
-        if ("docker.restart" in value["capabilities"]) != extended:
-            raise Denied("CAPABILITY_DISABLED")
-        if extended:
-            text(value["restart_secret_ref"], ULID + r":v[1-9][0-9]{0,8}")
-            if value["restart_secret_ref"].split(":")[0] == value["secret_ref"].split(":")[0]:
+        for capability, name in (("docker.restart", "restart_secret_ref"), ("firewall.apply", "firewall_secret_ref")):
+            if (capability in value["capabilities"]) != (name in value):
                 raise Denied("CAPABILITY_DISABLED")
+            if name in value:
+                text(value[name], ULID + r":v[1-9][0-9]{0,8}")
+        identifiers = [value[name].split(":")[0] for name in ("secret_ref", *optional) if name in value]
+        if len(identifiers) != len(set(identifiers)):
+            raise Denied("CAPABILITY_DISABLED")
         return cls(value)
 
     @property

@@ -14,7 +14,7 @@ from nacl.signing import SigningKey, VerifyKey
 
 from ..errors import Denied
 from . import policy as policy_module
-from .protocol import SHA256, ULID, canonical, checksum, fields, integer, restart_payload, text
+from .protocol import SHA256, ULID, canonical, checksum, fields, firewall_payload, integer, restart_payload, text
 from .storage import Journal, new_private_file, protected_bytes
 from .timehealth import ANCHOR_FIELDS, TimeHealth
 
@@ -44,6 +44,8 @@ def verify_permit(permit, verify_key, *, now):
     extras = ("time_anchor",) if value.get("mutating") is True else ()
     if value.get("capability") == "docker.restart":
         extras += ("restart",)
+    if value.get("capability") == "firewall.apply":
+        extras += ("firewall",)
     claims = fields(value, (*_BINDING_FIELDS, "v", "authority_id", "epoch", "nonce", "issued_at",
                             "expires_at", "lock_closure_digest", "mutating", *extras))
     if type(claims["v"]) is not int or claims["v"] != 1 or type(claims["mutating"]) is not bool:
@@ -162,13 +164,17 @@ class Authority:
         name = request.get("capability") if isinstance(request, dict) else None
         capability = policy_module.CAPABILITIES.get(name) if isinstance(name, str) else None
         anchored = capability is not None and capability.mutating
-        if name == "docker.restart":
+        if name in ("docker.restart", "firewall.apply"):
             target_id = request.get("target")
             target = self.policy.targets.get(target_id) if isinstance(target_id, str) else None
             if target is None or name not in target.value["capabilities"]:
                 raise Denied("CAPABILITY_DISABLED")
-        fields(request, (*_BINDING_FIELDS, *(("time_anchor",) if anchored else ()), *(("restart",) if name == "docker.restart" else ())))
+        fields(request, (*_BINDING_FIELDS, *(("time_anchor",) if anchored else ()),
+                         *(("restart",) if name == "docker.restart" else ()),
+                         *(("firewall",) if name == "firewall.apply" else ())))
         if name == "docker.restart" and restart_payload(request["restart"])["operation_id"] != request["job_id"]:
+            raise Denied("PERMIT_BINDING_INVALID")
+        if name == "firewall.apply" and firewall_payload(request["firewall"])["operation_id"] != request["job_id"]:
             raise Denied("PERMIT_BINDING_INVALID")
         for key in ("job_id", "plan_id", "actor_id", "target"):
             text(request[key], ULID)
@@ -184,12 +190,12 @@ class Authority:
                 raise Denied("GATE_CLOSED")
             if self.recovery_authorization and (mutating or target.id not in self.recovery_authorization["allowed_targets"]):
                 raise Denied("TARGET_QUARANTINED")
+            if db.execute("SELECT 1 FROM attempts WHERE job_id=?", (request["job_id"],)).fetchone():
+                raise Denied("OPERATION_ALREADY_ADMITTED")
             if mutating and db.execute("SELECT 1 FROM incidents").fetchone():
                 raise Denied("OPEN_INCIDENT")
             if mutating and db.execute("SELECT 1 FROM attempts WHERE mutating=1 AND state IN ('ISSUED','DISPATCHING','UNKNOWN_OUTCOME')").fetchone():
                 raise Denied("REMOTE_PERMIT_HELD")
-            if db.execute("SELECT 1 FROM attempts WHERE job_id=?", (request["job_id"],)).fetchone():
-                raise Denied("OPERATION_ALREADY_ADMITTED")
             if mutating:
                 self._time_anchor(request["time_anchor"], request["plan_id"], request["revision"], gate["instance_id"])
             now = int(self.clock())
@@ -260,6 +266,34 @@ class Authority:
                 raise Denied("ATTEMPT_NOT_CANCELLABLE")
         return self.status(request["job_id"])
 
+    def reconcile_firewall(self, request):
+        """Only Broker may close a firewall incident after pinned remote readback."""
+        fields(request, ("job_id", "nonce", "rules_digest", "state"))
+        text(request["job_id"], ULID)
+        text(request["nonce"], SHA256)
+        text(request["rules_digest"], SHA256)
+        if request["state"] not in ("CONFIRMED", "ROLLED_BACK"):
+            raise Denied("FIREWALL_RECONCILIATION_UNVERIFIED")
+        resolved = "RECONCILED_SUCCEEDED" if request["state"] == "CONFIRMED" else "RECONCILED_FAILED"
+        with self.journal.write(kind="control") as db:
+            gate = self._gate(db)
+            row = db.execute("SELECT * FROM attempts WHERE job_id=? AND nonce=?",
+                             (request["job_id"], request["nonce"])).fetchone()
+            claims = json.loads(row["claims"]) if row is not None else {}
+            if (claims.get("capability") != "firewall.apply"
+                    or claims.get("firewall", {}).get("rules_digest") != request["rules_digest"]
+                    or row["state"] not in ("UNKNOWN_OUTCOME", resolved)):
+                raise Denied("FIREWALL_RECONCILIATION_UNVERIFIED")
+            db.execute("UPDATE attempts SET state=? WHERE job_id=?", (resolved, request["job_id"]))
+            db.execute("DELETE FROM incidents WHERE job_id=?", (request["job_id"],))
+            # A recovered authority stays fenced for unrelated incidents/updates.
+            if (gate["state"] == "RECOVERY_HOLD" and gate["activated"] and gate["update_ticket"] is None
+                    and not self.recovery_authorization
+                    and not db.execute("SELECT 1 FROM incidents").fetchone()
+                    and not db.execute("SELECT 1 FROM attempts WHERE mutating=1 AND state IN ('ISSUED','DISPATCHING','UNKNOWN_OUTCOME')").fetchone()):
+                db.execute("UPDATE gate SET state='NORMAL' WHERE id=1")
+        return self.status(request["job_id"])
+
     def update(self, operation, request):
         failed_time = False
         with self.journal.write(kind="business" if operation == "update.quiesce" else "control") as db:
@@ -320,6 +354,8 @@ class Authority:
             return self.consume(payload)
         if role == "broker" and operation == "attempt.complete":
             return self.complete(payload)
+        if role == "broker" and operation == "firewall.reconcile":
+            return self.reconcile_firewall(payload)
         if role in ("worker", "broker") and operation == "permit.cancel":
             return self.cancel(payload)
         if role in ("worker", "broker", "updater") and operation == "attempt.status":

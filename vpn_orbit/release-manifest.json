@@ -2,8 +2,22 @@
   "application": "VPN-Orbit",
   "version": "0.1.0.dev1",
   "channel": "development",
-  "sqlite_schema": 4,
-  "sqlite_compatibility": {"authentication": [1, 2, 3, 4], "observation_queue": [2, 3, 4]},
+  "sqlite_schema": 5,
+  "sqlite_compatibility": {
+    "authentication": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "observation_queue": [
+      2,
+      3,
+      4,
+      5
+    ]
+  },
   "password_profile": {
     "version": 1,
     "algorithm": "argon2id",
@@ -13,6 +27,10 @@
     "hash_len": 32,
     "salt_len": 16
   },
-  "capabilities": ["owner_auth", "scoped_rbac", "sqlite_audit_outbox"],
+  "capabilities": [
+    "owner_auth",
+    "scoped_rbac",
+    "sqlite_audit_outbox"
+  ],
   "remote_mutation_enabled": false
 }

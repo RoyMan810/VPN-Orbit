@@ -8,7 +8,7 @@ import time
 import asyncssh
 
 from ..errors import Denied
-from .protocol import canonical, decode, docker_summary, fields, integer, restart_payload, software_summary, text
+from .protocol import SHA256, ULID, canonical, decode, docker_summary, fields, firewall_payload, integer, restart_payload, software_summary, text
 from .storage import new_private_file, protected_bytes
 
 
@@ -133,6 +133,141 @@ def restart(target, private_key, known_hosts, request):
         return asyncio.run(asyncio.wait_for(exchange_restart(target, validate_private_key(private_key), known_hosts, request), 32))
     except (asyncssh.Error, OSError, TimeoutError):
         raise Denied("SSH_RESTART_UNCONFIRMED") from None
+
+
+FIREWALL_USER = "vpn-orbit-firewall"
+FIREWALL_OUTCOMES = {"SUCCEEDED": 0, "DENIED": 65, "UNKNOWN_OUTCOME": 70}
+FIREWALL_STATES = ("ARMED", "CONFIRMED", "ROLLED_BACK", "ROLLBACK_FAILED", "ABSENT")
+
+
+def firewall_reply(value, exit_status):
+    if not isinstance(value, dict) or not {"outcome", "code"} <= value.keys():
+        raise Denied("SSH_FIREWALL_REPLY_INVALID")
+    allowed = {"outcome", "code", "state", "rules_digest"}
+    if not value.keys() <= allowed:
+        raise Denied("SSH_FIREWALL_REPLY_INVALID")
+    if not isinstance(value["outcome"], str) or FIREWALL_OUTCOMES.get(value["outcome"]) != exit_status:
+        raise Denied("SSH_FIREWALL_REPLY_INVALID")
+    text(value["code"], r"[A-Z][A-Z0-9_]{1,63}")
+    if "state" in value and value["state"] not in FIREWALL_STATES:
+        raise Denied("SSH_FIREWALL_REPLY_INVALID")
+    if "rules_digest" in value:
+        text(value["rules_digest"], r"[0-9a-f]{64}")
+    if value["outcome"] == "SUCCEEDED":
+        requirements = {
+            "FIREWALL_APPLIED": ("ARMED", True),
+            "FIREWALL_ALREADY_APPLIED": (("ARMED", "CONFIRMED"), True),
+            "FIREWALL_CONFIRMED": ("CONFIRMED", False),
+            "FIREWALL_ALREADY_CONFIRMED": ("CONFIRMED", False),
+            "FIREWALL_ROLLED_BACK": ("ROLLED_BACK", False),
+            "FIREWALL_ALREADY_ROLLED_BACK": ("ROLLED_BACK", False),
+            "FIREWALL_STATUS": (FIREWALL_STATES, False),
+        }
+        requirement = requirements.get(value["code"])
+        if requirement is None:
+            raise Denied("SSH_FIREWALL_REPLY_INVALID")
+        expected_state, digest_required = requirement
+        if "state" not in value or (value["state"] not in expected_state
+                                     if isinstance(expected_state, tuple)
+                                     else value["state"] != expected_state):
+            raise Denied("SSH_FIREWALL_REPLY_INVALID")
+        if digest_required and "rules_digest" not in value:
+            raise Denied("SSH_FIREWALL_REPLY_INVALID")
+    return value
+
+
+async def exchange_firewall(target, key, known_hosts, request):
+    connection = await connect(target, key, known_hosts, FIREWALL_USER)
+    try:
+        process = await connection.create_process("vpn-orbit.v1.firewall", input=canonical(request) + b"\n",
+                                                  encoding=None, request_pty=False)
+        output, error, _ = await asyncio.gather(
+            bounded_read(process.stdout, 8192), bounded_read(process.stderr, 2048), process.wait_closed())
+        if error:
+            raise Denied("SSH_FIREWALL_REPLY_INVALID")
+        value = decode(output.rstrip(b"\n"), canonical_required=False)
+        return firewall_reply(value, process.exit_status)
+    finally:
+        connection.abort()
+
+
+def _firewall_request(operation, payload):
+    if operation == "apply":
+        firewall_payload(payload)
+        return {"operation": "apply", **payload}
+    if operation == "confirm":
+        fields(payload, ("operation_id", "rules_digest"))
+        text(payload["operation_id"], ULID)
+        text(payload["rules_digest"], SHA256)
+        return {"operation": "confirm", **payload}
+    if operation in ("rollback", "status"):
+        fields(payload, ("operation_id",))
+        text(payload["operation_id"], ULID)
+        return {"operation": operation, **payload}
+    raise Denied("RPC_INVALID_REQUEST")
+
+
+def _firewall_call(target, private_key, known_hosts, request, *, timeout, code):
+    try:
+        return asyncio.run(asyncio.wait_for(
+            exchange_firewall(target, validate_private_key(private_key), known_hosts, request), timeout))
+    except (asyncssh.Error, OSError, TimeoutError):
+        raise Denied(code) from None
+
+
+def firewall(target, private_key, known_hosts, payload):
+    return _firewall_call(target, private_key, known_hosts, _firewall_request("apply", payload),
+                          timeout=90, code="SSH_FIREWALL_UNCONFIRMED")
+
+
+def firewall_control(target, private_key, known_hosts, operation, payload):
+    return _firewall_call(target, private_key, known_hosts, _firewall_request(operation, payload),
+                          timeout=30, code="SSH_FIREWALL_CONTROL_UNCONFIRMED")
+
+
+def firewall_status(target, private_key, known_hosts, operation_id):
+    return firewall_control(target, private_key, known_hosts, "status", {"operation_id": operation_id})
+
+
+def apply_firewall(target, private_key, known_hosts, payload):
+    """Apply, prove a fresh SSH connection, then confirm or roll back.
+
+    Confirmation and rollback are separate SSH connections. The remote helper
+    also arms an independent host-local timer, so a lost Controller reply can
+    never leave an unconfirmed ruleset installed.
+    """
+    reply = firewall(target, private_key, known_hosts, payload)
+    if reply["outcome"] != "SUCCEEDED":
+        return reply
+    if reply.get("rules_digest") != payload["rules_digest"]:
+        return {"outcome": "UNKNOWN_OUTCOME", "code": "FIREWALL_REPLY_DIGEST_MISMATCH"}
+    operation = payload["operation_id"]
+    if reply.get("state") == "CONFIRMED":
+        return {"outcome": "SUCCEEDED", "code": "FIREWALL_ALREADY_CONFIRMED"}
+    try:
+        status = firewall_status(target, private_key, known_hosts, operation)
+    except Denied:
+        status = None
+    if status is not None and status.get("rules_digest") != payload["rules_digest"]:
+        status = None
+    if status is not None and status.get("outcome") == "SUCCEEDED" and status.get("state") == "CONFIRMED":
+        return {"outcome": "SUCCEEDED", "code": "FIREWALL_ALREADY_CONFIRMED"}
+    if status is None or status.get("outcome") != "SUCCEEDED" or status.get("state") != "ARMED":
+        try:
+            rolled = firewall_control(target, private_key, known_hosts, "rollback", {"operation_id": operation})
+        except Denied:
+            rolled = None
+        if rolled is not None and rolled.get("outcome") == "SUCCEEDED" and rolled.get("state") == "ROLLED_BACK":
+            return {"outcome": "FAILED", "code": "FIREWALL_SSH_UNCONFIRMED_ROLLED_BACK"}
+        return {"outcome": "UNKNOWN_OUTCOME", "code": "FIREWALL_SSH_UNCONFIRMED"}
+    try:
+        confirmed = firewall_control(target, private_key, known_hosts, "confirm",
+                                     {"operation_id": operation, "rules_digest": payload["rules_digest"]})
+    except Denied:
+        return {"outcome": "UNKNOWN_OUTCOME", "code": "FIREWALL_CONFIRM_UNCONFIRMED"}
+    if confirmed.get("outcome") != "SUCCEEDED" or confirmed.get("state") != "CONFIRMED":
+        return {"outcome": "UNKNOWN_OUTCOME", "code": "FIREWALL_CONFIRM_UNCONFIRMED"}
+    return {"outcome": "SUCCEEDED", "code": confirmed["code"]}
 
 
 def parse_probe(output, version, *, now):

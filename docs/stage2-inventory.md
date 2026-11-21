@@ -204,3 +204,45 @@ SSH probe v8 сохраняет точное значение `StartedAt` от D
 7. На чистом Controller отдельно сохраните, проверьте и опубликуйте ControllerBackup через защищённый SFTP. Зафиксируйте результаты обоих сценариев отдельно от CI.
 
 Без `--targets` development-установка загружает пустую политику. Перезапуск включается только для явно сконфигурированного тестового хоста с отдельным ключом. После восстановления Controller доступ к Docker restart заблокирован.
+
+## План firewall
+
+Firewall управляется только отдельным typed capability `firewall.apply`. Произвольные
+`nft`, shell и другие команды через API, Worker, Broker или SSH-профиль не принимаются.
+Для цели требуется отдельный `firewall_secret_ref`, отдельный SSH account
+`vpn-orbit-firewall` и ForceCommand `firewall-gateway`; этот ключ не используется для
+probe или других изменений.
+
+Порядок операции фиксирован:
+
+1. Создайте `POST /api/v1/resources/{resource_id}/firewall-drafts` с полным набором
+   typed rules и SSH-портом. Набор обязан содержать входящий TCP allow для SSH.
+2. Получите diff через `GET /api/v1/change-plans/{id}/firewall-preview` и повторно
+   проверьте baseline, scope и policy revision.
+3. Владелец выполняет повторную аутентификацию и вызывает
+   `POST /api/v1/change-plans/{id}/firewall-approval`.
+4. Только после approval вызовите
+   `POST /api/v1/change-plans/{id}/firewall-execution-requests`. Worker перед
+   dispatch повторяет проверки и выдаёт Authority permit на точный digest правил.
+5. Remote helper сверяет digest предыдущих управляемых правил, сохраняет их и
+   включает host-local systemd rollback timer до применения. Если таймер недоступен,
+   изменение запрещено. Таблица заменяется одной атомарной транзакцией nftables;
+   IPv4 и IPv6 обрабатываются раздельно. После применения Broker
+   открывает новое SSH-соединение, проверяет состояние и только затем подтверждает
+   операцию. При неуспешной проверке выполняется rollback.
+6. Потеря ответа после возможного применения возвращает `UNKNOWN_OUTCOME`. Такая
+   операция сохраняется в Audit/Outbox и блокирует следующие mutating firewall
+   операции до сверки через
+   `POST /api/v1/change-plans/{id}/firewall-execution-requests/{operation_id}/reconciliations/{attempt}`.
+   Исходный `UNKNOWN_OUTCOME` не переписывается в успех.
+
+`GET /api/v1/change-plans/{id}/firewall-timeline` показывает только нормализованную
+хронологию операции. Автоматический rollback не зависит от доступности Controller:
+таймер работает на VPS и повторяет откат при временном отказе. Deadline использует
+монотонные часы с привязкой к boot ID. Подтверждение требует совпадения фактической
+таблицы; неизвестный или изменённый baseline отклоняется до применения.
+Проверка на disposable стенде включает typed-payload, новое SSH-соединение,
+реальные nftables-правила, потерю Controller, SIGKILL и reconciliation fencing.
+Сверка подтверждённого remote receipt закрывает блокировку Authority и application
+incident, сохраняя исходный Job `UNKNOWN_OUTCOME`. Подготовка VPS поддерживает профиль через
+`tools/prepare_vps.py --firewall`.
