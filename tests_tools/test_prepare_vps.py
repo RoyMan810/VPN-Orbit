@@ -147,6 +147,70 @@ class PrepareVpsTests(unittest.TestCase):
                          prepare_vps.FIREWALL_POLICY, prepare_vps.FIREWALL_HOME):
             self.assertIn(artifact, cleanup)
         self.assertIn("account-created-$account", cleanup)
+        self.assertIn("created-probe-authorized", prepare_vps.PHASE_SCRIPTS["keys"](context))
+        self.assertIn("created-helper-ssh-gateway", prepare_vps.PHASE_SCRIPTS["helpers"](context))
+        self.assertIn("created-probe-sudoers", prepare_vps.PHASE_SCRIPTS["sudoers"](context))
+        self.assertIn("created-sshd-config", prepare_vps.PHASE_SCRIPTS["sshd"](context))
+
+    def test_cleanup_journal_requires_exact_target_identity(self):
+        journal = {
+            "version": 1,
+            "host": "192.0.2.20",
+            "port": 2222,
+            "user": "admin",
+            "fingerprint": "SHA256:" + "A" * 43,
+            "phases": {phase: "DONE" for phase in prepare_vps.PHASES},
+        }
+        prepare_vps.cleanup_journal(
+            journal, host="192.0.2.20", port=2222, user="admin",
+            fingerprint="SHA256:" + "A" * 43,
+        )
+        for field, value in (("host", "192.0.2.21"), ("port", 22), ("user", "other"),
+                             ("fingerprint", "SHA256:" + "B" * 43)):
+            with self.subTest(field=field):
+                requested = {
+                    "host": "192.0.2.20", "port": 2222, "user": "admin",
+                    "fingerprint": "SHA256:" + "A" * 43,
+                }
+                requested[field] = value
+                with self.assertRaisesRegex(ValueError, "different VPS"):
+                    prepare_vps.cleanup_journal(journal, **requested)
+        with self.assertRaisesRegex(ValueError, "No provisioning state"):
+            prepare_vps.cleanup_journal(
+                None, host="192.0.2.20", port=2222, user="admin",
+                fingerprint="SHA256:" + "A" * 43,
+            )
+
+    def test_cleanup_script_removes_only_owned_files_and_directories(self):
+        cleanup = prepare_vps.cleanup_script()
+        self.assertIn('if [ -f "$STATE/created-$marker" ]; then', cleanup)
+        self.assertIn("$STATE/preexisting-sshd-config", cleanup)
+        self.assertNotIn(f"rm -f -- {prepare_vps.AUTHORIZED} {prepare_vps.SUDOERS}", cleanup)
+        self.assertIn("dir-libexec", cleanup)
+
+    def test_cli_cleanup_rejects_mismatched_state_before_host_probe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "managed"
+            output.mkdir(mode=0o700)
+            prepare_vps.State(output / prepare_vps.STATE_FILE).save({
+                "version": 1,
+                "host": "192.0.2.20",
+                "port": 2222,
+                "user": "admin",
+                "fingerprint": "SHA256:" + "A" * 43,
+                "phases": {phase: "DONE" for phase in prepare_vps.PHASES},
+                "status": "VERIFIED",
+                "attempts": 1,
+                "created_at": 1,
+            })
+            argv = ["prepare_vps.py", "--host", "192.0.2.21", "--port", "2222",
+                    "--user", "admin", "--fingerprint", "SHA256:" + "A" * 43,
+                    "--output", str(output), "--cleanup"]
+            with patch("sys.argv", argv), patch.object(prepare_vps, "identify_host") as identify:
+                with self.assertRaises(SystemExit) as error:
+                    prepare_vps.main()
+            self.assertEqual(error.exception.code, 1)
+            identify.assert_not_called()
 
     def test_retry_after_ssh_disconnect_during_account_repairs_without_duplicating(self):
         with tempfile.TemporaryDirectory() as tmp:
