@@ -39,7 +39,7 @@ sudo ./VPN-Orbit/install --public-domain orbit.example.org
 
 Режим `--public-domain` проверяет сертификат и ключ до установки. Nginx слушает IPv4 TCP 443, а API остаётся на `127.0.0.1:18080`. Начальный Owner создаётся локально на VPS. Для продления через standalone TCP 80 должен быть доступен Certbot. Deploy hook перезапускает выделенный Nginx, чтобы systemd перечитал сертификат и ключ. Системный Nginx и занятые порты требуют отдельного согласования конфигурации.
 
-Для завершённого локального Rescue import доступен отдельный [recovery installation](stage1-recovery-installation.md) через `--recovery-state`; он сохраняет READ_ONLY_RECOVERY и не открывает повторный Owner bootstrap.
+Recovery installation и восстановление старого Controller не входят в первую версию.
 
 Постоянные родительские каталоги установки (`/opt`, `/etc`, `/var/lib`, `/run` и их ancestors) должны принадлежать root и не допускать group/other write. Preflight отказывает с `INSTALLATION_PARENT_UNTRUSTED` до создания состояния и не меняет права чужих системных каталогов. Disposable CI fixture отдельно проверяет отказ на `/opt` 0777, затем готовит защищённый профиль 0755 только в своей временной VM.
 

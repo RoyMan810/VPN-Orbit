@@ -73,8 +73,6 @@ def run(config, command, *, once=False, listener=None, import_args=None):
                 "pin-vault": config["broker_uid"], "seal-controller": config["broker_uid"],
                 "import-backup-key": config["broker_uid"], "import-restart-key": config["broker_uid"], "publish-controller": config["broker_uid"],
                  "import-firewall-key": config["broker_uid"],
-                "recovery-import-key": config["broker_uid"], "recovery-revoke-key": config["broker_uid"],
-                "recovery-key-facts": config["broker_uid"],
                 "enrollment-catalog": 0, "register-observations": 0, "initialize-time-health": 0, "time-health": 0,
                 "initialize-credential": 0, "initialize-writers": 0}[command]
     if os.geteuid() != expected:
@@ -176,21 +174,6 @@ def run(config, command, *, once=False, listener=None, import_args=None):
         Broker.initialize(config["broker_directory"], policy)
         return
     vault = Vault(config["vault_directory"], credential, systemd_credential=managed_credential, writers=writers)
-    if command.startswith("recovery-"):
-        from .recovery_keys import recovery_only, key_facts, provision
-        recovery_only(config, writers)
-        recovery_lock = Path(config["vault_directory"]) / "recovery.lock"
-        if not os.path.lexists(recovery_lock):
-            new_private_file(recovery_lock, b"")
-        if command == "recovery-key-facts":
-            value = fields(decode(sys.stdin.buffer.read(16385)), ("v", "targets"))
-            if type(value["v"]) is not int or value["v"] != 1:
-                raise Denied("RECOVERY_POLICY_SCOPE_CHANGED")
-            print(json.dumps(key_facts(vault, policy, Policy(value["targets"]), config["worker_uid"])))
-        else:
-            with process_lock(Path(config["vault_directory"]) / "recovery.lock"):
-                print(provision(vault, policy, import_args, config))
-        return
     if command == "publish-controller":
         from .publication import receive_and_publish
         print(json.dumps(receive_and_publish(config, import_args.snapshot_id, sys.stdin.buffer, verify_only=import_args.verify_only)))
@@ -289,14 +272,6 @@ def main(argv=None):
         lifecycle.add_argument("--policy-revision", type=int, required=True)
         if name == "rotate-key":
             lifecycle.add_argument("--key-file", type=Path, required=True)
-    recovered = commands.add_parser("recovery-import-key", help="Broker-local control provisioning in READ_ONLY_RECOVERY only")
-    for name in ("key-file", "secret-id", "owner-id", "target"):
-        recovered.add_argument("--" + name, required=True)
-    recovered.add_argument("--version", type=int, required=True)
-    recovered.add_argument("--policy-revision", type=int, required=True)
-    revoked = commands.add_parser("recovery-revoke-key", help="Revoke the current protected target ref during local recovery")
-    revoked.add_argument("--target", required=True)
-    commands.add_parser("recovery-key-facts", help="Internal bounded public fingerprint verification; never secret export")
     backup_key = commands.add_parser("import-backup-key", help="Broker-local SFTP-only credential provisioning")
     backup_key.add_argument("--key-file", type=Path, required=True)
     backup_key.add_argument("--secret-id", required=True)
