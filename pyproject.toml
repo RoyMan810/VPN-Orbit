@@ -23,7 +23,7 @@ include = ["vpn_orbit*"]
 vpn_orbit = ["release-manifest.json", "schema_v1.sql"]
 
 [tool.ruff]
-required-version = "==0.17.4"
+required-version = "==0.17.5"
 target-version = "py313"
 
 [tool.ruff.lint]
