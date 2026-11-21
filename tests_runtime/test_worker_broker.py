@@ -261,6 +261,44 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(self.authority.status(queued["id"])["state"], "CANCELLED_SAFE")
         self.assertEqual(self.executions, [])
 
+    def test_broker_recovery_persists_authority_receipts_for_reconciliation(self):
+        class RecoveryGate:
+            def __init__(self, state):
+                self.state = state
+                self.calls = []
+
+            def call(self, operation, payload):
+                self.calls.append((operation, payload))
+                if operation == "permit.cancel":
+                    return {**self.state, "state": "CANCELLED_SAFE", "result_code": "CANCELLED_BEFORE_DISPATCH"}
+                return self.state
+
+        for initial_state in ("ISSUED", "UNKNOWN_OUTCOME"):
+            with self.subTest(initial_state=initial_state):
+                job_id = self.enqueue("recovery-" + initial_state.lower() + "-request")["id"]
+                nonce = ("a" if initial_state == "ISSUED" else "b") * 64
+                permit = {"claims": {}}
+                with self.broker.journal.write() as db:
+                    db.execute(
+                        "INSERT INTO receipts VALUES(?,?,?,?,?)",
+                        (job_id, nonce, "PREPARED", canonical(permit).decode(), None),
+                    )
+                gate = RecoveryGate({
+                    "job_id": job_id, "nonce": nonce, "state": initial_state,
+                    "result_digest": None, "result_code": None,
+                })
+                self.broker.gate = gate
+                self.broker.recover()
+                with self.broker.journal.connect() as db:
+                    response = json.loads(db.execute(
+                        "SELECT response FROM receipts WHERE job_id=?", (job_id,),
+                    ).fetchone()[0])
+                self.assertEqual(response["authority_receipt"]["job_id"], job_id)
+                self.assertEqual(
+                    response["authority_receipt"]["state"],
+                    "CANCELLED_SAFE" if initial_state == "ISSUED" else "UNKNOWN_OUTCOME",
+                )
+
     def test_lost_broker_reply_is_unknown_even_if_authority_persisted_success(self):
         queued = self.enqueue()
         original = self.worker.broker

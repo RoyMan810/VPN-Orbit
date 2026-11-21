@@ -43,10 +43,16 @@ class Broker:
             if current["state"] == "DISPATCHING":
                 self._complete(permit, "UNKNOWN_OUTCOME", "BROKER_RESTART", None)
             elif current["state"] == "ISSUED":
-                self.gate.call("permit.cancel", {"job_id": row["job_id"], "nonce": row["nonce"]})
-                self._persist(row["job_id"], "FAILED", {"outcome": "FAILED", "code": "BROKER_RESTART_BEFORE_DISPATCH", "observation": None})
+                receipt = self.gate.call("permit.cancel", {"job_id": row["job_id"], "nonce": row["nonce"]})
+                self._persist(row["job_id"], "FAILED", {
+                    "outcome": "FAILED", "code": "BROKER_RESTART_BEFORE_DISPATCH",
+                    "observation": None, "authority_receipt": receipt,
+                })
             else:
-                self._persist(row["job_id"], "UNKNOWN_OUTCOME", {"outcome": "UNKNOWN_OUTCOME", "code": "BROKER_RESTART", "observation": None})
+                self._persist(row["job_id"], "UNKNOWN_OUTCOME", {
+                    "outcome": "UNKNOWN_OUTCOME", "code": "BROKER_RESTART",
+                    "observation": None, "authority_receipt": current,
+                })
 
     def _persist(self, job_id, state, response):
         with self.journal.write() as db:
