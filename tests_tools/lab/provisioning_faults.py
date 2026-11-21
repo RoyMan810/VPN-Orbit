@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 
+from tools.prepare_vps import SSH_PROFILE
 
 REPO = Path(__file__).resolve().parents[2]
 PREPARE = REPO / "tools/prepare_vps.py"
@@ -75,10 +76,7 @@ def setup_fixture(directory):
     run(["ip", "netns", "exec", NAMESPACE, "ip", "link", "set", "vpnprobe1", "up"])
     run(["ip", "netns", "exec", NAMESPACE, "ip", "link", "set", "lo", "up"])
 
-    run(["useradd", "--create-home", "--shell", "/bin/bash", ADMIN])
-    run(["useradd", "--system", "--user-group", "--no-create-home",
-         "--home-dir", "/var/lib/vpn-orbit-ssh/vpn-orbit-svc", "--shell", "/bin/sh", SERVICE])
-    run(["passwd", "-l", SERVICE])
+    run(["useradd", "--create-home", "--shell", "/bin/bash", "--password", "*", ADMIN])
     key = directory / "admin"
     run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)])
     ssh_dir = Path("/home") / ADMIN / ".ssh"
@@ -92,19 +90,7 @@ def setup_fixture(directory):
 
     # OpenSSH reads ForceCommand at startup.  Install the exact profile before
     # starting the fixture so the phase's identical write needs no fixture reload.
-    PROFILE.write_text(
-        f"Match User {SERVICE}\n"
-        "    AuthorizedKeysFile /etc/ssh/vpn-orbit-keys/vpn-orbit-svc\n"
-        "    ForceCommand /usr/local/libexec/vpn-orbit/ssh-gateway\n"
-        "    AuthenticationMethods publickey\n"
-        "    PubkeyAuthentication yes\n"
-        "    PasswordAuthentication no\n"
-        "    KbdInteractiveAuthentication no\n"
-        "    DisableForwarding yes\n"
-        "    PermitTTY no\n"
-        "    PermitUserRC no\n\n"
-        "Match all\n"
-    )
+    PROFILE.write_text(SSH_PROFILE)
     PROFILE.chmod(0o644)
 
     host_key = LAB / "host"
@@ -112,7 +98,7 @@ def setup_fixture(directory):
     config = LAB / "sshd_config"
     config.write_text(
         f"Port {PORT}\nListenAddress {ADDRESS}\nHostKey {host_key}\nPidFile {LAB / 'sshd.pid'}\n"
-        f"UsePAM no\nStrictModes no\nPermitRootLogin no\nPermitUserEnvironment no\n"
+        f"UsePAM yes\nStrictModes yes\nPermitRootLogin no\nPermitUserEnvironment no\n"
         f"AllowUsers {ADMIN} {SERVICE}\nAuthenticationMethods publickey\n"
         f"PasswordAuthentication no\nKbdInteractiveAuthentication no\n"
         f"PidFile {LAB / 'sshd.pid'}\nInclude /etc/ssh/sshd_config.d/*.conf\n"
@@ -197,7 +183,6 @@ def main():
                "A fresh SSH connection must observe uid 0", result)
         removed = provision(directory, key, fingerprint, cleanup=True)
         expect(removed.returncode == 0, "Cleanup after success must succeed", removed)
-        subprocess.run(["userdel", SERVICE], stderr=subprocess.DEVNULL)
         expect(subprocess.run(["getent", "passwd", SERVICE], capture_output=True).returncode != 0,
                "Cleanup must remove the service account")
         expect(probe(directory, key, fingerprint).returncode != 0, "Cleanup must revoke the managed key")
@@ -233,8 +218,9 @@ def main():
         expect(final.returncode == 0, "The fixture must remain usable after rollback", final)
         expect(probe(directory, key, fingerprint).returncode == 0, "The final probe must succeed")
         provision(directory, key, fingerprint, cleanup=True)
-        for path in NAMESPACES:
+        for path in NAMESPACES[:-1]:
             expect(not Path(path).exists(), f"Fixture artifact remains: {path}")
+        expect(PROFILE.read_text() == SSH_PROFILE, "Cleanup must preserve the pre-existing SSH profile")
         print(json.dumps({"status": "PASSED", "scenarios": [
             "disconnect-account", "retry-repair", "partial-helpers", "local-interruption",
             "verify-rollback", "cleanup"]}, sort_keys=True))

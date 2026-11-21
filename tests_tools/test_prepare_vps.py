@@ -114,7 +114,7 @@ class PrepareVpsTests(unittest.TestCase):
                       patch.object(prepare_vps.subprocess, "check_output", side_effect=[
                           f"[192.0.2.20]:2222 ssh-ed25519 {encoded}\n", '{"v":8,"uid":0}']) as reader):
                     prepare_vps.main()
-                self.assertEqual(runner.call_count, len(prepare_vps.PHASES))
+                self.assertEqual(runner.call_count, 1 + len(prepare_vps.PHASES))
                 probe = reader.call_args.args[0]
                 self.assertIn(str(output / "probe"), probe)
                 self.assertNotIn(str(admin_key), probe)
@@ -169,7 +169,7 @@ class PrepareVpsTests(unittest.TestCase):
                 fingerprint="SHA256:" + "A" * 43, state=prepare_vps.State(output / prepare_vps.STATE_FILE),
             )
             retry.run()
-            self.assertEqual(remote.calls.count("preflight"), 0)
+            self.assertEqual(remote.calls.count("preflight"), 1)
             self.assertEqual(remote.calls.count("account"), 2)
             state = json.loads((output / prepare_vps.STATE_FILE).read_text())
             self.assertEqual(state["status"], "VERIFIED")
@@ -295,7 +295,7 @@ class PrepareVpsTests(unittest.TestCase):
                   patch.object(prepare_vps.subprocess, "check_output", side_effect=[
                       f"[192.0.2.20]:2222 ssh-ed25519 {encoded}\n", '{"v":8,"uid":0}'])):
                 prepare_vps.main()
-            self.assertEqual(runner.call_count, 1 + len(prepare_vps.PHASES))
+            self.assertEqual(runner.call_count, 2 + len(prepare_vps.PHASES))
             policy = json.loads((output / "targets.json").read_text())["targets"][0]
             self.assertEqual(policy["capabilities"], ["host.probe", "firewall.apply"])
             self.assertRegex(policy["firewall_secret_ref"], r"^[0-7][0-9A-HJKMNP-TV-Z]{25}:v1$")

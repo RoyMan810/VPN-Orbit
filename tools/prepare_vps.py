@@ -121,8 +121,27 @@ def _accounts(ctx):
 
 
 def _phase_preflight(ctx):
-    del ctx
-    return _preamble() + "true\n"
+    checks = []
+    for account, home in _accounts(ctx):
+        checks.append(f"""if getent passwd {account} >/dev/null 2>&1; then
+    test "$(getent passwd {account} | cut -d: -f6,7)" = {home}:/bin/sh
+    test "$(passwd -S {account} | cut -d' ' -f2)" = L
+    test "$(id -Gn {account})" = {account}
+fi""")
+    return _preamble() + f"""test "$(dpkg --print-architecture)" = amd64
+test -d /etc/ssh/sshd_config.d
+test -x /usr/sbin/sshd
+/usr/sbin/sshd -t
+{chr(10).join(checks)}
+if [ ! -f "$STATE/preflight-done" ]; then
+    if [ -e {SSH_CONFIG} ] || [ -L {SSH_CONFIG} ]; then
+        test -f {SSH_CONFIG} && test ! -L {SSH_CONFIG}
+        cp -p -- {SSH_CONFIG} "$STATE/sshd-config.previous"
+        : > "$STATE/sshd-config-preexisting"
+    fi
+    : > "$STATE/preflight-done"
+fi
+"""
 
 
 def _phase_account(ctx):
@@ -190,7 +209,7 @@ def _phase_sshd(ctx):
     if ctx["firewall"]:
         checks.append("! /usr/sbin/sshd -T -C \"user={0},addr=${{SSH_CONNECTION%% *}},host=localhost\" | grep -Fxq 'forcecommand {1}/firewall-gateway'".format(
             FIREWALL_ACCOUNT, LIBEXEC))
-    condition = "\n   ".join(["! /usr/sbin/sshd -t ||", *checks, "! systemctl reload ssh.service"])
+    condition = " ||\n   ".join(["! /usr/sbin/sshd -t", *checks, "! systemctl reload ssh.service"])
     return _preamble() + f"""work=$(mktemp -d)
 trap 'rm -f "$work/file"; rmdir "$work"' EXIT
 {install_file(SSH_CONFIG, SSH_PROFILE.encode(), "0644")}
@@ -377,9 +396,6 @@ class Provisioner:
                 if journal["phases"].get(phase) == "DONE":
                     continue
                 self._record(journal, phase, "IN_PROGRESS")
-                if phase == "preflight":
-                    self._record(journal, phase, "DONE")
-                    continue
                 script = PHASE_SCRIPTS[phase](context)
                 script = f"# vpn-orbit-phase: {phase}\n" + script
                 try:
