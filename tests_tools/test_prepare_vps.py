@@ -247,6 +247,20 @@ class PrepareVpsTests(unittest.TestCase):
             self.assertFalse((output / "probe.pub").exists())
             self.assertFalse((output / "targets.json").exists())
 
+    def test_unconfirmed_cleanup_preserves_credentials_and_marks_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            remote = FakeRemote()
+            provisioner, output = make_provisioner(Path(tmp), remote)
+            provisioner.run()
+            def fail_cleanup(script):
+                raise subprocess.CalledProcessError(255, ["ssh"])
+            provisioner.run_remote = fail_cleanup
+            with self.assertRaisesRegex(ValueError, "cleanup is unconfirmed"):
+                provisioner._cleanup(provisioner.state.load())
+            self.assertTrue((output / "probe").exists())
+            self.assertTrue((output / "targets.json").exists())
+            self.assertEqual(provisioner.state.load()["status"], "CLEANUP_FAILED")
+
     def test_firewall_context_provisions_second_account_and_removes_its_keys(self):
         context = {"probe_public_key": b"ssh-ed25519 test\n", "firewall_public_key": b"ssh-ed25519 firewall\n",
                    "firewall": True, "ssh_port": 2222}

@@ -256,7 +256,12 @@ fi
 /usr/sbin/sshd -t && systemctl reload ssh.service || true
 for account in {PROBE_ACCOUNT} {FIREWALL_ACCOUNT}; do
     if [ -f "$STATE/account-created-$account" ] && id "$account" >/dev/null 2>&1; then
-        userdel "$account" 2>/dev/null || true
+        pkill -TERM -u "$account" 2>/dev/null || true
+        for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if userdel "$account" 2>/dev/null; then break; fi
+            sleep 0.2
+        done
+        ! id "$account" >/dev/null 2>&1
     fi
 done
 rmdir -- {PROBE_HOME} {FIREWALL_HOME} 2>/dev/null || true
@@ -366,7 +371,9 @@ class Provisioner:
         try:
             self._remote("# vpn-orbit-phase: cleanup\n" + cleanup_script())
         except (OSError, subprocess.SubprocessError):
-            pass
+            journal["status"] = "CLEANUP_FAILED"
+            self.state.save(journal)
+            raise ValueError("Remote cleanup is unconfirmed; managed credentials retained") from None
         paths = [self.key, self.key.with_suffix(".pub"), self.firewall_key,
                  self.firewall_key.with_suffix(".pub"), self.output / "targets.json"]
         for path in paths:

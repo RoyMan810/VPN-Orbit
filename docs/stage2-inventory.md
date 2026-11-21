@@ -224,8 +224,10 @@ probe или других изменений.
 4. Только после approval вызовите
    `POST /api/v1/change-plans/{id}/firewall-execution-requests`. Worker перед
    dispatch повторяет проверки и выдаёт Authority permit на точный digest правил.
-5. Remote helper сохраняет предыдущий ruleset, применяет только разрешённую
-   vocabulary правил и включает host-local rollback timer. После применения Broker
+5. Remote helper сверяет digest предыдущих управляемых правил, сохраняет их и
+   включает host-local systemd rollback timer до применения. Если таймер недоступен,
+   изменение запрещено. Таблица заменяется одной атомарной транзакцией nftables;
+   IPv4 и IPv6 обрабатываются раздельно. После применения Broker
    открывает новое SSH-соединение, проверяет состояние и только затем подтверждает
    операцию. При неуспешной проверке выполняется rollback.
 6. Потеря ответа после возможного применения возвращает `UNKNOWN_OUTCOME`. Такая
@@ -235,8 +237,12 @@ probe или других изменений.
    Исходный `UNKNOWN_OUTCOME` не переписывается в успех.
 
 `GET /api/v1/change-plans/{id}/firewall-timeline` показывает только нормализованную
-хронологию операции. Проверка и rollback не зависят от доступности Controller:
-таймер работает на VPS. Применение выполняется только на disposable стенде; CI
-проверяет typed-payload, потерю SSH-ответа, rollback и reconciliation fencing в
-изолированных сценариях. Подготовка VPS поддерживает этот профиль через
+хронологию операции. Автоматический rollback не зависит от доступности Controller:
+таймер работает на VPS и повторяет откат при временном отказе. Deadline использует
+монотонные часы с привязкой к boot ID. Подтверждение требует совпадения фактической
+таблицы; неизвестный или изменённый baseline отклоняется до применения.
+Проверка на disposable стенде включает typed-payload, новое SSH-соединение,
+реальные nftables-правила, потерю Controller, SIGKILL и reconciliation fencing.
+Сверка подтверждённого remote receipt закрывает блокировку Authority и application
+incident, сохраняя исходный Job `UNKNOWN_OUTCOME`. Подготовка VPS поддерживает профиль через
 `tools/prepare_vps.py --firewall`.

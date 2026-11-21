@@ -150,7 +150,7 @@ ForceCommand {LIBEXEC}/firewall-gateway
         call({"operation": "confirm", "operation_id": first["operation_id"], "rules_digest": first["rules_digest"]})
         previous_digest = first["rules_digest"]
         baseline = run(["ip", "netns", "exec", NS, "nft", "-nn", "list", "table", "inet", "vpn_orbit"]).stdout
-        assert b"meta nfproto ipv4 tcp dport 443 drop" in baseline, baseline
+        assert b"meta nfproto 2 tcp dport 443 drop" in baseline, baseline
         rejected = call({"operation": "exec", "command": "nft flush ruleset"}, success=False)
         assert rejected["outcome"] == "DENIED"
 
