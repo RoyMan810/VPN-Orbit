@@ -20,7 +20,8 @@ RULES = [
 
 
 def payload(**changes):
-    value = {"operation_id": OP, "rules": RULES, "rules_digest": checksum(RULES), "ssh_port": 22}
+    value = {"operation_id": OP, "rules": RULES, "rules_digest": checksum(RULES),
+             "previous_rules_digest": checksum([]), "ssh_port": 22}
     value.update(changes)
     return value
 
@@ -129,9 +130,9 @@ class FirewallOrchestrationTests(unittest.TestCase):
         return [call for call in self.control_mock.call_args_list if call.args[3] == operation]
 
     def test_apply_then_fresh_ssh_status_then_confirm(self):
-        self.apply_mock.return_value = {"outcome": "SUCCEEDED", "code": "FIREWALL_APPLIED", "state": "ARMED"}
+        self.apply_mock.return_value = {"outcome": "SUCCEEDED", "code": "FIREWALL_APPLIED", "state": "ARMED", "rules_digest": checksum(RULES)}
         self.control_mock.side_effect = [
-            {"outcome": "SUCCEEDED", "code": "FIREWALL_STATUS", "state": "ARMED"},
+            {"outcome": "SUCCEEDED", "code": "FIREWALL_STATUS", "state": "ARMED", "rules_digest": checksum(RULES)},
             {"outcome": "SUCCEEDED", "code": "FIREWALL_CONFIRMED", "state": "CONFIRMED"},
         ]
         self.assertEqual(self.run_apply(), {"outcome": "SUCCEEDED", "code": "FIREWALL_CONFIRMED"})
@@ -147,21 +148,21 @@ class FirewallOrchestrationTests(unittest.TestCase):
         self.control_mock.assert_not_called()
 
     def test_failed_fresh_connection_rolls_back_locally(self):
-        self.apply_mock.return_value = {"outcome": "SUCCEEDED", "code": "FIREWALL_APPLIED", "state": "ARMED"}
+        self.apply_mock.return_value = {"outcome": "SUCCEEDED", "code": "FIREWALL_APPLIED", "state": "ARMED", "rules_digest": checksum(RULES)}
         self.control_mock.side_effect = [Denied("SSH_FIREWALL_CONTROL_UNCONFIRMED"),
                                          {"outcome": "SUCCEEDED", "code": "FIREWALL_ROLLED_BACK", "state": "ROLLED_BACK"}]
         self.assertEqual(self.run_apply(), {"outcome": "FAILED", "code": "FIREWALL_SSH_UNCONFIRMED_ROLLED_BACK"})
         self.assertEqual([call.args[3] for call in self.control_mock.call_args_list], ["status", "rollback"])
 
     def test_lost_apply_verification_and_lost_rollback_are_never_success(self):
-        self.apply_mock.return_value = {"outcome": "SUCCEEDED", "code": "FIREWALL_APPLIED", "state": "ARMED"}
+        self.apply_mock.return_value = {"outcome": "SUCCEEDED", "code": "FIREWALL_APPLIED", "state": "ARMED", "rules_digest": checksum(RULES)}
         self.control_mock.side_effect = Denied("SSH_FIREWALL_CONTROL_UNCONFIRMED")
         self.assertEqual(self.run_apply(), {"outcome": "UNKNOWN_OUTCOME", "code": "FIREWALL_SSH_UNCONFIRMED"})
 
     def test_lost_confirm_reply_is_unknown(self):
-        self.apply_mock.return_value = {"outcome": "SUCCEEDED", "code": "FIREWALL_APPLIED", "state": "ARMED"}
+        self.apply_mock.return_value = {"outcome": "SUCCEEDED", "code": "FIREWALL_APPLIED", "state": "ARMED", "rules_digest": checksum(RULES)}
         self.control_mock.side_effect = [
-            {"outcome": "SUCCEEDED", "code": "FIREWALL_STATUS", "state": "ARMED"},
+            {"outcome": "SUCCEEDED", "code": "FIREWALL_STATUS", "state": "ARMED", "rules_digest": checksum(RULES)},
             Denied("SSH_FIREWALL_CONTROL_UNCONFIRMED"),
         ]
         self.assertEqual(self.run_apply(), {"outcome": "UNKNOWN_OUTCOME", "code": "FIREWALL_CONFIRM_UNCONFIRMED"})

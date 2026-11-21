@@ -34,6 +34,8 @@ def firewall_diff(previous, rules):
     return {"operation": "FIREWALL_APPLY",
             "added": [rule for rule in rules if _rule_key(rule) not in before],
             "removed": [rule for rule in previous if _rule_key(rule) not in after],
+            "order_changed": [rule for rule in previous if _rule_key(rule) in after]
+                             != [rule for rule in rules if _rule_key(rule) in before],
             "unchanged": len(rules) - sum(1 for rule in rules if _rule_key(rule) not in before)}
 
 
@@ -75,14 +77,19 @@ def _owner(actor):
 
 
 def _last_confirmed_rules(db, resource_id):
-    row = db.execute("""SELECT result FROM jobs WHERE resource_id=? AND action='firewall.apply' AND status='SUCCEEDED'
-                        ORDER BY updated_at DESC,rowid DESC LIMIT 1""", (resource_id,)).fetchone()
-    if row is None or row["result"] is None:
+    row = db.execute("""SELECT r.details FROM audit r WHERE r.target_id=?
+        AND ((r.event='change_plan.firewall_finished' AND r.outcome='SUCCEEDED')
+          OR (r.event='change_plan.firewall_reconciled' AND r.outcome='RECONCILED_SUCCEEDED'))
+        ORDER BY r.seq DESC LIMIT 1""", (resource_id,)).fetchone()
+    if row is None:
         return []
-    result = json.loads(row["result"])
-    if not isinstance(result, dict):
+    operation = json.loads(row["details"])["operation_id"]
+    event = db.execute("""SELECT details FROM audit WHERE target_id=? AND event=?
+                          AND json_extract(details,'$.operation_id')=? ORDER BY seq DESC LIMIT 1""",
+                       (resource_id, REQUESTED, operation)).fetchone()
+    if event is None:
         raise Denied("FIREWALL_HISTORY_INVALID", 503)
-    return firewall_rules(result["rules"])
+    return firewall_rules(json.loads(event["details"])["rules"])
 
 
 def _baseline_check(db, row, draft):
@@ -201,6 +208,7 @@ def request_firewall_apply(db, queue, auth, token, csrf, draft_id, *, if_match, 
     operation = {"operation_id": approval["id"], "actor_id": actor["id"], "revision": row["revision"],
                  "plan_hash": row["plan_hash"], "approval_id": approval_id, "approval_seq": approval["seq"],
                  "scope_digest": baseline["scope_digest"], "rules": baseline["rules"],
+                 "previous_rules_digest": checksum(baseline["previous_rules"]),
                  "rules_digest": checksum(baseline["rules"]), "ssh_port": baseline["ssh_port"]}
     Store.event(db, at=now, actor=actor["id"], target=row["resource_id"], correlation=draft_id,
                 kind=REQUESTED, outcome="QUEUED", details=operation)
@@ -242,7 +250,9 @@ def validate_firewall_request(db, event, now):
     resource = _baseline_check(db, row, draft)
     if operation["scope_digest"] != resource["scope_digest"]:
         raise Denied("STALE_BASELINE", 409)
-    firewall_payload({key: operation[key] for key in ("operation_id", "rules_digest", "rules", "ssh_port")})
+    if operation["previous_rules_digest"] != checksum(draft["baseline"]["previous_rules"]):
+        raise Denied("STALE_BASELINE", 409)
+    firewall_payload({key: operation[key] for key in ("operation_id", "rules_digest", "previous_rules_digest", "rules", "ssh_port")})
     return operation
 
 
@@ -330,8 +340,10 @@ class FirewallOperations:
             fields(receipt, ("job_id", "nonce", "state", "result_digest", "result_code"))
             result = {key: saved[key] for key in ("outcome", "code", "observation")}
             text(receipt["nonce"], SHA256)
-            if (receipt != saved["authority_receipt"] or receipt["job_id"] != job_id
-                    or receipt["state"] != saved["outcome"] or receipt["result_code"] != saved["code"]
+            original = saved["authority_receipt"]
+            reconciled = receipt["state"] in RESOLVED and saved["outcome"] == "UNKNOWN_OUTCOME"
+            if (({**receipt, "state": original["state"]} if reconciled else receipt) != original or receipt["job_id"] != job_id
+                    or original["state"] != saved["outcome"] or receipt["result_code"] != saved["code"]
                     or receipt["result_digest"] != checksum(result) or saved["observation"] is not None):
                 raise Denied("BROKER_RECEIPT_INVALID")
             digest = receipt["result_digest"]
@@ -340,10 +352,15 @@ class FirewallOperations:
                 raise Denied("CAPABILITY_DISABLED")
             remote = self.broker.call("firewall.status", {"policy_ref": policy_ref, "target": row["target_id"],
                                                          "operation_id": job_id})
-            state = remote.get("state") if isinstance(remote, dict) else None
+            with self.store.read() as db:
+                request = self.queue.firewall_request(db, job_id)
+                expected = json.loads(request["details"])["rules_digest"] if request else None
+            if not isinstance(remote, dict) or remote.get("outcome") != "SUCCEEDED" or remote.get("rules_digest") != expected:
+                raise Denied("FIREWALL_RECONCILIATION_UNVERIFIED")
+            state = remote["state"]
             if state == "CONFIRMED":
                 outcome, reason = "RECONCILED_SUCCEEDED", "FIREWALL_REMOTE_CONFIRMED"
-            elif state in ("ROLLED_BACK", "ABSENT"):
+            elif state == "ROLLED_BACK":
                 outcome, reason = "RECONCILED_FAILED", "FIREWALL_REMOTE_" + state
         except Denied as error:
             reason = error.code
@@ -383,7 +400,7 @@ class FirewallOperations:
         if (job["resource_id"] != row["target_id"] or job["actor_id"] != row["actor_id"]
                 or job["payload_hash"] != operation["plan_hash"] or job["scope_digest"] != operation["scope_digest"]):
             raise Denied("STALE_SCOPE")
-        payload = firewall_payload({key: operation[key] for key in ("operation_id", "rules_digest", "rules", "ssh_port")})
+        payload = firewall_payload({key: operation[key] for key in ("operation_id", "rules_digest", "previous_rules_digest", "rules", "ssh_port")})
 
         def revalidate(db):
             if validate_firewall_request(db, row, int(self.clock())) != operation:

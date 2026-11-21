@@ -239,12 +239,16 @@ def apply_firewall(target, private_key, known_hosts, payload):
     reply = firewall(target, private_key, known_hosts, payload)
     if reply["outcome"] != "SUCCEEDED":
         return reply
+    if reply.get("rules_digest") != payload["rules_digest"]:
+        return {"outcome": "UNKNOWN_OUTCOME", "code": "FIREWALL_REPLY_DIGEST_MISMATCH"}
     operation = payload["operation_id"]
     if reply.get("state") == "CONFIRMED":
         return {"outcome": "SUCCEEDED", "code": "FIREWALL_ALREADY_CONFIRMED"}
     try:
         status = firewall_status(target, private_key, known_hosts, operation)
     except Denied:
+        status = None
+    if status is not None and status.get("rules_digest") != payload["rules_digest"]:
         status = None
     if status is not None and status.get("outcome") == "SUCCEEDED" and status.get("state") == "CONFIRMED":
         return {"outcome": "SUCCEEDED", "code": "FIREWALL_ALREADY_CONFIRMED"}
@@ -253,7 +257,7 @@ def apply_firewall(target, private_key, known_hosts, payload):
             rolled = firewall_control(target, private_key, known_hosts, "rollback", {"operation_id": operation})
         except Denied:
             rolled = None
-        if rolled is not None and rolled.get("outcome") == "SUCCEEDED":
+        if rolled is not None and rolled.get("outcome") == "SUCCEEDED" and rolled.get("state") == "ROLLED_BACK":
             return {"outcome": "FAILED", "code": "FIREWALL_SSH_UNCONFIRMED_ROLLED_BACK"}
         return {"outcome": "UNKNOWN_OUTCOME", "code": "FIREWALL_SSH_UNCONFIRMED"}
     try:
@@ -261,8 +265,8 @@ def apply_firewall(target, private_key, known_hosts, payload):
                                      {"operation_id": operation, "rules_digest": payload["rules_digest"]})
     except Denied:
         return {"outcome": "UNKNOWN_OUTCOME", "code": "FIREWALL_CONFIRM_UNCONFIRMED"}
-    if confirmed.get("outcome") != "SUCCEEDED":
-        return {"outcome": "FAILED", "code": confirmed["code"]}
+    if confirmed.get("outcome") != "SUCCEEDED" or confirmed.get("state") != "CONFIRMED":
+        return {"outcome": "UNKNOWN_OUTCOME", "code": "FIREWALL_CONFIRM_UNCONFIRMED"}
     return {"outcome": "SUCCEEDED", "code": confirmed["code"]}
 
 

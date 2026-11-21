@@ -120,12 +120,29 @@ class Broker:
             raise Denied("CAPABILITY_DISABLED")
         if payload["policy_ref"] != target.value["firewall_secret_ref"]:
             raise Denied("BROKER_SCOPE_DENIED")
+        with self.journal.connect() as db:
+            row = db.execute("SELECT permit FROM receipts WHERE job_id=?", (payload["operation_id"],)).fetchone()
+        if row is None:
+            raise Denied("RECEIPT_NOT_TERMINAL")
+        claims = decode(row["permit"].encode())["claims"]
+        if (claims["target"] != target.id or claims["capability"] != "firewall.apply"
+                or claims["scope_digest"] != target.scope_digest):
+            raise Denied("BROKER_SCOPE_DENIED")
         # A read-only reconciliation query. It can never issue a permit or mutate.
         with self.vault.key_lock(payload["policy_ref"], shared=True):
             key = self.vault.use_policy_key(payload["policy_ref"], consumer_uid=peer.uid, target=target.id,
                                             purpose="firewall.apply", scope_digest=target.scope_digest,
                                             policy_revision=target.revision)
-            return self.firewall_status(target, key, self.directory / "known_hosts", payload["operation_id"])
+            remote = self.firewall_status(target, key, self.directory / "known_hosts", payload["operation_id"])
+        if (remote.get("outcome") != "SUCCEEDED" or remote.get("rules_digest") != claims["firewall"]["rules_digest"]):
+            raise Denied("FIREWALL_RECONCILIATION_UNVERIFIED")
+        receipt = self.gate.call("attempt.status", {"job_id": payload["operation_id"]})
+        if remote.get("state") in ("CONFIRMED", "ROLLED_BACK") and receipt["state"] in (
+                "UNKNOWN_OUTCOME", "RECONCILED_SUCCEEDED", "RECONCILED_FAILED"):
+            self.gate.call("firewall.reconcile", {"job_id": claims["job_id"], "nonce": claims["nonce"],
+                                                "rules_digest": claims["firewall"]["rules_digest"],
+                                                "state": remote["state"]})
+        return remote
 
     def dispatch(self, role, peer, operation, payload):
         if role != "worker" or peer.uid != self.worker_uid:

@@ -48,9 +48,10 @@ def firewall_rules(value):
 
 
 def firewall_payload(value):
-    fields(value, ("operation_id", "rules_digest", "rules", "ssh_port"))
+    fields(value, ("operation_id", "rules_digest", "previous_rules_digest", "rules", "ssh_port"))
     text(value["operation_id"], ULID)
     text(value["rules_digest"], SHA256)
+    text(value["previous_rules_digest"], SHA256)
     rules = firewall_rules(value["rules"])
     if checksum(rules) != value["rules_digest"]:
         raise Denied("FIREWALL_RULES_INVALID")

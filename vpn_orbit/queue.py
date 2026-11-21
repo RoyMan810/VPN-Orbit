@@ -152,7 +152,7 @@ class JobQueue:
     @staticmethod
     def _public(row):
         return {**{key: row[key] for key in ("id", "resource_id", "action", "status", "revision", "reason", "created_at", "updated_at")},
-                "observed_at": json.loads(row["result"])["observed_at"] if row["result"] else None,
+                "observed_at": json.loads(row["result"]).get("observed_at") if row["result"] else None,
                 "result": json.loads(row["result"]) if row["result"] else None}
 
     def enqueue_probe(self, auth, token, csrf, resource, request_key):

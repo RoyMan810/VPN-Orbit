@@ -160,7 +160,7 @@ def run(config, command, *, once=False, listener=None, import_args=None):
         return
     if command == "worker":
         worker = Worker(JobQueue(Store(config["database"], access=access, writers=writers)), Client(config["gate_socket"], server_uids={0}),
-                        Client(config["broker_socket"], server_uids={0, config["broker_uid"]}, timeout=40),
+                        Client(config["broker_socket"], server_uids={0, config["broker_uid"]}, timeout=160),
                         secret_refs={t.id: t.value["secret_ref"] for t in policy.targets.values()},
                         restart_refs={t.id: t.value["restart_secret_ref"] for t in policy.targets.values()
                                       if "docker.restart" in t.value["capabilities"]},

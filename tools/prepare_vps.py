@@ -204,10 +204,10 @@ trap 'rm -f "$work/file"; rmdir "$work"' EXIT
 
 
 def _phase_sshd(ctx):
-    checks = ["! /usr/sbin/sshd -T -C \"user={0},addr=${{SSH_CONNECTION%% *}},host=localhost\" | grep -Fxq 'forcecommand {1}/ssh-gateway'".format(
+    checks = ["! /usr/sbin/sshd -T -C \"user={0},addr=$1,host=localhost\" | grep -Fxq 'forcecommand {1}/ssh-gateway'".format(
         PROBE_ACCOUNT, LIBEXEC)]
     if ctx["firewall"]:
-        checks.append("! /usr/sbin/sshd -T -C \"user={0},addr=${{SSH_CONNECTION%% *}},host=localhost\" | grep -Fxq 'forcecommand {1}/firewall-gateway'".format(
+        checks.append("! /usr/sbin/sshd -T -C \"user={0},addr=$1,host=localhost\" | grep -Fxq 'forcecommand {1}/firewall-gateway'".format(
             FIREWALL_ACCOUNT, LIBEXEC))
     condition = " ||\n   ".join(["! /usr/sbin/sshd -t", *checks, "! systemctl reload ssh.service"])
     return _preamble() + f"""work=$(mktemp -d)
@@ -450,7 +450,7 @@ def build_transport(ip, port, identity, user, host_key):
         auth = ["-i", str(identity), "-o", "IdentitiesOnly=yes", "-o", "PreferredAuthentications=publickey"]
 
     def run_remote(script):
-        remote = shlex.join(["sudo", "--", "/bin/sh", "-c", script, "vpn-orbit-provision"])
+        remote = shlex.join(["sudo", "--", "/bin/sh", "-c", script, "vpn-orbit-provision"]) + ' "${SSH_CONNECTION%% *}"'
         subprocess.run([*base, "-T", *auth, f"{user}@{ip}", remote], check=True)
 
     def cleanup():
