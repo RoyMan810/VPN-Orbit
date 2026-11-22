@@ -4,6 +4,7 @@ import copy
 import hashlib
 import os
 from pathlib import Path
+import subprocess
 import sys
 import stat
 import struct
@@ -20,11 +21,33 @@ from vpn_orbit.runtime.storage import _credential_permissions
 
 DEPLOY = Path(__file__).resolve().parents[1] / "deploy"
 sys.path.insert(0, str(DEPLOY))
-from artifact import AGE_SHA256, ArtifactError, FIXED_FILES, canonical, manifest, snapshot, trusted_key
+from artifact import AGE_FILE, AGE_SHA256, ArtifactError, FIXED_FILES, canonical, manifest, snapshot, trusted_key
 from installer import check_buildx, advise_capacity, compose_document, install, origin, supported_compose, supported_ubuntu
 
 
 class InstallationTests(unittest.TestCase):
+    def test_base_image_pull_timeout_precedes_controller_state_changes(self):
+        image = self.value["python_image"]
+        args = SimpleNamespace(bundle=self.bundle, trust_key=None, manifest_sha256="a" * 64,
+                               development=True, web_enrollment=False, check=False,
+                               docker_host="unix:///var/run/docker.sock")
+        value = {**self.value, "python": f"{sys.version_info.major}.{sys.version_info.minor}"}
+
+        def stage_bundle(_source, destination, *_args, **_kwargs):
+            age = destination / AGE_FILE
+            age.parent.mkdir(parents=True)
+            age.touch()
+            return value, args.manifest_sha256
+
+        with (patch("installer.os.umask"), patch("installer.preflight"),
+              patch("installer.snapshot", side_effect=stage_bundle),
+              patch("installer.docker", side_effect=subprocess.TimeoutExpired("docker", 600)) as docker,
+              patch("installer.folder") as folder,
+              self.assertRaisesRegex(ArtifactError, "^INSTALL_BASE_IMAGE_PULL_TIMED_OUT$")):
+            install(args)
+        docker.assert_called_once_with(args.docker_host, "pull", "--platform", "linux/amd64", image, timeout=600)
+        folder.assert_not_called()
+
     def test_ubuntu_release_boundary(self):
         for version in ("24.04", "24.10", "26.04", "26.10", "30.04"):
             self.assertTrue(supported_ubuntu({"ID": "ubuntu", "VERSION_ID": version}))

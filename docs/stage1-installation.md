@@ -99,6 +99,8 @@ Broker и supervisor запускаются реальными systemd socket un
 
 Compose не загружает приложение из registry при каждом старте: local image tag связан с проверенным bundle digest, `pull_policy=never`, а systemd перед запуском сверяет фактический image ID с защищённой installation metadata. Подмена local tag блокирует запуск. Это bootstrap development channel, не готовая система self-update/A/B.
 
+При свежей установке Docker получает закреплённый базовый образ до создания состояния Controller. Если загрузка не завершится за 10 минут, установщик вернёт `INSTALL_BASE_IMAGE_PULL_TIMED_OUT`. Проверьте доступ к registry и повторите установку.
+
 Owner создаётся **только локально**:
 
 ```bash
