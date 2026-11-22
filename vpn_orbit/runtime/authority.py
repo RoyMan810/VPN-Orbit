@@ -97,13 +97,7 @@ class Authority:
         if (row is None or row["policy_digest"] != self.policy.digest or row["host_binding"] != host_binding()
                 or row["state"] not in ("NORMAL", "QUIESCING", "MAINTENANCE", "RESUMING", "RECOVERY_HOLD")):
             raise Denied("AUTHORITY_BINDING_INVALID")
-        from .activation_guard import authorization
-        try:
-            self.recovery_authorization = authorization(self.directory, bytes(self.key.verify_key), row, self.journal.writers)
-        except (Denied, OSError, ValueError, TypeError, KeyError):
-            if self.journal.writers:
-                self.journal.writers.publish("READ_ONLY_RECOVERY")
-            raise Denied("RECOVERY_ACTIVATION_INVALID") from None
+        self.recovery_authorization = None
         return row
 
     def recover(self):

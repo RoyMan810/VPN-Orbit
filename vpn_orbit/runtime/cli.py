@@ -24,7 +24,6 @@ from .storage import new_private_file, process_lock, protected_bytes
 from .vault import Vault
 from .timehealth import TimeHealth
 from .credentials import initialize_credential
-from .coordinator import Coordinator
 
 
 @contextmanager
@@ -82,7 +81,7 @@ def run(config, command, *, once=False, listener=None, import_args=None):
         if writers is None:
             raise Denied("WRITER_CONFIGURATION_REQUIRED")
         writers = Admission.initialize(config["writer_directory"])
-        Coordinator.initialize(Path(config["supervisor_directory"]) / "snapshots", writers)
+        writers.publish("OPEN")
         return
     if command == "initialize-credential":
         initialize_credential(config)
@@ -118,33 +117,15 @@ def run(config, command, *, once=False, listener=None, import_args=None):
         return
     if command == "supervisor":
         authority = Authority(config["supervisor_directory"], policy, writers=writers)
-        coordinator = Coordinator(Path(config["supervisor_directory"]) / "snapshots", writers) if writers else None
-
         def dispatch(*args):
-            if coordinator:
-                coordinator.recover_if_idle()
             return authority.dispatch(*args)
 
         def poll():
-            if coordinator:
-                coordinator.recover_if_idle()
-                if writers.state()["phase"] == "SHORT_BARRIER":
-                    # Clock continuity has an independent control journal.
-                    # Do not wait for a Gate SQLite writer before the watchdog
-                    # can recover a dead snapshot coordinator on the next poll.
-                    authority.time_health.poll()
-                    return
             authority.poll_time()
 
         identities = {(config["worker_uid"], config["worker_gid"]): "worker", (config["broker_uid"], config["broker_gid"]): "broker", (0, 0): "updater"}
         with process_lock(Path(config["supervisor_directory"]) / "authority.lock"):
             try:
-                if coordinator:
-                    try:
-                        coordinator.recover()
-                    except Denied as error:
-                        if error.code != "PROCESS_ALREADY_RUNNING":
-                            raise
                 authority.recover()
                 serve(listener or activated_socket(config["gate_socket"]), dispatch, identities, poll=poll)
             finally:
