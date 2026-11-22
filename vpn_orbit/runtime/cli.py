@@ -70,8 +70,7 @@ def run(config, command, *, once=False, listener=None, import_args=None):
     expected = {"supervisor": 0, "initialize-supervisor": 0, "api": config["app_uid"], "worker": config["worker_uid"],
                 "broker": config["broker_uid"], "initialize-broker": config["broker_uid"], "import-key": config["broker_uid"],
                 "rotate-key": config["broker_uid"], "revoke-key": config["broker_uid"],
-                "pin-vault": config["broker_uid"], "seal-controller": config["broker_uid"],
-                "import-backup-key": config["broker_uid"], "import-restart-key": config["broker_uid"], "publish-controller": config["broker_uid"],
+                "import-restart-key": config["broker_uid"],
                  "import-firewall-key": config["broker_uid"],
                 "enrollment-catalog": 0, "register-observations": 0, "initialize-time-health": 0, "time-health": 0,
                 "initialize-credential": 0, "initialize-writers": 0}[command]
@@ -174,34 +173,13 @@ def run(config, command, *, once=False, listener=None, import_args=None):
         Broker.initialize(config["broker_directory"], policy)
         return
     vault = Vault(config["vault_directory"], credential, systemd_credential=managed_credential, writers=writers)
-    if command == "publish-controller":
-        from .publication import receive_and_publish
-        print(json.dumps(receive_and_publish(config, import_args.snapshot_id, sys.stdin.buffer, verify_only=import_args.verify_only)))
-        return
-    if command == "seal-controller":
-        from .archive_stream import seal
-        seal(vault, config["broker_directory"], import_args.snapshot_id, sys.stdin.buffer, sys.stdout.buffer)
-        return
-    if command == "pin-vault":
-        if writers is None:
-            raise Denied("WRITER_CONFIGURATION_REQUIRED")
-        from .pins import pin_vault
-        print(json.dumps(pin_vault(vault, config["broker_directory"], writers, import_args.snapshot_id)))
-        return
     if command in {"rotate-key", "revoke-key"}:
         if writers is None:
             raise Denied("WRITER_CONFIGURATION_REQUIRED")
         purpose = import_args.purpose
-        if purpose == "backup.sftp":
-            from .backup_target import BackupTarget
-            from .publication import TARGET_PATH
-            destination = BackupTarget.load(TARGET_PATH)
-            scope = destination.value if destination else {}
-            consumer = config["broker_uid"]
-        else:
-            target = policy.targets.get(import_args.target)
-            scope = target.value if target and purpose in target.value["capabilities"] else {}
-            consumer = config["worker_uid"]
+        target = policy.targets.get(import_args.target)
+        scope = target.value if target and purpose in target.value["capabilities"] else {}
+        consumer = config["worker_uid"]
         ref_field = {"docker.restart": "restart_secret_ref", "firewall.apply": "firewall_secret_ref"}.get(purpose, "secret_ref")
         if (scope.get("id") != import_args.target
                 or scope.get("policy_revision") != import_args.policy_revision):
@@ -213,7 +191,7 @@ def run(config, command, *, once=False, listener=None, import_args=None):
                                        consumer_uid=consumer, policy_revision=import_args.policy_revision, key=key)
         print(replacement or "REVOKED")
         return
-    if command in {"import-key", "import-backup-key", "import-restart-key", "import-firewall-key"}:
+    if command in {"import-key", "import-restart-key", "import-firewall-key"}:
         key = protected_bytes(import_args.key_file, owner=config["broker_uid"], maximum=8192, private=True)
         if command == "import-key":
             reference = vault.import_ssh(import_args.secret_id, import_args.version, key, owner_id=import_args.owner_id,
@@ -228,9 +206,6 @@ def run(config, command, *, once=False, listener=None, import_args=None):
             reference = import_key(import_args.secret_id, import_args.version, key, owner_id=import_args.owner_id,
                                    worker_uid=config["worker_uid"], target=import_args.target,
                                    policy_revision=import_args.policy_revision)
-        else:
-            reference = vault.import_backup_ssh(import_args.secret_id, import_args.version, key, owner_id=import_args.owner_id,
-                                                broker_uid=config["broker_uid"], target=import_args.target, policy_revision=import_args.policy_revision)
         print(reference)
         return
     from .broker import Broker
@@ -266,26 +241,12 @@ def main(argv=None):
                                       help="Provision a dedicated typed firewall credential")
     for name in ("rotate-key", "revoke-key"):
         lifecycle = commands.add_parser(name, help="Retire the exact credential selected by the protected target policy")
-        lifecycle.add_argument("--purpose", choices=("host.probe", "docker.restart", "firewall.apply", "backup.sftp"), required=True)
+        lifecycle.add_argument("--purpose", choices=("host.probe", "docker.restart", "firewall.apply"), required=True)
         lifecycle.add_argument("--target", required=True)
         lifecycle.add_argument("--reference", required=True)
         lifecycle.add_argument("--policy-revision", type=int, required=True)
         if name == "rotate-key":
             lifecycle.add_argument("--key-file", type=Path, required=True)
-    backup_key = commands.add_parser("import-backup-key", help="Broker-local SFTP-only credential provisioning")
-    backup_key.add_argument("--key-file", type=Path, required=True)
-    backup_key.add_argument("--secret-id", required=True)
-    backup_key.add_argument("--owner-id", required=True)
-    backup_key.add_argument("--target", required=True)
-    backup_key.add_argument("--version", type=int, default=1)
-    backup_key.add_argument("--policy-revision", type=int, default=1)
-    publication = commands.add_parser("publish-controller", help="Broker-only fixed SFTP publication; signed encrypted stdin only")
-    publication.add_argument("--snapshot-id", required=True)
-    publication.add_argument("--verify-only", action="store_true", help="Read back existing files without uploading")
-    pin = commands.add_parser("pin-vault", help="Private local pin under an active Root snapshot barrier; never an off-host backup")
-    pin.add_argument("--snapshot-id", required=True)
-    seal = commands.add_parser("seal-controller", help="Broker-only one-way age stream; ciphertext stdout only")
-    seal.add_argument("--snapshot-id", required=True)
     args = parser.parse_args(argv)
     try:
         run(configuration(args.config), args.command, once=getattr(args, "once", False), import_args=args)
