@@ -179,7 +179,7 @@ function Detail({ resource, t, lang, now, expired, session }: {
       </ul> : <p>{t.dockerStatus[docker.status]}</p>}
     </div>}
     {resource.permissions.firewall && session.user.role === 'Owner' &&
-      <FirewallPlan resourceId={resource.id} csrf={session.csrf_token} t={t} expired={expired}/>}
+      <FirewallPlan key={resource.id} resourceId={resource.id} csrf={session.csrf_token} t={t} expired={expired}/>}
   </>
 }
 

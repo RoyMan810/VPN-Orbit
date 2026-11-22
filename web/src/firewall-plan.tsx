@@ -1,11 +1,12 @@
-import { useEffect, useState } from 'react'
-import { apiErrorDetails, request } from './api'
+import { useEffect, useRef, useState } from 'react'
+import { apiErrorDetails, hasApiStatus, request } from './api'
 import type { Copy } from './copy'
 
 type Rule = { action: 'allow' | 'deny'; direction: 'in' | 'out'; protocol: 'tcp' | 'udp'; port: number; cidr: string }
 type Draft = { id: string; plan_hash: string; revision: number; baseline: { ssh_port: number; rules: Rule[] }; diff: Record<string, unknown> }
-type Entry = { seq: number; status: string; reason: string | null; operation_id: string; attempt?: number }
+type Entry = { seq: number; status: string; reason: string | null; operation_id: string; revision: number; attempt?: number | null }
 type Saved = { rules: Rule[]; sshPort: number; draft: Draft | null; etag: string | null; approval: string | null; operation: string | null }
+const pending = new Set(['QUEUED', 'INTENT_PREPARED', 'DISPATCHING', 'RECONCILIATION_REQUESTED'])
 
 export function FirewallPlan({ resourceId, csrf, t, expired }: {
   resourceId: string; csrf: string; t: Copy; expired: () => void
@@ -19,40 +20,54 @@ export function FirewallPlan({ resourceId, csrf, t, expired }: {
   const [approval, setApproval] = useState<string | null>(saved?.approval ?? null)
   const [operation, setOperation] = useState<string | null>(saved?.operation ?? null)
   const [entries, setEntries] = useState<Entry[] | null>(null)
-  const [reconciling, setReconciling] = useState(false)
+  const [timelineRefresh, refreshTimeline] = useState(0)
+  const [previewChecked, setPreviewChecked] = useState(false)
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const inFlight = useRef(false)
+  const draftId = draft?.id
+  const revision = draft?.revision
+  const last = entries?.at(-1)
+  const attempt = (last?.attempt ?? 0) + 1
   useEffect(() => {
+    if (!draft) return
     try { localStorage.setItem(storageKey, JSON.stringify({ rules, sshPort, draft, etag, approval, operation })) } catch { /* Best effort recovery state. */ }
   }, [storageKey, rules, sshPort, draft, etag, approval, operation])
   useEffect(() => {
-    if (!draft || !operation) return
-    const draftId = draft.id
+    if (!draftId || !operation) return
     const abort = new AbortController()
     let timer: number | undefined
+    setEntries(null)
     async function load() {
       try {
         const result = await request<{ items: Entry[] }>(`/change-plans/${draftId}/firewall-timeline`, { signal: abort.signal })
         if (abort.signal.aborted) return
-        setEntries(result.items.filter(item => item.operation_id === operation))
-        const last = result.items.at(-1)?.status
-        if (['QUEUED', 'INTENT_PREPARED', 'DISPATCHING', 'RECONCILIATION_REQUESTED'].includes(last ?? '')) timer = window.setTimeout(load, 2000)
+        const rows = result.items.filter(item => item.operation_id === operation && item.revision === revision)
+        setEntries(rows)
+        if (pending.has(rows.at(-1)?.status ?? '')) timer = window.setTimeout(load, 2000)
       } catch (cause) {
-        if (!abort.signal.aborted) setError(apiErrorDetails(cause) ?? t.firewallError)
+        if (abort.signal.aborted) return
+        setEntries(null)
+        if (hasApiStatus(cause, 401)) expired()
+        else setError(apiErrorDetails(cause) ?? t.firewallError)
       }
     }
     void load()
     return () => { abort.abort(); window.clearTimeout(timer) }
-  }, [draft?.id, operation])
+  }, [draftId, revision, operation, timelineRefresh, expired, t.firewallError])
 
   async function run(action: () => Promise<void>) {
-    if (busy) return
+    if (inFlight.current) return
+    inFlight.current = true
     setBusy(true); setError('')
     try { await action() } catch (cause) {
-      if ((cause as { status?: number }).status === 401) return expired()
+      if (hasApiStatus(cause, 401)) return expired()
       setError(apiErrorDetails(cause) ?? t.firewallError)
-    } finally { setBusy(false) }
+    } finally {
+      inFlight.current = false
+      setBusy(false)
+    }
   }
 
   function update(index: number, patch: Partial<Rule>) {
@@ -94,11 +109,19 @@ export function FirewallPlan({ resourceId, csrf, t, expired }: {
     {draft && !approval && !operation && <div role="status">
       <p>{t.firewallDiff}</p><pre>{JSON.stringify(draft.diff, null, 2)}</pre>
       <button type="button" disabled={busy} onClick={() => void run(async () => {
-        const preview = await request<{ baseline_check: string }>(`/change-plans/${draft.id}/firewall-preview`, { ifMatch: etag ?? undefined })
-        if (preview.baseline_check !== 'MATCHED') throw new Error('STALE_BASELINE')
+        setPreviewChecked(false)
+        const preview = await request<{ baseline_check: string; draft_id: string; revision: number; plan_hash: string }>(
+          `/change-plans/${draft.id}/firewall-preview`, { ifMatch: etag ?? undefined },
+        )
+        if (preview.baseline_check !== 'MATCHED' || preview.draft_id !== draft.id ||
+            preview.revision !== draft.revision || preview.plan_hash !== draft.plan_hash) throw new Error('STALE_BASELINE')
+        setPreviewChecked(true)
       })}>{t.firewallCheck}</button>
       <form onSubmit={event => {
-        event.preventDefault(); const secret = password; setPassword('')
+        event.preventDefault()
+        if (!previewChecked || busy || !password) return
+        const secret = password
+        setPassword('')
         void run(async () => {
           const grant = await request<{ id: string }>('/auth/reauth', { csrf, body: { password: secret, plan_hash: draft.plan_hash } })
           const result = await request<{ approval_id: string }>(`/change-plans/${draft.id}/firewall-approval`, {
@@ -107,8 +130,9 @@ export function FirewallPlan({ resourceId, csrf, t, expired }: {
           setApproval(result.approval_id)
         })
       }}>
-        <label>{t.password}<input type="password" value={password} required onChange={event => setPassword(event.target.value)}/></label>
-        <button disabled={busy || !password}>{t.firewallApprove}</button>
+        <label>{t.password}<input type="password" value={password} required disabled={!previewChecked || busy}
+          onChange={event => setPassword(event.target.value)}/></label>
+        <button disabled={!previewChecked || busy || !password}>{t.firewallApprove}</button>
       </form>
     </div>}
     {approval && !operation && <button type="button" disabled={busy} onClick={() => void run(async () => {
@@ -117,15 +141,22 @@ export function FirewallPlan({ resourceId, csrf, t, expired }: {
       })
       setOperation(result.id)
     })}>{t.firewallExecute}</button>}
-    {operation && <div role="status"><p>{t.firewallQueued} <code>{operation}</code></p>
-      {entries?.at(-1) && <p><strong>{entries.at(-1)?.status}</strong>{entries.at(-1)?.reason && <> · <code>{entries.at(-1)?.reason}</code></>}</p>}
-      {entries?.at(-1)?.status === 'UNKNOWN_OUTCOME' && <button type="button" disabled={reconciling} onClick={() => void run(async () => {
-        setReconciling(true)
-        try {
-          const attempt = (entries?.at(-1)?.attempt ?? 0) + 1
-          await request(`/change-plans/${draft?.id}/firewall-execution-requests/${operation}/reconciliations/${attempt}`, { csrf })
-        } finally { setReconciling(false) }
-      })}>{t.firewallReconcile}</button>}
+    {operation && draftId && <div role="status"><p>{t.firewallQueued} <code>{operation}</code></p>
+      {last && <p><strong>{last.status}</strong>{last.reason && <> · <code>{last.reason}</code></>}</p>}
+      {attempt <= 3 && (last?.status === 'UNKNOWN_OUTCOME' || last?.status === 'QUARANTINED') &&
+        <button type="button" disabled={busy} onClick={() => void run(async () => {
+          try {
+            await request(`/change-plans/${draftId}/firewall-execution-requests/${operation}/reconciliations/${attempt}`,
+              { csrf, body: {} })
+          } finally {
+            setEntries(null)
+            refreshTimeline(value => value + 1)
+          }
+        })}>{t.firewallReconcile}</button>}
+      {entries === null && error && <button type="button" onClick={() => {
+        setError('')
+        refreshTimeline(value => value + 1)
+      }}>{t.retry}</button>}
     </div>}
     {error && <p className="error" role="alert">{error}</p>}
   </section>

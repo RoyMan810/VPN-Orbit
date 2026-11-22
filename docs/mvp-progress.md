@@ -17,6 +17,9 @@
 - Removed the unused Compose removal executor. It trusted a caller-supplied plan
   and resolved resources by name without verifying live ownership. The existing
   CLI now records manual review and leaves ownership explicitly unverified.
+- Fixed Firewall WebUI reconciliation to submit the authenticated API request,
+  refresh the operation timeline, and allow bounded retries after quarantine.
+  Approval now requires the exact draft baseline to have been reviewed.
 - `v1.0.0` blockers include product-backed staging for all four Compose profiles,
   ownership-verified removal with shared-resource preservation, and staging
   end-to-end and fault acceptance. The version and artifact path still target
