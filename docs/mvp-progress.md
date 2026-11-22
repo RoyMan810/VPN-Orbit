@@ -141,6 +141,12 @@ is allowed.
   resumable repair, exact cleanup, and the separate typed firewall profile. Temporary NOPASSWD sudo and all managed
   artifacts were removed afterward. No production VPS was used.
 
+## P6 final acceptance
+
+- Added `docs/mvp-acceptance.md` with the evidence matrix for P0–P5.
+- Main CI run for `f741656` passed; no open PRs remain.
+- Production readiness remains explicitly unclaimed because no production deployment or real VPS was used.
+
 ## P1.1 verification
 
 - Passed: `pip check`, compile/import checks, Authority tests, runtime CLI tests,
