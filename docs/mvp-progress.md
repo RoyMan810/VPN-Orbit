@@ -4,8 +4,8 @@
 
 - Release-review baseline: `4c4f1bde222248da7c572572572a9a2718391395` (PR #156).
 - P0 removal of excluded backup, rescue, activation, self-update, stage0, and recovery installation functionality is complete.
-- No production installations or data exist, and no real VPS has been used.
-- Active stage: `v1.0.0` release review. Release gate remains open.
+- The dedicated disposable Ubuntu VM is the only server used for staging.
+- `v1.0.0` release acceptance is incomplete.
 
 ## Release review
 
@@ -49,11 +49,24 @@
 - The bundle builder and installer validate release versions such as `1.0.0`
   and keep development bundles behind `--development`. Both channels use
   the same signature or exact local digest verification. The checked-in
-  package version remains `0.1.0.dev1` pending release acceptance.
-- The `1.0.0` rehearsal exposed a development-only tag check in the
-  systemd preflight. The same tag derivation now binds installation and
-  startup to the channel and manifest digest. CI also exercises a signed
-  release-channel fixture through the actual systemd and Compose installation.
+  package version is `0.1.0.dev1`. PR #162 passed CI runs `45077176107` and
+  `45077176080`. A local rehearsal checkout at `d483203` produced real signed
+  and digest-authenticated `1.0.0` bundles. Both passed manifest and wheel
+  snapshot verification.
+- The first `1.0.0` staging rehearsal stopped when the systemd preflight
+  rejected the release image tag. PR #163 fixed tag verification and added a
+  signed release fixture to the systemd and Compose CI lab. Runs
+  `45078781368` and `45078781371` passed.
+- Main at `0f663f4` passed CI (`45077548642`), one-command install
+  (`45077548632`), WebUI (`45077552278`), and typed Docker restart (`45077555472`).
+- Main at `3eac498` passed CI (`45079114921`, after a rerun of the timesyncd job),
+  one-command install (`45079115049`), WebUI (`45079205286`), and typed Docker
+  restart (`45079207883`).
+- The staging rehearsal at `ffa7993` installed the `1.0.0` Controller on a clean
+  overlay. HTTPS login passed. The original session and audit verification
+  survived a Compose restart. The teardown script used an incorrect XML path.
+  Restoring the saved domain definition manually brought back the original
+  staging disk, pinned SSH, and HTTPS health.
 - `v1.0.0` blockers include product-backed staging for all four Compose profiles,
   ownership-verified removal with shared-resource preservation, and staging
   end-to-end and fault acceptance. The [acceptance matrix](mvp-acceptance.md)
@@ -88,11 +101,11 @@ durable jobs, idempotency, UNKNOWN_OUTCOME, reconciliation, TimeHealth, firewall
 rollback and SSH checks, Docker restart protection, and unfinished-job recovery remain.
 The existing reconciliation paths now have browser and runtime coverage for lost
 responses, UNKNOWN_OUTCOME, restart receipt reconciliation, idempotency replay, and
-resource-scoped permissions. P1 regression verification is complete. The next task
-P2 onboarding, resumable repair, target-bound cleanup, and disposable acceptance
-are complete. P3 Firewall WebUI and disposable fault acceptance are complete.
-P4 typed Compose profile catalog work is in progress; no production deployment
-is allowed.
+resource-scoped permissions. P2 disposable acceptance covered onboarding,
+resumable repair, and target-bound cleanup. P3 disposable acceptance covered
+Firewall WebUI and fault handling. P4 and P5 have fixture coverage for rendering
+and diagnostics. Product-backed deployment and ownership-verified removal are
+release blockers.
 
 ## P4.1 implementation
 

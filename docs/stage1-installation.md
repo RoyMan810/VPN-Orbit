@@ -109,7 +109,7 @@ sudo /opt/vpn-orbit/admin create-owner --username roman
 
 Пароль вводится скрыто и не передаётся в argv, env или install logs. Внутренний одноразовый bootstrap token потребляется этим локальным действием; первый Web-посетитель не создаёт Owner. `admin verify-image` используется systemd для проверки образа.
 
-Существующие DNS, системный Nginx, certificates, firewall и listeners 80/443 не изменяются. Для Web API владелец подключает свой HTTPS reverse proxy к loopback endpoint, сохраняет публичный `Host`, устанавливает `X-Forwarded-Proto: https` и заменяет `X-Forwarded-For` фактическим адресом клиента. Root configuration доверяет только loopback и обнаруженному gateway отдельной Compose-сети. HTTP healthz сообщает liveness; он не удостоверяет remote health или DR readiness. Recovery остаётся `NOT_READY` до полного backup/restore workflow.
+При ручной установке владелец подключает HTTPS reverse proxy к loopback endpoint. Прокси сохраняет публичный `Host`, устанавливает `X-Forwarded-Proto: https` и заменяет `X-Forwarded-For` фактическим адресом клиента. Root configuration доверяет только loopback и обнаруженному gateway отдельной Compose-сети. `/healthz` сообщает, отвечает ли API. Состояние SSH-целей проверяется отдельным probe.
 
 ## Проверки
 

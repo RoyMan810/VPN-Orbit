@@ -10,6 +10,7 @@ Status date: November 23, 2026
 | Authority/Broker/Worker and UNKNOWN_OUTCOME | Runtime tests and disposable process-boundary checks | PASS |
 | TimeHealth, firewall rollback, SSH verification | Required CI and disposable fault checks | PASS |
 | Fresh installation and restart protection | Ubuntu 24.04 disposable CI acceptance | PASS |
+| Release-channel Controller installation | Signed systemd/Compose fixture passed CI. Fresh installation from rehearsal commit `ffa7993`, HTTPS login, session persistence and audit integrity passed on staging | PASS |
 | Historical migration and excluded recovery contracts | PRs #133-#134 and required CI | PASS |
 
 ## VPS Onboarding
@@ -34,7 +35,8 @@ Status date: November 23, 2026
 | Correlation IDs and safe API error codes | Browser/API tests | PASS |
 | Resource-level permissions | API projection, browser controls, CI | PASS |
 | Typed firewall WebUI and reconciliation | Browser tests, runtime rollback/reconciliation tests | PASS |
-| Typed optional Compose profiles | Synthetic catalog, selection renderer and fragment diagnostics | FIXTURE PASS |
+| Staging fault acceptance with a managed target | Loss before and after dispatch, reconciliation, idempotency replay, firewall rollback and typed Docker restart have disposable CI coverage. The staging Controller was installed with an empty target policy | PENDING |
+| Typed optional Compose profiles | Synthetic catalog, selection renderer and fragment diagnostics. Docker Compose v5.8.0 validated the generated `services` and `networks` on staging | FIXTURE PASS |
 | Existing Compose installations and protected removal | Runtime ownership, fresh Docker evidence and preservation of shared resources still require acceptance | BLOCKED |
 | Remnawave Panel/Node and Bedolaga Bot/Cabinet | Examples use placeholder images. The Node profile has no network, while [upstream Node deployment](https://github.com/remnawave/node/blob/c1f083cab84b05ae2bb01d854248402d6073952d/docker-compose-prod.yml) uses host networking. The Bot profile lacks the PostgreSQL and Redis services declared by the [upstream Bot deployment](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/blob/dcefef9704311f97016257890df45ec181d0840c/docker-compose.yml). Product-backed installation and health checks are pending | BLOCKED |
 
