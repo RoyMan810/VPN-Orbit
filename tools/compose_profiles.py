@@ -24,15 +24,9 @@ def load_catalog(path: Path):
 
 
 def _validate_profile(name, profile):
-    if not isinstance(profile, dict) or set(profile) != {
-        "kind", "network", "network_group", "ports", "env", "volumes", "depends_on"
-    }:
+    if not isinstance(profile, dict) or set(profile) != {"kind", "network", "ports", "env", "volumes", "depends_on"}:
         raise ValueError("COMPOSE_PROFILE_INVALID")
-    group = profile["network_group"]
-    if (not NAME.fullmatch(name) or profile["kind"] != name
-            or profile["network"] not in ("bridge", "isolated")
-            or (profile["network"] == "bridge" and (not isinstance(group, str) or not NAME.fullmatch(group)))
-            or (profile["network"] == "isolated" and group is not None)):
+    if not NAME.fullmatch(name) or profile["kind"] != name or profile["network"] not in ("internal", "isolated"):
         raise ValueError("COMPOSE_PROFILE_INVALID")
     if not isinstance(profile["ports"], list) or any(type(port) is not int or not 1 <= port <= 65535 for port in profile["ports"]):
         raise ValueError("COMPOSE_PROFILE_INVALID")
@@ -94,9 +88,9 @@ def render(catalog, selected):
         if profile["network"] == "isolated":
             service["network_mode"] = "none"
         else:
-            network = f"vpn-orbit-{profile['network_group']}"
+            network = f"vpn-orbit-{name}"
             service["networks"] = [network]
-            networks[network] = {"driver": "bridge", "internal": False}
+            networks[network] = {"driver": "bridge", "internal": True}
         if profile["ports"]:
             service["ports"] = [
                 {"target": port, "published": str(port), "host_ip": "127.0.0.1", "protocol": "tcp"}

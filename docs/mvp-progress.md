@@ -59,8 +59,6 @@ is allowed.
 - Selection remains non-deploying and rejects unknown profiles, mutable tags,
   unallowlisted env/volume keys, unsafe volume paths, missing dependencies, and
   non-isolated Node profiles.
-- Related application services use an explicitly shared network group; isolated
-  Node profiles remain networkless.
 
 ## P2.3 verification
 

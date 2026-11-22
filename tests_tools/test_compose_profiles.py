@@ -23,7 +23,7 @@ class ComposeProfileTests(unittest.TestCase):
         self.assertTrue(service["read_only"])
         self.assertEqual(service["cap_drop"], ["ALL"])
         self.assertEqual(service["ports"][0]["host_ip"], "127.0.0.1")
-        self.assertFalse(result["networks"]["vpn-orbit-remnawave"]["internal"])
+        self.assertTrue(result["networks"]["vpn-orbit-remnawave-panel"]["internal"])
 
     def test_networkless_node_and_explicit_service_dependencies(self):
         catalog = load_catalog(Path(__file__).parents[1] / "deploy/compose-profiles.example.json")
@@ -38,9 +38,6 @@ class ComposeProfileTests(unittest.TestCase):
         })
         self.assertEqual(pair["services"]["bedolaga-bot"]["depends_on"],
                          {"bedolaga-cabinet": {"condition": "service_healthy"}})
-        self.assertEqual(pair["services"]["bedolaga-bot"]["networks"],
-                         pair["services"]["bedolaga-cabinet"]["networks"])
-        self.assertIn(pair["services"]["bedolaga-bot"]["networks"][0], pair["networks"])
 
     def test_selection_file_renders_all_declared_profiles(self):
         catalog_path = Path(__file__).parents[1] / "deploy/compose-profiles.example.json"
