@@ -22,10 +22,36 @@ from vpn_orbit.runtime.storage import _credential_permissions
 DEPLOY = Path(__file__).resolve().parents[1] / "deploy"
 sys.path.insert(0, str(DEPLOY))
 from artifact import AGE_FILE, AGE_SHA256, ArtifactError, FIXED_FILES, canonical, manifest, snapshot, trusted_key
-from installer import check_buildx, advise_capacity, compose_document, install, origin, supported_compose, supported_ubuntu
+from installer import (check_buildx, advise_capacity, compose_document, install, origin,
+                       supported_compose, supported_ubuntu, verify_image)
 
 
 class InstallationTests(unittest.TestCase):
+    def test_runtime_image_verification_binds_tag_to_channel_digest_and_image_id(self):
+        base = {"v": 1, "project": "vpn-orbit", "manifest_sha256": "a" * 64,
+                "image_id": "sha256:" + "b" * 64, "docker_host": "unix:///var/run/docker.sock"}
+        for version, channel, prefix in (("0.1.0.dev1", "development", "dev"), ("1.0.0", "release", "release")):
+            image = f"vpn-orbit/controller:{prefix}-" + "a" * 24
+            metadata = {**base, "version": version, "channel": channel, "image": image}
+            with (
+                self.subTest(channel=channel),
+                patch("installer.Path.lstat", return_value=SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0)),
+                patch("installer.Path.read_bytes", return_value=canonical(metadata)) as read,
+                patch("installer.daemon"),
+                patch("installer.docker", return_value=base["image_id"]) as docker,
+            ):
+                verify_image()
+                docker.assert_called_once_with(base["docker_host"], "image", "inspect", "--format", "{{.Id}}", image)
+                docker.return_value = "sha256:" + "c" * 64
+                with self.assertRaisesRegex(ArtifactError, "INSTALLED_IMAGE_ID_CHANGED"):
+                    verify_image()
+                docker.reset_mock()
+                for changed in ({"image": image[:-1] + "b"}, {"version": "01.0.0"}, {"channel": "wrong"}):
+                    read.return_value = canonical({**metadata, **changed})
+                    with self.assertRaisesRegex(ArtifactError, "INSTALLATION_METADATA_INVALID"):
+                        verify_image()
+                docker.assert_not_called()
+
     def test_base_image_pull_timeout_precedes_controller_state_changes(self):
         image = self.value["python_image"]
         args = SimpleNamespace(bundle=self.bundle, trust_key=None, manifest_sha256="a" * 64,
