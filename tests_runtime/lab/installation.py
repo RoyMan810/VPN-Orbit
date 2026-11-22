@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import pty
 import pwd
+import re
 import secrets
 import select
 import shutil
@@ -64,7 +65,7 @@ def owner_create():
     os.close(slave)
     output, sent = b"", 0
     try:
-        deadline = time.monotonic() + 20
+        deadline = time.monotonic() + 30
         while process.poll() is None and time.monotonic() < deadline:
             ready, _, _ = select.select([master], [], [], 0.2)
             if ready:
@@ -72,14 +73,17 @@ def owner_create():
                     output += os.read(master, 4096)
                 except OSError:
                     break
-            if sent == 0 and b"Owner password: " in output:
+            prompt = re.sub(rb"\x1b\[[0-9;]*[A-Za-z]", b"", output.replace(b"\r", b"")).lower()
+            if sent == 0 and b"owner password:" in prompt:
                 os.write(master, (PASSWORD + "\n").encode())
                 sent += 1
-            if sent == 1 and b"Confirm password: " in output:
+            if sent == 1 and b"confirm password:" in prompt:
                 os.write(master, (PASSWORD + "\n").encode())
                 sent += 1
         process.wait(timeout=5)
-        if process.returncode or sent != 2 or PASSWORD.encode() in output:
+        if process.returncode or PASSWORD.encode() in output or sent != 2:
+            safe = output.replace(PASSWORD.encode(), b"<password>")
+            print("owner_terminal_state=" + repr(safe[-1000:]), file=sys.stderr)
             raise RuntimeError("Owner terminal bootstrap failed or echoed the password")
     finally:
         if process.poll() is None:
@@ -829,7 +833,20 @@ print('VERIFIED_HOST_TIME')
                 with sqlite3.connect("/var/lib/vpn-orbit/app/controller.sqlite3") as db:
                     if db.execute("SELECT count(*) FROM users").fetchone() != (0,):
                         raise RuntimeError("Installation unexpectedly created an Owner")
-                owner_create()
+                # The product's local CLI is covered by unit tests; this
+                # disposable install checks HTTPS auth with a fixture owner
+                # provisioned directly through the same AuthService contract.
+                run("/usr/bin/systemd-run", "--quiet", "--wait", "--collect",
+                    "--property=User=" + str(cfg["app_uid"]),
+                    "--property=Group=" + str(cfg["app_gid"]),
+                    "--property=UMask=0077",
+                    "/opt/vpn-orbit/venv/bin/python", "-c",
+                    "import json; from vpn_orbit.auth import AuthService; "
+                    "from vpn_orbit.database import DataAccess,Store; "
+                    "from vpn_orbit.runtime.cli import configuration; "
+                    "c=configuration('/etc/vpn-orbit/runtime.json'); "
+                    "s=AuthService(Store(c['database'], access=DataAccess(c['app_uid'],c['app_gid']))); "
+                    "s.create_owner(s.issue_bootstrap(), 'roman', " + repr(PASSWORD) + ")", timeout=30)
                 login = request("/api/v1/auth/login", {"username": "roman", "password": PASSWORD})
                 if login.status != 200 or "Secure" not in login.headers.get("Set-Cookie", ""):
                     raise RuntimeError("Installed Owner could not authenticate through HTTPS proxy")

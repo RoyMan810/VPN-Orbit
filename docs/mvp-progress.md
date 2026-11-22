@@ -20,7 +20,7 @@ normal fresh installation, durable jobs, Audit, Vault, Authority, or UNKNOWN_OUT
 
 ## Next
 
-1. Remove remaining backup/rescue/recovery CLI entrypoints and their workflows.
+1. Remove remaining orphaned backup/rescue runtime modules and tests.
 2. Remove historical application schema compatibility.
 3. Fix current WebUI/reconciliation gaps.
 4. Complete VPS onboarding, firewall UI, and typed application deployment.

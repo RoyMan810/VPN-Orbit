@@ -9,7 +9,4 @@
 ## Справка по действующему коду
 
 - [Вход и аудит](stage1-foundation.md) · [Worker, Broker и SSH](stage1-runtime.md)
-- [Ключи Vault](stage1-vault-pins.md) · [Проверка времени](stage1-time-health.md)
-- [Барьер записи](stage1-backup-barrier.md)
-- [Резервные копии](stage1-controller-archive.md) · [SFTP](stage1-sftp-publication.md)
-- [Rescue](stage1-rescue.md) · [Установка для восстановления](stage1-recovery-installation.md) · [Активация](stage1-recovery-activation.md)
+- [Проверка времени](stage1-time-health.md)

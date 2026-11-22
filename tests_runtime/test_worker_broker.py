@@ -184,14 +184,6 @@ class RuntimeTests(unittest.TestCase):
         self.worker.run(once=True)
         self.assertEqual(self.job(queued["id"])["status"], "SUCCEEDED")
 
-    def test_recovery_worker_does_not_reconcile_or_claim_archived_jobs(self):
-        queued = self.enqueue()
-        self.writers.publish("READ_ONLY_RECOVERY")
-        with patch.object(self.queue, "recover", side_effect=AssertionError("must not reconcile restored work")):
-            self.assertFalse(self.worker.run(once=True))
-        self.assertEqual(self.job(queued["id"])["status"], "QUEUED")
-        self.assertEqual(self.executions, [])
-
     def test_stop_during_an_accepted_job_finishes_it_without_claiming_the_next(self):
         first, second = self.enqueue(), self.enqueue("fixture-request-0002")
         with self.store.write() as db:

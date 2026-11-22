@@ -129,18 +129,11 @@ class Worker:
         stop = stop if stop is not None else Event()
         path = self.queue.store.path.with_suffix(".worker.lock")
         with process_lock(path, shared_gid=self.queue.store.access.shared_gid):
-            def recovery_profile():
-                writers = self.queue.store.writers
-                return writers is not None and writers.state()["phase"] == "READ_ONLY_RECOVERY"
-
-            # Restored jobs are quarantined by Rescue; startup must not reconcile
-            # them against a fresh authority or require schema-2 queue tables.
-            if not recovery_profile():
-                self.queue.recover(self._recover_result)
-                self.restart.recover_legacy_requests()
-                self.firewall.recover_legacy_requests()
+            self.queue.recover(self._recover_result)
+            self.restart.recover_legacy_requests()
+            self.firewall.recover_legacy_requests()
             while not stop.is_set():
-                found = False if recovery_profile() else self.run_one()
+                found = self.run_one()
                 if once:
                     return found
                 if not found:

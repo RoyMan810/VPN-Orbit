@@ -36,11 +36,11 @@ API и Worker имеют разные UID и общую отдельную гр�
 
 Vault и Broker receipts принадлежат `vpn-orbit-broker` в отдельных каталогах 0700. Gate journal и signing key принадлежат root в каталоге 0700. Backend не имеет групп Broker/gate и не получает их sockets. Worker имеет только нужные supplementary groups и не читает Vault, DEK или gate database. AF_UNIX server проверяет UID/GID из SO_PEERCRED; JSON не задаёт роль. Systemd создаёт listener до запуска сервисного UID, поэтому клиент допускает доверенный root socket activation и ожидаемый UID службы.
 
-Новая БД имеет схему 5. Наблюдения поддерживаются на схемах 2–5. Постановка подтверждённых перезапусков в общую очередь требует схемы 4 или 5; firewall требует схемы 5. Схема 1 сохраняет Auth API, но очередь отвечает `QUEUE_SCHEMA_REQUIRES_VERIFIED_MIGRATION`. Автоматической миграции или удаления существующих пользователей нет. Перенос существующей БД должен пройти отдельный подтверждённый Backup Gate; он не заменяется копированием WAL/SHM.
+Новая БД имеет единую актуальную схему 5. Автоматической миграции или удаления существующих пользователей нет; старые схемы не поддерживаются первой версией.
 
 ## Vault и SSH
 
-[Snapshot writer admission](stage1-backup-barrier.md) включён в новую установку. Business mutations и новые claims/permits закрываются при drain; ACK, checkpoints, session metadata и Audit/Outbox продолжают commit. Короткий exclusive barrier берётся до SQLite transaction и отпускается до шифрования/сети. Root-owned state доступен контейнерам только для чтения; отдельный Coordinator journal и watchdog восстанавливают прерванный локальный capture без автоматического признания backup пригодным.
+Writer admission включён в новую установку. Business mutations и новые claims/permits закрываются при drain; ACK, checkpoints, session metadata и Audit/Outbox продолжают commit.
 
 Private key versions неизменяемы. Blob зашифрован XChaCha20-Poly1305; AAD включает secret/version, kind, purpose, owner, consumer digest, target, state, policy revision и key version. Metadata и состояние находятся в private Broker journal. Замена metadata или ciphertext не даёт разрешённого использования. `REVOKED` запрещает следующий Use.
 
