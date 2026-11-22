@@ -2,7 +2,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from tools.compose_profiles import load_catalog, render
+from tools.compose_profiles import load_catalog, load_selection, render
 
 
 class ComposeProfileTests(unittest.TestCase):
@@ -38,6 +38,13 @@ class ComposeProfileTests(unittest.TestCase):
         })
         self.assertEqual(pair["services"]["bedolaga-bot"]["depends_on"],
                          {"bedolaga-cabinet": {"condition": "service_healthy"}})
+
+    def test_selection_file_renders_all_declared_profiles(self):
+        catalog_path = Path(__file__).parents[1] / "deploy/compose-profiles.example.json"
+        selection_path = Path(__file__).parents[1] / "deploy/compose-profiles.selection.example.json"
+        rendered = load_selection(selection_path, load_catalog(catalog_path))
+        self.assertEqual(set(rendered["services"]), {"remnawave-panel", "remnawave-node", "bedolaga-bot", "bedolaga-cabinet"})
+        self.assertEqual(rendered["services"]["remnawave-node"]["network_mode"], "none")
 
     def test_unknown_environment_volume_and_tagged_image_are_rejected(self):
         profile = load_catalog(Path(__file__).parents[1] / "deploy/compose-profiles.example.json")["profiles"]["remnawave-panel"]
