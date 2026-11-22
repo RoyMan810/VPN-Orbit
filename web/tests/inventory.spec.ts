@@ -549,10 +549,9 @@ test('opens a Docker restart preview through the real Controller and clears it o
   await expect(page.getByText('Preview only. No restart was scheduled.')).toHaveCount(0)
 })
 
-test('shows the real Controller denial when the operator lacks restart permission', async ({ page }) => {
+test('hides restart preview when the operator lacks restart permission', async ({ page }) => {
   await signIn(page, 'fixture-operator')
-  await page.getByRole('button', { name: 'Preview restart for fixture / web' }).click()
-  await expect(page.getByRole('alert')).toHaveText('The Controller denied this preview.')
+  await expect(page.getByRole('button', { name: 'Preview restart for fixture / web' })).toHaveCount(0)
 })
 
 test('rejects a preview that belongs to a different observation', async ({ page }) => {
@@ -663,13 +662,9 @@ test('resumes reading the accepted job and preserves an unknown outcome', async 
   expect(submissions).toBe(1)
 })
 
-test('displays the Controller denial for an operator with read access only', async ({ page }) => {
+test('hides SSH checks for an operator without probe permission', async ({ page }) => {
   await signIn(page, 'fixture-operator')
-  const denied = page.waitForResponse(response => response.url().endsWith('/observations') && response.status() === 403)
-  await page.getByRole('button', { name: 'Run SSH check' }).click()
-  await denied
-  await expect(page.getByText('The Controller denied this SSH check.', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Retry the same request' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Run SSH check' })).toHaveCount(0)
 })
 
 for (const locale of ['en', 'ru'] as const) {
