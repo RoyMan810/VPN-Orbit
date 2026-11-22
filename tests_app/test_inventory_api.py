@@ -133,6 +133,15 @@ class InventoryTests(Fixture):
             self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 5)
         self.assertEqual(self.store.verify_audit(), before)
 
+    def test_inventory_projects_resource_permissions_without_granting_them(self):
+        self.create_user(name="scoped", grants=[
+            {"permission": "vps:read", "resource_id": SCOPE},
+            {"permission": "vps:probe", "resource_id": SCOPE},
+        ])
+        response = self.other_client("scoped").get(f"/api/v1/resources/{SCOPE}")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["permissions"], {"probe": True, "restart": False, "firewall": False})
+
     def test_scope_is_filtered_before_pagination_and_foreign_detail_is_hidden(self):
         self.create_user(grants=[{"permission": "vps:read", "resource_id": OTHER}])
         operator = self.other_client("operator")
