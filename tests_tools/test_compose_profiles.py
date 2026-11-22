@@ -3,8 +3,8 @@ import tempfile
 import unittest
 import sys
 
-from tools.compose_profiles import (audit, audit_docker_state, catalog_digest, execute_removal,
-                                    load_catalog, load_selection, removal_plan, render)
+from tools.compose_profiles import (audit, audit_docker_state, catalog_digest, load_catalog,
+                                    load_selection, removal_plan, render)
 
 
 class ComposeProfileTests(unittest.TestCase):
@@ -79,8 +79,12 @@ class ComposeProfileTests(unittest.TestCase):
         plan = removal_plan(selection, selection)
         self.assertEqual(plan["status"], "CONFIRMATION_REQUIRED")
         self.assertTrue(plan["data_preserved"])
-        authorized = removal_plan(selection, selection, confirmed=True)
-        self.assertFalse(authorized["compose_down"])
+        reviewed = removal_plan(selection, selection, confirmed=True)
+        self.assertEqual(reviewed["status"], "PLAN_REVIEWED")
+        self.assertFalse(reviewed["ownership_verified"])
+        self.assertFalse(reviewed["compose_down"])
+        with self.assertRaisesRegex(ValueError, "COMPOSE_REMOVAL_BLOCKED_DRIFT"):
+            removal_plan({**selection, "include": ["foreign.yaml"]}, selection, confirmed=True)
 
     def test_read_only_docker_state_adapter_requires_owned_catalog_bound_profiles(self):
         catalog = load_catalog(Path(__file__).parents[1] / "deploy/compose-profiles.example.json")
@@ -92,22 +96,16 @@ class ComposeProfileTests(unittest.TestCase):
             for name in expected["services"]
         ], "networks": [], "volumes": []}
         result = audit_docker_state(state, expected)
-        self.assertEqual(result["status"], "MATCHED")
+        self.assertEqual(result["status"], "LABELS_MATCHED")
+        self.assertFalse(result["ownership_verified"])
         changed = {**state, "containers": [{**state["containers"][0],
                                             "labels": {**state["containers"][0]["labels"],
                                                        "com.vpn-orbit.catalog-sha256": "0" * 64}}] + state["containers"][1:]}
         self.assertEqual(audit_docker_state(changed, expected)["reason"],
                          "CONTAINER_CATALOG_DIGEST_MISMATCH")
 
-    def test_confirmed_removal_removes_only_containers_and_networks(self):
-        catalog = load_catalog(Path(__file__).parents[1] / "deploy/compose-profiles.example.json")
-        expected = load_selection(Path(__file__).parents[1] / "deploy/compose-profiles.selection.example.json", catalog)
-        calls = []
-        result = execute_removal(removal_plan(expected, expected, confirmed=True), calls.append)
-        self.assertEqual(result["status"], "REMOVAL_APPLIED")
-        self.assertTrue(result["data_preserved"])
-        self.assertTrue(all("volume" not in call for call in calls))
-        self.assertTrue(all(call[-1] != "down" for call in calls))
+        duplicate = {**state, "containers": [*state["containers"], state["containers"][0]]}
+        self.assertEqual(audit_docker_state(duplicate, expected)["reason"], "DUPLICATE_MANAGED_PROFILE")
 
     def test_renderer_cli_audits_actual_fragments_without_side_effects(self):
         import json

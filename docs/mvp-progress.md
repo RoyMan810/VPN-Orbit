@@ -2,11 +2,25 @@
 
 ## Current state
 
-- Main: `21e7b1d` (PR #154 merged).
-- PRs #126–#154 are merged.
+- Release-review baseline: `4c4f1bde222248da7c572572572a9a2718391395` (PR #156).
 - P0 removal of excluded backup, rescue, activation, self-update, stage0, and recovery installation functionality is complete.
 - No production installations or data exist, and no real VPS has been used.
-- Active stage: P6 final MVP acceptance.
+- Active stage: `v1.0.0` release review. Release gate remains open.
+
+## Release review
+
+- Baseline main CI run `45066337967` passed on the reviewed commit.
+- Pinned SSH preflight reached the dedicated Ubuntu 24.04.5 x86_64 VM on the
+  libvirt NAT network. VPN-Orbit and Docker state directories were absent.
+  Non-interactive sudo was unavailable. The external `clear` snapshot exists.
+  Snapshot recovery has not been exercised in this review.
+- Removed the unused Compose removal executor. It trusted a caller-supplied plan
+  and resolved resources by name without verifying live ownership. The existing
+  CLI now records manual review and leaves ownership explicitly unverified.
+- `v1.0.0` blockers include product-backed staging for all four Compose profiles,
+  ownership-verified removal with shared-resource preservation, and staging
+  end-to-end and fault acceptance. The version and artifact path still target
+  development builds.
 
 ## Completed
 
@@ -92,14 +106,14 @@ is allowed.
 
 ## P5.5 verification
 
-- Full CI passed for typed profile catalog, drift audit, read-only Docker state adapter, and confirmed data-preserving removal.
-- P5 is complete in non-production scope; production deployment and real product images remain excluded.
+- CI passed the synthetic catalog, fragment and label checks. The previous
+  removal test checked generated commands through a test runner. Live ownership
+  and data preservation remain release blockers.
 
 ## P5.4 implementation
 
-- Added an explicitly confirmed removal executor that removes only owned service
-  containers and networks; it never runs `compose down` and never removes volumes.
-- Plan-only remains the default; drift or missing confirmation blocks execution.
+- The release review withdrew the removal executor. Fragment and label checks
+  support review, and the tool does not perform Docker mutations.
 
 ## P2.3 verification
 
