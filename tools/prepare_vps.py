@@ -356,7 +356,9 @@ class State:
     def load(self):
         if not self.path.exists():
             return None
-        if self.path.is_symlink() or self.path.stat().st_mode & 0o077:
+        info = self.path.lstat()
+        if (self.path.is_symlink() or not self.path.is_file() or info.st_nlink != 1
+                or info.st_uid != os.getuid() or info.st_mode & 0o077):
             raise ValueError("Provisioning state file is not private")
         value = json.loads(self.path.read_text())
         if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get("phases"), dict):
@@ -401,15 +403,23 @@ class Provisioner:
         self.firewall_key = output / "firewall"
 
     def _context(self):
-        if not self.key.is_file() or self.key.is_symlink():
+        if not self._managed_file(self.key) or not self._managed_file(self.key.with_suffix(".pub")):
             raise ValueError("The managed observation key pair is missing; run --cleanup and retry")
         context = {"probe_public_key": self.key.with_suffix(".pub").read_bytes(),
                    "firewall_public_key": None, "firewall": self.firewall, "ssh_port": self.port}
         if self.firewall:
-            if not self.firewall_key.is_file() or self.firewall_key.is_symlink():
+            if not self._managed_file(self.firewall_key) or not self._managed_file(self.firewall_key.with_suffix(".pub")):
                 raise ValueError("The managed firewall key pair is missing; run --cleanup and retry")
             context["firewall_public_key"] = self.firewall_key.with_suffix(".pub").read_bytes()
         return context
+
+    @staticmethod
+    def _managed_file(path):
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return False
+        return path.is_file() and not path.is_symlink() and info.st_nlink == 1
 
     def _record(self, journal, phase, status, *, error=None):
         journal["phases"][phase] = status
@@ -617,13 +627,19 @@ def main():
             key = args.output / "probe"
             firewall_key = args.output / "firewall"
             policy = args.output / "targets.json"
+            if key.is_symlink() or key.with_suffix(".pub").is_symlink():
+                raise ValueError("The saved observation key pair contains a symlink")
             if not key.exists():
                 subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+            if args.firewall and (firewall_key.is_symlink() or firewall_key.with_suffix(".pub").is_symlink()):
+                raise ValueError("The saved firewall key pair contains a symlink")
             if args.firewall and not firewall_key.exists():
                 subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(firewall_key)], check=True)
             capabilities = ["host.probe"] + (["firewall.apply"] if args.firewall else [])
             scope = {"ip": ip, "port": args.port, "allowed_cidrs": [ip + "/32"], "host_key": host_key,
                      "policy_revision": 1, "dependencies": [], "capabilities": capabilities}
+            if policy.is_symlink():
+                raise ValueError("The saved policy is a symlink")
             if policy.exists():
                 value = json.loads(policy.read_text())
                 target, = value["targets"]
@@ -631,9 +647,9 @@ def main():
                     raise ValueError("The saved policy belongs to a different VPS or capability set")
                 if ("firewall_secret_ref" in target) != args.firewall:
                     raise ValueError("The saved policy belongs to a different capability set")
-                if any(not path.is_file() or path.is_symlink() for path in (key, key.with_suffix(".pub"))):
+                if any(not Provisioner._managed_file(path) for path in (key, key.with_suffix(".pub"))):
                     raise ValueError("The saved observation key pair is missing")
-                if args.firewall and any(not path.is_file() or path.is_symlink()
+                if args.firewall and any(not Provisioner._managed_file(path)
                                          for path in (firewall_key, firewall_key.with_suffix(".pub"))):
                     raise ValueError("The saved firewall key pair is missing")
             else:
