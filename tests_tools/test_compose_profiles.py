@@ -2,7 +2,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from tools.compose_profiles import catalog_digest, load_catalog, load_selection, render
+from tools.compose_profiles import audit, catalog_digest, load_catalog, load_selection, removal_plan, render
 
 
 class ComposeProfileTests(unittest.TestCase):
@@ -65,3 +65,17 @@ class ComposeProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "COMPOSE_VOLUME_PATH_INVALID"):
             render({"profiles": {"remnawave-panel": profile}},
                    {"remnawave-panel": {"image": image, "volumes": {"panel-data": "/etc"}}})
+
+    def test_drift_blocks_removal_and_confirmation_preserves_data(self):
+        catalog = load_catalog(Path(__file__).parents[1] / "deploy/compose-profiles.example.json")
+        selection = load_selection(Path(__file__).parents[1] / "deploy/compose-profiles.selection.example.json", catalog)
+        self.assertEqual(audit(selection, selection)["status"], "MATCHED")
+        drifted = {**selection, "catalog_sha256": "f" * 64}
+        self.assertEqual(audit(drifted, selection)["reason"], "CATALOG_DIGEST_MISMATCH")
+        with self.assertRaisesRegex(ValueError, "COMPOSE_REMOVAL_BLOCKED_DRIFT"):
+            removal_plan(drifted, selection, confirmed=True)
+        plan = removal_plan(selection, selection)
+        self.assertEqual(plan["status"], "CONFIRMATION_REQUIRED")
+        self.assertTrue(plan["data_preserved"])
+        authorized = removal_plan(selection, selection, confirmed=True)
+        self.assertFalse(authorized["compose_down"])

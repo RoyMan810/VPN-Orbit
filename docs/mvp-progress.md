@@ -68,6 +68,14 @@ is allowed.
 - Rendered selections carry a canonical catalog SHA-256 so later deployment and
   drift workflows can bind installed services to the approved profile catalog.
 
+## P5.1 implementation
+
+- Added non-destructive Compose drift audit against the catalog digest and rendered
+  fragment.
+- Added removal-plan generation that blocks on drift, requires explicit confirmation,
+  lists only owned services/networks/volumes, preserves data, and never runs
+  `compose down` or deletes volumes.
+
 ## P2.3 verification
 
 - Disposable VM acceptance passed the separate typed firewall onboarding profile with exact cleanup; no remote managed artifacts remained after cleanup.
