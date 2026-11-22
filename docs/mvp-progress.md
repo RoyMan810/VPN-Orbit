@@ -6,7 +6,7 @@
 - PRs #126–#148 are merged.
 - P0 removal of excluded backup, rescue, activation, self-update, stage0, and recovery installation functionality is complete.
 - No production installations or data exist, and no real VPS has been used.
-- Active stage: P4 typed Compose profiles.
+- Active stage: P6 final MVP acceptance.
 
 ## Completed
 
@@ -89,6 +89,11 @@ is allowed.
   managed profiles block a match.
 - The adapter consumes supplied inspect-like JSON only and performs no Docker
   calls or mutations.
+
+## P5.5 verification
+
+- Full CI passed for typed profile catalog, drift audit, read-only Docker state adapter, and confirmed data-preserving removal.
+- P5 is complete in non-production scope; production deployment and real product images remain excluded.
 
 ## P5.4 implementation
 
