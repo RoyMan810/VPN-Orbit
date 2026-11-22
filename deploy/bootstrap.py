@@ -424,6 +424,8 @@ def install(owner, targets, suite, endpoint):
     revision = capture(*git, "rev-parse", "HEAD", **checkout)
     if capture(*git, "status", "--porcelain", "--untracked-files=no", **checkout):
         raise ValueError("Запустите установку из чистого зафиксированного checkout.")
+    if capture(*git, "rev-parse", "--is-shallow-repository", **checkout) != "false":
+        raise ValueError("Для установки нужна полная история Git. Выполните git fetch --unshallow в исходном checkout.")
     with tempfile.TemporaryDirectory(prefix="vpn-orbit-bootstrap-", dir="/var/tmp") as location:
         temporary = Path(location)
         temporary.chmod(0o711)

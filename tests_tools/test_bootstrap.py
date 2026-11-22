@@ -71,6 +71,16 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(bootstrap.python_build_jobs(2, 8 * gib), 2)
         self.assertEqual(bootstrap.python_build_jobs(8, 8 * gib), 4)
 
+    def test_shallow_checkout_is_rejected_before_package_changes(self):
+        with (patch.object(bootstrap, "capture", side_effect=["a" * 40, "", "true"]) as capture,
+              patch.object(bootstrap, "apt") as apt,
+              patch.object(bootstrap, "install_docker") as install_docker):
+            with self.assertRaisesRegex(ValueError, "git fetch --unshallow"):
+                bootstrap.install("admin", None, "noble", bootstrap.WebEndpoint())
+            self.assertEqual(capture.call_args.args[-2:], ("rev-parse", "--is-shallow-repository"))
+            apt.assert_not_called()
+            install_docker.assert_not_called()
+
     def test_download_rejects_archive_with_wrong_digest(self):
         with tempfile.TemporaryDirectory() as location:
             output = Path(location) / "archive"

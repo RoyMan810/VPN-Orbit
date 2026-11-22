@@ -12,14 +12,19 @@
 - Baseline main CI run `45066337967` passed on the reviewed commit.
 - Pinned SSH preflight reached the dedicated Ubuntu 24.04.5 x86_64 VM on the
   libvirt NAT network. VPN-Orbit and Docker state directories were absent.
-  Non-interactive sudo was unavailable. The external `clear` snapshot exists.
-  Snapshot recovery has not been exercised in this review.
+  Non-interactive sudo was unavailable. A fresh offline external snapshot was
+  created. The VM failed to boot with duplicate SPICE agent channels; removing
+  the duplicate restored boot, console and pinned SSH. Snapshot restore has
+  not been exercised in this review.
 - Removed the unused Compose removal executor. It trusted a caller-supplied plan
   and resolved resources by name without verifying live ownership. The existing
   CLI now records manual review and leaves ownership explicitly unverified.
 - Fixed Firewall WebUI reconciliation to submit the authenticated API request,
   refresh the operation timeline, and allow bounded retries after quarantine.
   Approval now requires the exact draft baseline to have been reviewed.
+- The first staging installation exposed a shallow Git checkout failure after
+  package installation. Bootstrap now rejects shallow checkouts before changing
+  packages; the installer requires a full checkout.
 - `v1.0.0` blockers include product-backed staging for all four Compose profiles,
   ownership-verified removal with shared-resource preservation, and staging
   end-to-end and fault acceptance. The version and artifact path still target
