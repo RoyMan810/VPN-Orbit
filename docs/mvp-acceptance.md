@@ -31,11 +31,14 @@ Status date: November 23, 2026
 | Correlation IDs and safe API error codes | Browser/API tests | PASS |
 | Resource-level permissions | API projection, browser controls, CI | PASS |
 | Typed firewall WebUI and reconciliation | Browser tests, runtime rollback/reconciliation tests | PASS |
-| Typed optional Compose profiles | Catalog, selection renderer, digest binding, drift/removal tests | PASS |
+| Typed optional Compose profiles | Synthetic catalog, selection renderer and fragment diagnostics | FIXTURE PASS |
+| Existing Compose installations and protected removal | Runtime ownership, fresh Docker evidence and preservation of shared resources still require acceptance | BLOCKED |
+| Remnawave Panel/Node and Bedolaga Bot/Cabinet | Checked-in examples use placeholder images. Product-backed installation and health checks have not run | BLOCKED |
 
 ## Remaining Boundary
 
-No production deployment, real VPS, Remnawave/Bedolaga image deployment, or destructive
-production-like removal was performed. P4 profile work is catalog/validation only;
-P5 removal is confirmation-gated and data-preserving. MVP must not be declared ready
-for production until a release-specific review accepts those boundaries.
+The recorded checks cover the controller and the disposable test scenarios listed
+above. The `v1.0.0` gate also requires product-backed staging and ownership-verified
+Compose removal. Compose fragment comparison and matching labels support manual
+review. They provide no authorization to delete resources. Production readiness
+requires a separate decision.

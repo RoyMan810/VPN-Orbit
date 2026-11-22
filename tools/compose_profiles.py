@@ -120,8 +120,10 @@ def render(catalog, selected):
 
 
 def audit(actual, expected):
-    if not isinstance(actual, dict) or actual.get("v") != 1:
+    if not isinstance(actual, dict) or type(actual.get("v")) is not int or actual["v"] != 1:
         raise ValueError("COMPOSE_METADATA_INVALID")
+    if set(actual) != {"v", "catalog_sha256", "services", "networks"}:
+        return {"status": "DRIFT", "reason": "COMPOSE_FRAGMENT_FIELDS_MISMATCH"}
     if actual.get("catalog_sha256") != expected.get("catalog_sha256"):
         return {"status": "DRIFT", "reason": "CATALOG_DIGEST_MISMATCH"}
     if actual.get("services") != expected.get("services") or actual.get("networks") != expected.get("networks"):
@@ -130,7 +132,7 @@ def audit(actual, expected):
 
 
 def audit_docker_state(state, expected):
-    """Audit read-only Docker state; never calls Docker or mutates host state."""
+    """Compare supplied container labels with profile metadata for diagnostics."""
     if not isinstance(state, dict) or set(state) != {"containers", "networks", "volumes"}:
         raise ValueError("DOCKER_STATE_INVALID")
     expected_names = set(expected["services"])
@@ -138,30 +140,32 @@ def audit_docker_state(state, expected):
     if (not isinstance(containers, list)
             or any(not isinstance(item, dict) for item in containers)):
         raise ValueError("DOCKER_STATE_INVALID")
-    managed = []
+    profiles = set()
     for item in containers:
         labels = item.get("labels")
         if not isinstance(labels, dict):
             return {"status": "DRIFT", "reason": "CONTAINER_LABELS_MISSING"}
         if labels.get("com.vpn-orbit.managed") != "true":
             continue
-        managed.append(item)
         if labels.get("com.vpn-orbit.catalog-sha256") != expected["catalog_sha256"]:
             return {"status": "DRIFT", "reason": "CONTAINER_CATALOG_DIGEST_MISMATCH"}
-        if labels.get("com.vpn-orbit.profile") not in expected_names:
+        profile = labels.get("com.vpn-orbit.profile")
+        if not isinstance(profile, str) or profile not in expected_names:
             return {"status": "DRIFT", "reason": "UNKNOWN_MANAGED_PROFILE"}
-    profiles = {item["labels"]["com.vpn-orbit.profile"] for item in managed}
+        if profile in profiles:
+            return {"status": "DRIFT", "reason": "DUPLICATE_MANAGED_PROFILE"}
+        profiles.add(profile)
     if profiles != expected_names:
         return {"status": "DRIFT", "reason": "MANAGED_PROFILE_SET_MISMATCH"}
     for key in ("networks", "volumes"):
         if not isinstance(state[key], list) or any(not isinstance(item, dict) for item in state[key]):
             raise ValueError("DOCKER_STATE_INVALID")
-    return {"status": "MATCHED", "catalog_sha256": expected["catalog_sha256"],
-            "managed_profiles": sorted(profiles), "data_preserved": True}
+    return {"status": "LABELS_MATCHED", "catalog_sha256": expected["catalog_sha256"],
+            "managed_profiles": sorted(profiles), "ownership_verified": False}
 
 
 def removal_plan(actual, expected, *, confirmed=False):
-    """Return a non-destructive removal plan; never runs Compose or deletes data."""
+    """List resources for manual review. Fragment equality cannot establish ownership."""
     result = audit(actual, expected)
     if result["status"] != "MATCHED":
         raise ValueError("COMPOSE_REMOVAL_BLOCKED_DRIFT")
@@ -171,25 +175,9 @@ def removal_plan(actual, expected, *, confirmed=False):
         volume["source"] for service in expected["services"].values()
         for volume in service.get("volumes", [])
     })
-    if not confirmed:
-        return {"status": "CONFIRMATION_REQUIRED", "services": services, "networks": networks,
-                "volumes": volumes, "data_preserved": True}
-    return {"status": "REMOVAL_AUTHORIZED", "services": services, "networks": networks,
-            "volumes": volumes, "data_preserved": True, "compose_down": False}
-
-
-def execute_removal(plan, runner):
-    """Remove owned containers/networks only; never remove volumes or run compose down."""
-    if not isinstance(plan, dict) or plan.get("status") != "REMOVAL_AUTHORIZED":
-        raise ValueError("COMPOSE_REMOVAL_CONFIRMATION_REQUIRED")
-    if plan.get("data_preserved") is not True or plan.get("compose_down") is not False:
-        raise ValueError("COMPOSE_REMOVAL_PLAN_INVALID")
-    for service in plan["services"]:
-        runner(["docker", "compose", "--project-name", "vpn-orbit", "rm", "--stop", "--force", service])
-    for network in plan["networks"]:
-        runner(["docker", "network", "rm", network])
-    return {"status": "REMOVAL_APPLIED", "services": plan["services"],
-            "networks": plan["networks"], "volumes": plan["volumes"], "data_preserved": True}
+    return {"status": "PLAN_REVIEWED" if confirmed is True else "CONFIRMATION_REQUIRED",
+            "services": services, "networks": networks, "volumes": volumes,
+            "ownership_verified": False, "data_preserved": True, "compose_down": False}
 
 
 def load_selection(path: Path, catalog):
