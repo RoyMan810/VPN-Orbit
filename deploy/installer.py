@@ -307,7 +307,10 @@ def install(args):
                               "recovery": "NOT_READY"}))
             return
         image = "vpn-orbit/controller:dev-" + digest[:24]
-        docker(args.docker_host, "pull", "--platform", "linux/amd64", manifest["python_image"], timeout=180)
+        try:
+            docker(args.docker_host, "pull", "--platform", "linux/amd64", manifest["python_image"], timeout=600)
+        except subprocess.TimeoutExpired:
+            raise ArtifactError("INSTALL_BASE_IMAGE_PULL_TIMED_OUT") from None
         docker(args.docker_host, "build", "--network=none", "--pull=false", "--build-arg", "PYTHON_IMAGE=" + manifest["python_image"],
                "--tag", image, "--file", str(stage / "deploy/Controller.Dockerfile"), str(stage), timeout=240)
         image_id = docker(args.docker_host, "image", "inspect", "--format", "{{.Id}}", image)

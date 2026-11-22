@@ -14,8 +14,10 @@
   libvirt NAT network. VPN-Orbit and Docker state directories were absent.
   Non-interactive sudo was unavailable. A fresh offline external snapshot was
   created. The VM failed to boot with duplicate SPICE agent channels; removing
-  the duplicate restored boot, console and pinned SSH. Snapshot restore has
-  not been exercised in this review.
+  the duplicate restored boot, console and pinned SSH. A new overlay backed
+  by the clean snapshot booted with the same SSH fingerprint, the SPICE
+  console endpoint, and no VPN-Orbit or Docker state. The original staging
+  disk was then reattached and its HTTPS health check passed.
 - Removed the unused Compose removal executor. It trusted a caller-supplied plan
   and resolved resources by name without verifying live ownership. The existing
   CLI now records manual review and leaves ownership explicitly unverified.
@@ -34,8 +36,15 @@
   loopback-only API port bindings.
 - CI on `4e4ae9c` passed in runs `45072402300` (main), `45072402306` (fresh
   installer), `45073910913` (typed Docker restart), and `45073913947` (WebUI).
-  The one-command installation workflow now checks authenticated session and
-  audit persistence across a Compose restart.
+  PR #160 added session and audit checks across a Compose restart to the
+  one-command installation workflow. Its CI runs `45075743942` and `45075743932`
+  both passed.
+- Staging also restarted Authority (the Supervisor unit) and Broker separately.
+  Each acquired a new PID, its socket stayed active, and HTTPS sessions and
+  audit verification still worked after each restart.
+- Docker needed more than three minutes to pull the pinned base image during
+  the staging install. The installer now allows up to ten minutes and reports
+  a dedicated error if that deadline expires before Controller state is created.
 - `v1.0.0` blockers include product-backed staging for all four Compose profiles,
   ownership-verified removal with shared-resource preservation, and staging
   end-to-end and fault acceptance. The version and artifact path still target
