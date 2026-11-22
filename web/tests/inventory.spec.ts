@@ -398,6 +398,26 @@ test('shows Firewall, SSH and Caddy changes as unsupported in English and Russia
   }
 })
 
+test('reviews a typed firewall plan without allowing arbitrary commands', async ({ page }) => {
+  await signIn(page)
+  await page.getByRole('button', { name: new RegExp(fresh) }).click()
+  await expect(page.getByRole('heading', { name: 'Firewall change plan' })).toBeVisible()
+  await page.route('**/api/v1/resources/' + fresh + '/firewall-drafts', route => {
+    expect(route.request().postDataJSON()).toEqual({
+      ssh_port: 22,
+      rules: [{ action: 'allow', direction: 'in', protocol: 'tcp', port: 22, cidr: '0.0.0.0/0' }],
+    })
+    return route.fulfill({ status: 201, headers: { ETag: '"fixture-firewall"' }, json: {
+      id: '01JCYQZ4T9V8MNVYEH3D2M7Q1Z', revision: 1, plan_hash: 'a'.repeat(64),
+      baseline: { ssh_port: 22, rules: [{ action: 'allow', direction: 'in', protocol: 'tcp', port: 22, cidr: '0.0.0.0/0' }] },
+      diff: { operation: 'FIREWALL_APPLY', added: [], removed: [], order_changed: false, unchanged: 1 },
+    } })
+  })
+  await page.getByRole('button', { name: 'Review firewall plan' }).click()
+  await expect(page.getByText('Firewall diff', { exact: true })).toBeVisible()
+  await expect(page.getByText('nft flush ruleset', { exact: true })).toHaveCount(0)
+})
+
 test('rejects direct Firewall, SSH and Caddy edits even with an Owner session and CSRF token', async ({ page }) => {
   await signIn(page)
   const session = await page.request.get('/api/v1/auth/session')
