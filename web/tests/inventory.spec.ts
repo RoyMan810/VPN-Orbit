@@ -513,6 +513,15 @@ test('shows Docker host bindings, unavailable data and historical observations i
   await expect(page.getByText(ipv6, { exact: true })).toBeVisible()
 })
 
+test('shows the Owner typed firewall plan without exposing arbitrary firewall editing', async ({ page }) => {
+  await signIn(page)
+  const plan = page.getByRole('heading', { name: 'Firewall change plan' })
+  await expect(plan).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Review firewall plan' })).toBeVisible()
+  await expect(page.getByText('Typed rules only. The SSH allow rule must remain in the plan.', { exact: true })).toBeVisible()
+  await expect(page.getByText('nft flush ruleset', { exact: true })).toHaveCount(0)
+})
+
 test('treats the missing Docker v3 port field as unavailable', async ({ page }) => {
   await page.route('**/api/v1/resources/' + fresh, async route => {
     const response = await route.fetch()
