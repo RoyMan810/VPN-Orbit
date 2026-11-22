@@ -6,7 +6,7 @@
 - PRs #126–#133 are merged.
 - P0 removal of excluded backup, rescue, activation, self-update, stage0, and recovery installation functionality is complete.
 - No production installations or data exist, and no real VPS has been used.
-- Active stage: P1 WebUI/reconciliation.
+- Active stage: P1 regression verification.
 
 ## Completed
 
@@ -27,13 +27,17 @@
 
 ## Current task
 
-The P1 current-runtime audit and historical migration-contract cleanup are complete.
+The P1 current-runtime audit, historical migration-contract cleanup, and WebUI/
+resource-permission/reload recovery work are complete.
 Orphaned recovery/archive runtime modules,
 installer backup-target creation, and removed backup/rescue/activation disposable-lab
 scenarios were deleted. Auth/RBAC, Audit/Outbox, Vault, Authority/Broker/Worker,
 durable jobs, idempotency, UNKNOWN_OUTCOME, reconciliation, TimeHealth, firewall
 rollback and SSH checks, Docker restart protection, and unfinished-job recovery remain.
-The next task is WebUI/reconciliation; it must not be mixed with deployment work.
+The existing reconciliation paths now have browser and runtime coverage for lost
+responses, UNKNOWN_OUTCOME, restart receipt reconciliation, idempotency replay, and
+resource-scoped permissions. The next task is focused P1 regression verification;
+deployment work remains out of scope.
 
 ## P1.1 verification
 
