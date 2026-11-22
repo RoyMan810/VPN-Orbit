@@ -1,0 +1,107 @@
+"""Typed, non-deploying Compose profile catalog for optional applications."""
+
+import json
+import re
+from pathlib import Path
+
+IMAGE = re.compile(r"[a-z0-9][a-z0-9./_-]*@[A-Za-z0-9_-]+:[0-9a-f]{64}")
+NAME = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+
+PROFILE_NAMES = ("remnawave-panel", "remnawave-node", "bedolaga-bot", "bedolaga-cabinet")
+
+
+def load_catalog(path: Path):
+    value = json.loads(Path(path).read_text())
+    if not isinstance(value, dict) or value.get("v") != 1 or set(value) != {"v", "profiles"}:
+        raise ValueError("COMPOSE_PROFILE_CATALOG_INVALID")
+    profiles = value["profiles"]
+    if not isinstance(profiles, dict) or set(profiles) != set(PROFILE_NAMES):
+        raise ValueError("COMPOSE_PROFILE_CATALOG_INVALID")
+    for name, profile in profiles.items():
+        _validate_profile(name, profile)
+    return value
+
+
+def _validate_profile(name, profile):
+    if not isinstance(profile, dict) or set(profile) != {"kind", "network", "ports", "env", "volumes", "depends_on"}:
+        raise ValueError("COMPOSE_PROFILE_INVALID")
+    if not NAME.fullmatch(name) or profile["kind"] != name or profile["network"] not in ("internal", "isolated"):
+        raise ValueError("COMPOSE_PROFILE_INVALID")
+    if not isinstance(profile["ports"], list) or any(type(port) is not int or not 1 <= port <= 65535 for port in profile["ports"]):
+        raise ValueError("COMPOSE_PROFILE_INVALID")
+    if len(set(profile["ports"])) != len(profile["ports"]):
+        raise ValueError("COMPOSE_PROFILE_INVALID")
+    if not isinstance(profile["env"], list) or any(not isinstance(key, str) or not ENV_NAME.fullmatch(key) for key in profile["env"]):
+        raise ValueError("COMPOSE_PROFILE_INVALID")
+    if not isinstance(profile["volumes"], list) or any(not isinstance(name, str) or not NAME.fullmatch(name) for name in profile["volumes"]):
+        raise ValueError("COMPOSE_PROFILE_INVALID")
+    if not isinstance(profile["depends_on"], list) or any(not isinstance(dep, str) or not NAME.fullmatch(dep) for dep in profile["depends_on"]):
+        raise ValueError("COMPOSE_PROFILE_INVALID")
+
+
+def _source_path(value, profile_name, volume_name):
+    expected = f"/var/lib/vpn-orbit/apps/{profile_name}/{volume_name}"
+    if value != expected:
+        raise ValueError("COMPOSE_VOLUME_PATH_INVALID")
+    return value
+
+
+def render(catalog, selected):
+    """Render only explicitly selected profile entries into a Compose fragment."""
+    if not isinstance(selected, dict) or not selected:
+        raise ValueError("COMPOSE_PROFILE_SELECTION_REQUIRED")
+    profiles = catalog["profiles"]
+    if set(selected) - set(profiles):
+        raise ValueError("COMPOSE_PROFILE_UNKNOWN")
+    services, networks = {}, {}
+    for name, spec in selected.items():
+        profile = profiles[name]
+        if not isinstance(spec, dict) or set(spec) - {"image", "environment", "volumes"} or "image" not in spec:
+            raise ValueError("COMPOSE_PROFILE_SELECTION_INVALID")
+        image = spec["image"]
+        environment = spec.get("environment", {})
+        volume_paths = spec.get("volumes", {})
+        if not isinstance(image, str) or not IMAGE.fullmatch(image):
+            raise ValueError("COMPOSE_IMAGE_DIGEST_REQUIRED")
+        if not isinstance(environment, dict) or set(environment) - set(profile["env"]):
+            raise ValueError("COMPOSE_ENV_NOT_ALLOWLISTED")
+        if any(not isinstance(key, str) or not isinstance(value, str) or len(value) > 4096
+               for key, value in environment.items()):
+            raise ValueError("COMPOSE_ENV_VALUE_INVALID")
+        if not isinstance(volume_paths, dict) or set(volume_paths) - set(profile["volumes"]):
+            raise ValueError("COMPOSE_VOLUME_NOT_ALLOWLISTED")
+        service = {
+            "image": image,
+            "pull_policy": "never",
+            "read_only": True,
+            "cap_drop": ["ALL"],
+            "security_opt": ["no-new-privileges=true"],
+            "restart": "unless-stopped",
+            "environment": environment,
+            "volumes": [
+                {"type": "bind", "source": _source_path(path, name, volume),
+                 "target": f"/var/lib/vpn-orbit/{volume}", "bind": {"create_host_path": False}}
+                for volume, path in sorted(volume_paths.items())
+            ],
+        }
+        if profile["network"] == "isolated":
+            service["network_mode"] = "none"
+        else:
+            network = f"vpn-orbit-{name}"
+            service["networks"] = [network]
+            networks[network] = {"driver": "bridge", "internal": True}
+        if profile["ports"]:
+            service["ports"] = [
+                {"target": port, "published": str(port), "host_ip": "127.0.0.1", "protocol": "tcp"}
+                for port in profile["ports"]
+            ]
+        if profile["depends_on"]:
+            missing = set(profile["depends_on"]) - set(selected)
+            if missing:
+                raise ValueError("COMPOSE_PROFILE_DEPENDENCY_MISSING")
+            service["depends_on"] = {
+                dep: {"condition": "service_healthy"} for dep in profile["depends_on"]
+            }
+        services[name] = service
+    return {"services": services, "networks": networks}

@@ -2,8 +2,8 @@
 
 ## Current state
 
-- Main: `b4c43db` (PR #139 merged).
-- PRs #126–#139 are merged.
+- Main: `aa98dac` (PR #142 merged).
+- PRs #126–#142 are merged.
 - P0 removal of excluded backup, rescue, activation, self-update, stage0, and recovery installation functionality is complete.
 - No production installations or data exist, and no real VPS has been used.
 - Active stage: P4 typed Compose profiles.
@@ -37,9 +37,21 @@ rollback and SSH checks, Docker restart protection, and unfinished-job recovery 
 The existing reconciliation paths now have browser and runtime coverage for lost
 responses, UNKNOWN_OUTCOME, restart receipt reconciliation, idempotency replay, and
 resource-scoped permissions. P1 regression verification is complete. The next task
-is a focused P2 audit of VPS onboarding, resumable repair, target-bound cleanup,
-and disposable acceptance coverage are complete. The next stage is P3 Firewall
-WebUI and disposable fault acceptance; P3 is complete. The next stage is P4 typed Compose profiles for Remnawave/Bedolaga; no production deployment is allowed.
+P2 onboarding, resumable repair, target-bound cleanup, and disposable acceptance
+are complete. P3 Firewall WebUI and disposable fault acceptance are complete.
+P4 typed Compose profile catalog work is in progress; no production deployment
+is allowed.
+
+## P4.1 implementation
+
+- Added a non-deploying typed profile catalog/renderer for Remnawave Panel/Node
+  and Bedolaga Bot/Cabinet.
+- Requires digest-pinned image references; allowlists environment keys, volumes,
+  ports, and dependencies; defaults to read-only, cap-drop-all and no-new-privileges.
+- Panel/Cabinet expose only loopback-published ports; Node uses network_mode none;
+  Bot/Cabinet dependency is explicit.
+- Real product images, secrets, deployment, drift repair, and removal remain
+  explicitly out of scope until later P4/P5 stages.
 
 ## P2.3 verification
 
