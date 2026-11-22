@@ -53,6 +53,13 @@ is allowed.
 - Real product images, secrets, deployment, drift repair, and removal remain
   explicitly out of scope until later P4/P5 stages.
 
+## P4.2 implementation
+
+- Added an explicit selection file and renderer CLI for the typed profile catalog.
+- Selection remains non-deploying and rejects unknown profiles, mutable tags,
+  unallowlisted env/volume keys, unsafe volume paths, missing dependencies, and
+  non-isolated Node profiles.
+
 ## P2.3 verification
 
 - Disposable VM acceptance passed the separate typed firewall onboarding profile with exact cleanup; no remote managed artifacts remained after cleanup.

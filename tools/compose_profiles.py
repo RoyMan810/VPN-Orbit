@@ -105,3 +105,23 @@ def render(catalog, selected):
             }
         services[name] = service
     return {"services": services, "networks": networks}
+
+
+def load_selection(path: Path, catalog):
+    value = json.loads(Path(path).read_text())
+    if not isinstance(value, dict) or value.get("v") != 1 or set(value) != {"v", "profiles"}:
+        raise ValueError("COMPOSE_PROFILE_SELECTION_INVALID")
+    return render(catalog, value["profiles"])
+
+
+def main(argv=None):
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--catalog", type=Path, required=True)
+    parser.add_argument("--selection", type=Path, required=True)
+    args = parser.parse_args(argv)
+    print(json.dumps(load_selection(args.selection, load_catalog(args.catalog)), sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()
