@@ -2,8 +2,8 @@
 
 ## Current state
 
-- Main: `aa98dac` (PR #142 merged).
-- PRs #126–#142 are merged.
+- Main: `2b4d6f1` (PR #148 merged).
+- PRs #126–#148 are merged.
 - P0 removal of excluded backup, rescue, activation, self-update, stage0, and recovery installation functionality is complete.
 - No production installations or data exist, and no real VPS has been used.
 - Active stage: P4 typed Compose profiles.
@@ -52,6 +52,10 @@ is allowed.
   Bot/Cabinet dependency is explicit.
 - Real product images, secrets, deployment, drift repair, and removal remain
   explicitly out of scope until later P4/P5 stages.
+
+## P4.3 verification
+
+- Rendered profile selections carry canonical catalog SHA-256 metadata; P4 profile tests and full CI passed.
 
 ## P4.2 implementation
 
