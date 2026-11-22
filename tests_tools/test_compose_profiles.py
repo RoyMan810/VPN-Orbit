@@ -1,6 +1,7 @@
 from pathlib import Path
 import tempfile
 import unittest
+import sys
 
 from tools.compose_profiles import audit, catalog_digest, load_catalog, load_selection, removal_plan, render
 
@@ -83,7 +84,6 @@ class ComposeProfileTests(unittest.TestCase):
     def test_renderer_cli_audits_actual_fragments_without_side_effects(self):
         import json
         import subprocess
-import sys
         catalog = Path(__file__).parents[1] / "deploy/compose-profiles.example.json"
         selection = Path(__file__).parents[1] / "deploy/compose-profiles.selection.example.json"
         rendered = load_selection(selection, load_catalog(catalog))
