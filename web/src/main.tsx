@@ -1,7 +1,7 @@
 import { useCallback, useContext, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { createRoot } from 'react-dom/client'
-import { hasApiStatus, observationState, request } from './api'
+import { apiErrorDetails, hasApiStatus, observationState, request } from './api'
 import type { InventoryPage, Presence, Resource, Session, Status } from './api'
 import { copy } from './copy'
 import type { Copy, Language } from './copy'
@@ -32,7 +32,9 @@ function Mark() {
 }
 
 function message(error: unknown, t: Copy) {
-  return hasApiStatus(error, 429) ? t.rateLimited : t.requestError
+  const base = hasApiStatus(error, 429) ? t.rateLimited : t.requestError
+  const details = apiErrorDetails(error)
+  return details ? `${base} (${details})` : base
 }
 
 function Login({ t, onLogin }: { t: Copy; onLogin: (session: Session) => void }) {
@@ -168,7 +170,7 @@ function Detail({ resource, t, lang, now, expired, session }: {
               <div><dt>{t.dependencies}</dt><dd>{isolation(container.dependency_status)}</dd></div>
             </dl>
           </details>
-          {session.user.role !== 'Auditor' && resource.enabled && current.status === 'REACHABLE' && container.state === 'RUNNING' && sample &&
+          {resource.permissions.restart && resource.enabled && current.status === 'REACHABLE' && container.state === 'RUNNING' && sample &&
             <RestartPreview key={JSON.stringify([resource.id, resource.revision, resource.policy_revision,
               sample.observed_at, sample.boot_id, container.project, container.service, container.started_at])}
               resource={resource} container={container} sample={sample} t={t} expired={expired} session={session}/>}

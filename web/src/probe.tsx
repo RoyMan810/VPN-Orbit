@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError, hasApiStatus, isUlid, request } from './api'
+import { ApiError, apiErrorDetails, hasApiStatus, isUlid, request } from './api'
 import type { Resource, Session } from './api'
 import type { Copy, Language } from './copy'
 import { JobTimeline } from './job-timeline'
@@ -26,8 +26,26 @@ interface Attempt {
   monotonicStart: number
 }
 
+const attemptKey = (target: string) => `vpn-orbit.probe.${target}`
+
+function savedAttempt(target: string): Attempt | null {
+  try {
+    const value = JSON.parse(localStorage.getItem(attemptKey(target)) ?? 'null') as Partial<Attempt> | null
+    return value && value.target === target && typeof value.key === 'string' &&
+      typeof value.startedAt === 'number' && typeof value.monotonicStart === 'number' ? value as Attempt : null
+  } catch { return null }
+}
+
+function storeAttempt(attempt: Attempt) {
+  try { localStorage.setItem(attemptKey(attempt.target), JSON.stringify(attempt)) } catch { /* Best effort only. */ }
+}
+
+function clearAttempt(target: string) {
+  try { localStorage.removeItem(attemptKey(target)) } catch { /* Best effort only. */ }
+}
+
 type Run =
-  | { phase: 'sending' | 'uncertain' | 'retry-denied' | 'rejected' | 'expired'; attempt: Attempt }
+  | { phase: 'sending' | 'uncertain' | 'retry-denied' | 'rejected' | 'expired'; attempt: Attempt; error?: string }
   | { phase: 'watching' | 'paused' | 'done'; attempt: Attempt; job: Job; readsLeft: number; readDenied?: boolean }
 
 function checkedJob(value: unknown, target: string, expectedId?: string): Job {
@@ -71,6 +89,7 @@ export function ProbeControl({ resource, enrolled, session, t, lang, expired, re
     }
     const abort = new AbortController()
     submission.current = abort
+    storeAttempt(attempt)
     setRun({ phase: 'sending', attempt })
     try {
       const value = await request<unknown>('/resources/' + encodeURIComponent(attempt.target) + '/observations', {
@@ -83,6 +102,7 @@ export function ProbeControl({ resource, enrolled, session, t, lang, expired, re
       const job = checkedJob(value, attempt.target)
       const done = terminal.has(job.status)
       setRun({ phase: done ? 'done' : 'watching', attempt, job, readsLeft: readBudget })
+      if (done) clearAttempt(attempt.target)
       if (done) reload()
     } catch (error) {
       if (abort.signal.aborted) return
@@ -91,7 +111,8 @@ export function ProbeControl({ resource, enrolled, session, t, lang, expired, re
         const rejected = error instanceof ApiError && error.status < 500 && ![408, 429].includes(error.status)
         // The Controller checks current access before replaying the original response.
         // Denial of a retry leaves acceptance of the earlier request unresolved.
-        setRun({ phase: rejected ? (retry ? 'retry-denied' : 'rejected') : 'uncertain', attempt })
+        setRun({ phase: rejected ? (retry ? 'retry-denied' : 'rejected') : 'uncertain', attempt,
+          error: apiErrorDetails(error) ?? undefined })
       }
     } finally {
       submission.current = null
@@ -126,8 +147,13 @@ export function ProbeControl({ resource, enrolled, session, t, lang, expired, re
     }
   }, [run, expired, reload])
 
-  const canStart = resource?.enabled && session.user.role !== 'Auditor'
+  const canStart = resource?.enabled && resource.permissions.probe
   const locked = run && ['sending', 'uncertain', 'retry-denied', 'watching', 'paused'].includes(run.phase)
+  useEffect(() => {
+    if (!resource || locked || enrolled || run) return
+    const attempt = savedAttempt(resource.id)
+    if (attempt) void submit(attempt, true)
+  }, [resource?.id, locked, enrolled, run, submit])
   const checkedEnrollment = useRef<string | null>(null)
   useEffect(() => {
     if (!enrolled || !canStart || locked || enrolled !== resource?.id || checkedEnrollment.current === enrolled) return
@@ -157,6 +183,7 @@ export function ProbeControl({ resource, enrolled, session, t, lang, expired, re
       {run.phase === 'expired' && <p className="error">{t.probeExpired}</p>}
       {(run.phase === 'uncertain' || run.phase === 'retry-denied') && <>
         <p className="error">{run.phase === 'retry-denied' ? t.probeRetryDenied : t.probeUncertain}</p>
+        {run.error && <code>{run.error}</code>}
         <button onClick={() => void submit(run.attempt, true)}>{t.probeRetry}</button>
       </>}
       {run.phase === 'paused' && <>

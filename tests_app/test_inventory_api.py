@@ -124,6 +124,7 @@ class InventoryTests(Fixture):
         self.assertEqual(item["observation"], {"status": "NOT_CHECKED", "reason": "NO_COMPLETED_OBSERVATION",
                                               "last_checked_at": None, "last_success": None})
         self.assertEqual(item["access_mode"], "READ_ONLY")
+        self.assertEqual(item["permissions"], {"probe": True, "restart": True, "firewall": True})
         self.assertTrue(item["enabled"])
         self.assertEqual(response.headers["cache-control"], "no-store")
         self.assertIn("etag", response.headers)

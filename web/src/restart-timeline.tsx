@@ -33,6 +33,7 @@ export function RestartTimeline({ route, t, lang, expired, session }: {
   useEffect(() => {
     const abort = new AbortController()
     let timer: number | undefined
+    setEntries(null)
     setError(null)
     async function load() {
       try {
@@ -61,6 +62,7 @@ export function RestartTimeline({ route, t, lang, expired, session }: {
   const attempt = (last?.attempt ?? 0) + 1
   const [sending, setSending] = useState(false)
   async function reconcile() {
+    if (sending) return
     setSending(true)
     try {
       await request(`/change-plans/${planId}/execution-requests/${operationId}/reconciliations/${attempt}`, { body: {}, csrf: session.csrf_token })
@@ -95,7 +97,7 @@ export function RestartTimeline({ route, t, lang, expired, session }: {
           <button type="button" disabled={sending} onClick={reconcile}>{t.restartReconcile}</button>}
         <details className="restart-events">
           <summary>{t.restartEvents}</summary>
-          <p>{t.restartRevision} {revision} · <code>{operationId}</code></p>
+          <p>{t.restartRevision} {revision} · {t.restartCorrelation} <code>{planId}</code> · <code>{operationId}</code></p>
           <ol className="audit-list" reversed>{history.slice().reverse().map(item => <li key={item.seq}>
             <strong>{label(item.status)}</strong>
             {Number.isSafeInteger(item.at) && item.at >= 0 && item.at <= 253402300799 && <> · {format.format(item.at * 1000)}</>}
