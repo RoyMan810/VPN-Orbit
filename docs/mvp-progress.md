@@ -47,8 +47,12 @@ and disposable acceptance coverage; deployment profiles remain out of scope.
   already covered by unit/disposable lab tests.
 - Hardened local provisioning state and managed key/policy files against symlinks
   and hardlinks; added regression coverage.
-- No real VPS was contacted. Disposable acceptance remains required for the full
-  host-level onboarding path.
+- Console and pinned-SSH preflight verified the disposable VM as Ubuntu 24.04.5
+  LTS, x86_64, `192.168.122.244/24`, with the expected Ed25519 fingerprint and
+  empty VPN-Orbit/Docker namespaces.
+- Disposable acceptance passed fresh onboarding, disconnect-after-account fault,
+  resumable repair, and exact cleanup. Temporary NOPASSWD sudo and all managed
+  artifacts were removed afterward. No production VPS was used.
 
 ## P1.1 verification
 
@@ -60,4 +64,5 @@ and disposable acceptance coverage; deployment profiles remain out of scope.
 ## Blockers
 
 - The checked-out `origin/main` ref was refreshed to `798d5d1` after PR #136.
-- No production VPS is available or permitted. The supplied disposable VM must have its SSH fingerprint, isolation, and fresh rollback snapshot verified before use; no VM or real VPS has been contacted.
+- No production VPS is available or permitted. The disposable VM remains the only
+  acceptance target; its `clear` rollback snapshot is available.
