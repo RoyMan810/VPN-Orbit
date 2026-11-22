@@ -28,11 +28,12 @@ export function FirewallPlan({ resourceId, csrf, t, expired }: {
   }, [storageKey, rules, sshPort, draft, etag, approval, operation])
   useEffect(() => {
     if (!draft || !operation) return
+    const draftId = draft.id
     const abort = new AbortController()
     let timer: number | undefined
     async function load() {
       try {
-        const result = await request<{ items: Entry[] }>(`/change-plans/${draft.id}/firewall-timeline`, { signal: abort.signal })
+        const result = await request<{ items: Entry[] }>(`/change-plans/${draftId}/firewall-timeline`, { signal: abort.signal })
         if (abort.signal.aborted) return
         setEntries(result.items.filter(item => item.operation_id === operation))
         const last = result.items.at(-1)?.status
@@ -122,7 +123,7 @@ export function FirewallPlan({ resourceId, csrf, t, expired }: {
         setReconciling(true)
         try {
           const attempt = (entries?.at(-1)?.attempt ?? 0) + 1
-          await request(`/change-plans/${draft.id}/firewall-execution-requests/${operation}/reconciliations/${attempt}`, { csrf })
+          await request(`/change-plans/${draft?.id}/firewall-execution-requests/${operation}/reconciliations/${attempt}`, { csrf })
         } finally { setReconciling(false) }
       })}>{t.firewallReconcile}</button>}
     </div>}
