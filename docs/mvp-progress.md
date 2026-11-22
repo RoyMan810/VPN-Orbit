@@ -2,11 +2,11 @@
 
 ## Current state
 
-- Main: `c1204e7` (PR #133 merged).
-- PRs #126–#133 are merged.
+- Main: `798d5d1` (PR #136 merged).
+- PRs #126–#136 are merged.
 - P0 removal of excluded backup, rescue, activation, self-update, stage0, and recovery installation functionality is complete.
 - No production installations or data exist, and no real VPS has been used.
-- Active stage: P1 regression verification.
+- Active stage: P2 onboarding and repair/cleanup audit.
 
 ## Completed
 
@@ -36,8 +36,19 @@ durable jobs, idempotency, UNKNOWN_OUTCOME, reconciliation, TimeHealth, firewall
 rollback and SSH checks, Docker restart protection, and unfinished-job recovery remain.
 The existing reconciliation paths now have browser and runtime coverage for lost
 responses, UNKNOWN_OUTCOME, restart receipt reconciliation, idempotency replay, and
-resource-scoped permissions. The next task is focused P1 regression verification;
-deployment work remains out of scope.
+resource-scoped permissions. P1 regression verification is complete. The next task
+is a focused P2 audit of VPS onboarding, resumable repair, target-bound cleanup,
+and disposable acceptance coverage; deployment profiles remain out of scope.
+
+## P2.1 verification
+
+- Audited `tools/prepare_vps.py`: SSH fingerprint pinning, resumable phases,
+  repair after partial effects, exact-target cleanup, and cleanup-on-failure were
+  already covered by unit/disposable lab tests.
+- Hardened local provisioning state and managed key/policy files against symlinks
+  and hardlinks; added regression coverage.
+- No real VPS was contacted. Disposable acceptance remains required for the full
+  host-level onboarding path.
 
 ## P1.1 verification
 
@@ -48,5 +59,5 @@ deployment work remains out of scope.
 
 ## Blockers
 
-- The checked-out `origin/main` ref was refreshed to `c1204e7` after PR #133.
+- The checked-out `origin/main` ref was refreshed to `798d5d1` after PR #136.
 - No production VPS is available or permitted. The supplied disposable VM must have its SSH fingerprint, isolation, and fresh rollback snapshot verified before use; no VM or real VPS has been contacted.

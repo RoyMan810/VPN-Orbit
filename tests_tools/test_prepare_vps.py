@@ -239,6 +239,35 @@ class PrepareVpsTests(unittest.TestCase):
             self.assertEqual(state["status"], "VERIFIED")
             self.assertTrue(all(state["phases"][phase] == "DONE" for phase in prepare_vps.PHASES))
 
+    def test_managed_key_pair_rejects_symlinks_and_hardlinks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            remote = FakeRemote()
+            provisioner, output = make_provisioner(directory, remote)
+            target = directory / "outside"
+            target.write_text("outside")
+            provisioner.key.unlink()
+            provisioner.key.symlink_to(target)
+            with self.assertRaisesRegex(ValueError, "managed observation key pair is missing"):
+                provisioner._context()
+
+            provisioner.key.unlink()
+            provisioner.key.write_text("private")
+            linked = directory / "outside-hardlink"
+            linked.hardlink_to(provisioner.key)
+            self.assertFalse(provisioner._managed_file(provisioner.key))
+
+    def test_state_rejects_hardlink_and_foreign_owner_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            state_path = directory / prepare_vps.STATE_FILE
+            state = prepare_vps.State(state_path)
+            state.save({"version": 1, "phases": {phase: "PENDING" for phase in prepare_vps.PHASES}})
+            linked = directory / "state-hardlink"
+            linked.hardlink_to(state_path)
+            with self.assertRaisesRegex(ValueError, "not private"):
+                prepare_vps.State(linked).load()
+
     def test_partial_helper_installation_is_reinstalled_on_retry(self):
         with tempfile.TemporaryDirectory() as tmp:
             remote = FakeRemote()
