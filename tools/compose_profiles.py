@@ -129,6 +129,37 @@ def audit(actual, expected):
     return {"status": "MATCHED", "catalog_sha256": actual["catalog_sha256"]}
 
 
+def audit_docker_state(state, expected):
+    """Audit read-only Docker state; never calls Docker or mutates host state."""
+    if not isinstance(state, dict) or set(state) != {"containers", "networks", "volumes"}:
+        raise ValueError("DOCKER_STATE_INVALID")
+    expected_names = set(expected["services"])
+    containers = state["containers"]
+    if (not isinstance(containers, list)
+            or any(not isinstance(item, dict) for item in containers)):
+        raise ValueError("DOCKER_STATE_INVALID")
+    managed = []
+    for item in containers:
+        labels = item.get("labels")
+        if not isinstance(labels, dict):
+            return {"status": "DRIFT", "reason": "CONTAINER_LABELS_MISSING"}
+        if labels.get("com.vpn-orbit.managed") != "true":
+            continue
+        managed.append(item)
+        if labels.get("com.vpn-orbit.catalog-sha256") != expected["catalog_sha256"]:
+            return {"status": "DRIFT", "reason": "CONTAINER_CATALOG_DIGEST_MISMATCH"}
+        if labels.get("com.vpn-orbit.profile") not in expected_names:
+            return {"status": "DRIFT", "reason": "UNKNOWN_MANAGED_PROFILE"}
+    profiles = {item["labels"]["com.vpn-orbit.profile"] for item in managed}
+    if profiles != expected_names:
+        return {"status": "DRIFT", "reason": "MANAGED_PROFILE_SET_MISMATCH"}
+    for key in ("networks", "volumes"):
+        if not isinstance(state[key], list) or any(not isinstance(item, dict) for item in state[key]):
+            raise ValueError("DOCKER_STATE_INVALID")
+    return {"status": "MATCHED", "catalog_sha256": expected["catalog_sha256"],
+            "managed_profiles": sorted(profiles), "data_preserved": True}
+
+
 def removal_plan(actual, expected, *, confirmed=False):
     """Return a non-destructive removal plan; never runs Compose or deletes data."""
     result = audit(actual, expected)

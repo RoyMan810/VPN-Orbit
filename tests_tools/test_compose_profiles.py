@@ -3,7 +3,8 @@ import tempfile
 import unittest
 import sys
 
-from tools.compose_profiles import audit, catalog_digest, load_catalog, load_selection, removal_plan, render
+from tools.compose_profiles import (audit, audit_docker_state, catalog_digest, load_catalog,
+                                    load_selection, removal_plan, render)
 
 
 class ComposeProfileTests(unittest.TestCase):
@@ -80,6 +81,23 @@ class ComposeProfileTests(unittest.TestCase):
         self.assertTrue(plan["data_preserved"])
         authorized = removal_plan(selection, selection, confirmed=True)
         self.assertFalse(authorized["compose_down"])
+
+    def test_read_only_docker_state_adapter_requires_owned_catalog_bound_profiles(self):
+        catalog = load_catalog(Path(__file__).parents[1] / "deploy/compose-profiles.example.json")
+        expected = load_selection(Path(__file__).parents[1] / "deploy/compose-profiles.selection.example.json", catalog)
+        state = {"containers": [
+            {"name": name, "labels": {"com.vpn-orbit.managed": "true",
+                                      "com.vpn-orbit.catalog-sha256": expected["catalog_sha256"],
+                                      "com.vpn-orbit.profile": name}}
+            for name in expected["services"]
+        ], "networks": [], "volumes": []}
+        result = audit_docker_state(state, expected)
+        self.assertEqual(result["status"], "MATCHED")
+        changed = {**state, "containers": [{**state["containers"][0],
+                                            "labels": {**state["containers"][0]["labels"],
+                                                       "com.vpn-orbit.catalog-sha256": "0" * 64}}] + state["containers"][1:]}
+        self.assertEqual(audit_docker_state(changed, expected)["reason"],
+                         "CONTAINER_CATALOG_DIGEST_MISMATCH")
 
     def test_renderer_cli_audits_actual_fragments_without_side_effects(self):
         import json
