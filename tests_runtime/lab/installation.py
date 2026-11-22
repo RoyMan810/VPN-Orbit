@@ -357,14 +357,16 @@ def main():
     with ZipFile(wheel) as archive:
         manifest = json.loads(archive.read("vpn_orbit/release-manifest.json"))
         if manifest["remote_mutation_enabled"] is not False:
-            raise RuntimeError("Development wheel allows remote mutation")
+            raise RuntimeError("Controller wheel allows remote mutation")
         if any(name.startswith(("tests_app/", "tests_runtime/", "tests_tools/"))
                for name in archive.namelist()):
-            raise RuntimeError("Development wheel contains repository test or lab code")
+            raise RuntimeError("Controller wheel contains repository test or lab code")
 
     base = [str(HOST_PYTHON), str(REPO / "deploy/installer.py"), "install", "--bundle", str(args.bundle),
-            "--trust-key", str(args.trust_key), "--development", "--origin", ORIGIN,
+            "--trust-key", str(args.trust_key), "--origin", ORIGIN,
             "--port", str(PORT), "--docker-host", args.docker_host]
+    if manifest["channel"] == "development":
+        base.append("--development")
     with tempfile.TemporaryDirectory(prefix="vpn-orbit-install-lab-", dir="/run") as temp:
         root = Path(temp)
         # setup-docker-action puts its daemon below runner's private home. The

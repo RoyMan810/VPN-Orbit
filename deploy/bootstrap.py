@@ -252,12 +252,14 @@ def build_release(source, revision, work, identity, env):
     bundle = work / "bundle"
     run(builder, source / "deploy/build_bundle.py", "--output", bundle, "--unsigned",
         "--python-image", PYTHON_IMAGE, "--age-tool", work / "age/age", **settings)
-    if json.loads((bundle / "manifest.json").read_bytes())["source_commit"] != revision:
+    manifest_bytes = (bundle / "manifest.json").read_bytes()
+    manifest = json.loads(manifest_bytes)
+    if manifest["source_commit"] != revision:
         raise ValueError("Ревизия сборки Controller отличается от исходного checkout.")
     # Root authenticates the locally built manifest by its digest before the
     # installer copies and executes any bundle file.
-    digest = hashlib.sha256((bundle / "manifest.json").read_bytes()).hexdigest()
-    return bundle, digest
+    digest = hashlib.sha256(manifest_bytes).hexdigest()
+    return bundle, digest, manifest["channel"]
 
 
 def build_web(source, work, identity, env):
@@ -436,7 +438,7 @@ def install(owner, targets, suite, endpoint):
             approved = private / "targets.json"
             approved.write_bytes(targets.read_bytes())
             options = ["--targets", approved, "--web-enrollment"]
-        stage(f"VPN-Orbit development · {revision}")
+        stage(f"VPN-Orbit · {revision}")
         apt("update")
         apt("install", "-y", "--no-remove", "--no-install-recommends", "curl", "ca-certificates", "gnupg",
             "openssl", "xz-utils", "build-essential", "pkg-config", "libssl-dev", "zlib1g-dev",
@@ -465,12 +467,13 @@ def install(owner, targets, suite, endpoint):
         try:
             stage("Сборка Python 3.15 и проверенного комплекта Controller.")
             build_python(work, identity, env)
-            bundle, digest = build_release(source, revision, work, identity, env)
+            bundle, digest, channel = build_release(source, revision, work, identity, env)
+            channel_args = ["--development"] if channel == "development" else []
             stage("Сборка WebUI и проверка HTTPS.")
             build_web(source, work, identity, env)
             prepare_web(private, endpoint)
             run(PYTHON, private / "deploy/installer.py", "install", "--bundle", bundle, "--manifest-sha256", digest,
-                "--development", "--origin", endpoint.origin, "--port", str(API_PORT), "--docker-host", DOCKER_SOCKET, *options)
+                *channel_args, "--origin", endpoint.origin, "--port", str(API_PORT), "--docker-host", DOCKER_SOCKET, *options)
             start_web(endpoint)
         finally:
             if not APP.exists():
