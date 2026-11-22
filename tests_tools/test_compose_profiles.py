@@ -3,8 +3,8 @@ import tempfile
 import unittest
 import sys
 
-from tools.compose_profiles import (audit, audit_docker_state, catalog_digest, load_catalog,
-                                    load_selection, removal_plan, render)
+from tools.compose_profiles import (audit, audit_docker_state, catalog_digest, execute_removal,
+                                    load_catalog, load_selection, removal_plan, render)
 
 
 class ComposeProfileTests(unittest.TestCase):
@@ -98,6 +98,16 @@ class ComposeProfileTests(unittest.TestCase):
                                                        "com.vpn-orbit.catalog-sha256": "0" * 64}}] + state["containers"][1:]}
         self.assertEqual(audit_docker_state(changed, expected)["reason"],
                          "CONTAINER_CATALOG_DIGEST_MISMATCH")
+
+    def test_confirmed_removal_removes_only_containers_and_networks(self):
+        catalog = load_catalog(Path(__file__).parents[1] / "deploy/compose-profiles.example.json")
+        expected = load_selection(Path(__file__).parents[1] / "deploy/compose-profiles.selection.example.json", catalog)
+        calls = []
+        result = execute_removal(removal_plan(expected, expected, confirmed=True), calls.append)
+        self.assertEqual(result["status"], "REMOVAL_APPLIED")
+        self.assertTrue(result["data_preserved"])
+        self.assertTrue(all("volume" not in call for call in calls))
+        self.assertTrue(all(call[-1] != "down" for call in calls))
 
     def test_renderer_cli_audits_actual_fragments_without_side_effects(self):
         import json

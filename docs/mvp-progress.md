@@ -90,6 +90,12 @@ is allowed.
 - The adapter consumes supplied inspect-like JSON only and performs no Docker
   calls or mutations.
 
+## P5.4 implementation
+
+- Added an explicitly confirmed removal executor that removes only owned service
+  containers and networks; it never runs `compose down` and never removes volumes.
+- Plan-only remains the default; drift or missing confirmation blocks execution.
+
 ## P2.3 verification
 
 - Disposable VM acceptance passed the separate typed firewall onboarding profile with exact cleanup; no remote managed artifacts remained after cleanup.
