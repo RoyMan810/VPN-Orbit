@@ -9,7 +9,6 @@ from vpn_orbit.change_drafts import (check_draft_approval, check_draft_baseline,
                                      record_draft_approval, record_draft_backup_decision, request_draft_probe, save_draft)
 from vpn_orbit.database import Store, identifier
 from vpn_orbit.errors import Denied
-from vpn_orbit.migrations import rehearse
 from vpn_orbit.queue import JobQueue
 from vpn_orbit.runtime.protocol import canonical, checksum
 from test_auth_api import Fixture, OTHER, PASSWORD, SCOPE
@@ -19,16 +18,19 @@ CONTAINER = "c" * 64
 
 
 class ChangeDraftTests(Fixture):
-    schema = 2
-
     def setUp(self):
         super().setUp()
         self.queue = JobQueue(self.store, clock=lambda: self.now)
         self.queue.register_resource(SCOPE, "a" * 64, 1)
         self.probe_id = self.probe()
         self.token = self.client.cookies[COOKIE]
-        self.output = self.directory / "rehearsal"
-        rehearse(self.store, self.output, to_schema=3)
+        self.snapshot("drafts")
+
+    def snapshot(self, name):
+        self.output = self.directory / f"{name}.sqlite3"
+        with self.store.connect(readonly=True) as source, closing(sqlite3.connect(self.output, autocommit=True)) as copy:
+            source.execute("BEGIN")
+            source.backup(copy)
 
     def probe(self, outcome="SUCCEEDED", *, boot_id="11111111-1111-1111-1111-111111111111"):
         job = self.queue.enqueue_probe(self.auth, self.client.cookies[COOKIE], self.csrf, SCOPE, identifier())
@@ -60,7 +62,7 @@ class ChangeDraftTests(Fixture):
 
     @contextmanager
     def transaction(self, *, write=True):
-        with closing(sqlite3.connect(self.output / "migrated.sqlite3", autocommit=True)) as db:
+        with closing(sqlite3.connect(self.output, autocommit=True)) as db:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA foreign_keys=ON")
             if not write:
@@ -95,12 +97,10 @@ class ChangeDraftTests(Fixture):
     def test_pins_latest_completed_job_even_when_probe_timestamps_match(self):
         newest = self.probe()
         self.assertNotEqual(newest, self.probe_id)
-        self.output = self.directory / "latest"
-        rehearse(self.store, self.output, to_schema=3)
+        self.snapshot("latest")
         self.assertEqual(self.save()[0]["baseline"]["observation_id"], newest)
         self.probe("FAILED")
-        self.output = self.directory / "failed"
-        rehearse(self.store, self.output, to_schema=3)
+        self.snapshot("failed")
         with self.assertRaisesRegex(Denied, "FRESH_OBSERVATION_REQUIRED"):
             self.save()
 
@@ -110,8 +110,7 @@ class ChangeDraftTests(Fixture):
         client = self.other_client("operator")
         token = client.cookies[COOKIE]
         csrf = client.get("/api/v1/auth/session").json()["csrf_token"]
-        self.output = self.directory / "scoped"
-        rehearse(self.store, self.output, to_schema=3)
+        self.snapshot("scoped")
         with self.transaction() as db:
             draft, tag = save_draft(db, self.auth, token, csrf, SCOPE, CONTAINER)
             db.execute("DELETE FROM grants WHERE permission='vps:restart'")
@@ -168,11 +167,6 @@ class ChangeDraftTests(Fixture):
             self.assertEqual(db.execute("SELECT count(*) FROM change_plan_drafts").fetchone()[0], 0)
             Store.verify_audit_connection(db)
 
-    def test_live_schema_two_rejects_draft_writes(self):
-        with self.assertRaisesRegex(Denied, "CHANGE_PLAN_SCHEMA_REQUIRES_VERIFIED_MIGRATION"):
-            with self.store.write() as db:
-                save_draft(db, self.auth, self.token, self.csrf, SCOPE, CONTAINER)
-
     def test_checks_exact_draft_without_writes_or_execution_authority(self):
         draft, tag = self.save()
         with self.transaction(write=False) as db:
@@ -205,8 +199,7 @@ class ChangeDraftTests(Fixture):
         draft, tag = self.save()
         replacement = identifier()
         with self.transaction() as db:
-            # The live queue cannot write schema 3. Replay the completed job
-            # and its audit marker in the rehearsal fixture.
+            # Replay the completed job and its audit marker to test stale-baseline rejection.
             db.execute("""INSERT INTO jobs(id,actor_id,resource_id,action,payload_hash,scope_digest,policy_revision,
                                            status,revision,result,reason,created_at,updated_at)
                           SELECT ?,actor_id,resource_id,action,payload_hash,scope_digest,policy_revision,
@@ -221,8 +214,7 @@ class ChangeDraftTests(Fixture):
     def test_baseline_check_denies_revoked_restart_and_tampered_plan(self):
         self.create_user(grants=[{"permission": "vps:read", "resource_id": SCOPE}])
         observer = self.other_client("operator").cookies[COOKIE]
-        self.output = self.directory / "read-only-operator"
-        rehearse(self.store, self.output, to_schema=3)
+        self.snapshot("read-only-operator")
         draft, tag = self.save()
         with self.transaction(write=False) as db:
             with self.assertRaisesRegex(Denied, "FORBIDDEN"):
@@ -534,8 +526,7 @@ class ChangeDraftTests(Fixture):
         client = self.other_client("operator")
         token = client.cookies[COOKIE]
         csrf = client.get("/api/v1/auth/session").json()["csrf_token"]
-        self.output = self.directory / "operator-confirmation"
-        rehearse(self.store, self.output, to_schema=3)
+        self.snapshot("operator-confirmation")
         with self.assertRaisesRegex(Denied, "RESTART_OWNER_CONFIRMATION_REQUIRED"), self.transaction() as db:
             save_draft(db, self.auth, token, csrf, SCOPE, CONTAINER, confirm_stateless_test=True)
         with self.assertRaisesRegex(Denied, "RESTART_CONFIRMATION_INVALID"):

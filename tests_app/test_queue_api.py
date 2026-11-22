@@ -152,15 +152,3 @@ class QueueApiTests(Fixture):
         result = self.client.get(f"/api/v1/jobs/{job_id}/timeline")
         self.assertEqual(result.status_code, 503)
         self.assertEqual(result.json()["code"], "JOB_TIMELINE_INVALID")
-
-    def test_schema_one_keeps_auth_and_blocks_queue_without_automatic_migration(self):
-        with self.store.connect() as db:
-            db.execute("PRAGMA user_version=1")
-        self.assertEqual(self.client.get("/api/v1/users").status_code, 200)
-        response = self.client.post(f"/api/v1/resources/{SCOPE}/observations", json={},
-                                    headers=self.headers(**{"Idempotency-Key": "legacy-request-0001"}))
-        self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["code"], "QUEUE_SCHEMA_REQUIRES_VERIFIED_MIGRATION")
-        with self.store.connect() as db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
-            self.assertEqual(db.execute("SELECT count(*) FROM users").fetchone()[0], 1)

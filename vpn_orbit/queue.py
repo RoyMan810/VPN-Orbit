@@ -29,8 +29,8 @@ class JobQueue:
 
     @staticmethod
     def _schema(db):
-        if db.execute("PRAGMA user_version").fetchone()[0] not in (2, 3, 4, 5):
-            raise Denied("QUEUE_SCHEMA_REQUIRES_VERIFIED_MIGRATION", 503)
+        if db.execute("PRAGMA user_version").fetchone()[0] != 5:
+            raise Denied("DATABASE_SCHEMA_UNSUPPORTED", 503)
 
     @staticmethod
     def restart_request(db, job_id):
@@ -56,13 +56,13 @@ class JobQueue:
         self._event(db, db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone(), "job.accepted")
 
     def enqueue_restart(self, db, job_id, actor, target, scope, policy_revision, plan_hash):
-        if db.execute("PRAGMA user_version").fetchone()[0] not in (4, 5):
-            raise Denied("QUEUE_SCHEMA_REQUIRES_VERIFIED_MIGRATION", 503)
+        if db.execute("PRAGMA user_version").fetchone()[0] != 5:
+            raise Denied("DATABASE_SCHEMA_UNSUPPORTED", 503)
         self._enqueue_mutation(db, job_id, actor, target, scope, policy_revision, plan_hash, "docker.restart")
 
     def enqueue_firewall(self, db, job_id, actor, target, scope, policy_revision, plan_hash):
         if db.execute("PRAGMA user_version").fetchone()[0] != 5:
-            raise Denied("QUEUE_SCHEMA_REQUIRES_VERIFIED_MIGRATION", 503)
+            raise Denied("DATABASE_SCHEMA_UNSUPPORTED", 503)
         self._enqueue_mutation(db, job_id, actor, target, scope, policy_revision, plan_hash, "firewall.apply")
 
     def _event(self, db, row, event, *, reason=None):

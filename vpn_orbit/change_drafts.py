@@ -1,4 +1,4 @@
-"""Versioned Docker restart drafts for a transaction on schema 3 or later."""
+"""Docker restart drafts for the current application schema."""
 
 import hmac
 import json
@@ -13,8 +13,8 @@ from .runtime.protocol import SHA256, ULID, canonical, checksum
 
 
 def _session(db, auth, token, *, csrf=None, mutating=False):
-    if not db.in_transaction or db.execute("PRAGMA user_version").fetchone()[0] not in (3, 4, 5):
-        raise Denied("CHANGE_PLAN_SCHEMA_REQUIRES_VERIFIED_MIGRATION", 503)
+    if not db.in_transaction or db.execute("PRAGMA user_version").fetchone()[0] != 5:
+        raise Denied("DATABASE_SCHEMA_UNSUPPORTED", 503)
     return auth._session(db, token, csrf=csrf, mutating=mutating)
 
 
@@ -132,7 +132,7 @@ def _probe_audit(db, resource_id, probe_id):
 
 def _probe_source(draft_db, source_db, auth, token, resource_id, original_probe_id):
     if (not source_db.in_transaction or source_db.execute("PRAGMA query_only").fetchone()[0] != 1
-            or source_db.execute("PRAGMA user_version").fetchone()[0] not in (2, 3, 4, 5)):
+            or source_db.execute("PRAGMA user_version").fetchone()[0] != 5):
         raise Denied("PROBE_SOURCE_UNSUPPORTED", 503)
     actor = auth._session(source_db, token)
     _require(source_db, actor, resource_id, restart=True)
@@ -225,7 +225,7 @@ def _backup_details(result):
 
 def record_draft_backup_decision(draft_db, source_db, auth, token, csrf, draft_id, *,
                                  if_match, probe_id, request_key):
-    """Record the rehearsed decision inside BEGIN IMMEDIATE; caller rolls back on error."""
+    """Record the decision inside BEGIN IMMEDIATE; caller rolls back on error."""
     row, draft, actor = _checked_draft(draft_db, auth, token, draft_id, if_match, csrf=csrf, mutating=True)
     result = _check_probe(draft_db, source_db, auth, token, row, draft, probe_id, request_key)
     details = _backup_details(result)

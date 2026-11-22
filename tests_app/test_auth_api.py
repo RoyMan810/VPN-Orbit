@@ -11,7 +11,7 @@ from vpn_orbit.api import create_app
 from vpn_orbit.auth import ABSOLUTE_SECONDS, COOKIE, IDLE_SECONDS, AuthService
 from vpn_orbit.cli import main
 from vpn_orbit.config import Settings
-from vpn_orbit.database import SCHEMA_VERSION, Store
+from vpn_orbit.database import Store
 from vpn_orbit.errors import Denied
 
 
@@ -22,11 +22,9 @@ OTHER = "01JCYQZ4T9V8MNVYEH3D2M7Q1B"
 
 
 class Fixture(unittest.TestCase):
-    schema = SCHEMA_VERSION
-
     def setUp(self):
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.store = Store.initialize(self.directory / "controller.sqlite3", schema=self.schema)
+        self.store = Store.initialize(self.directory / "controller.sqlite3")
         self.now = 1_800_000_000
         self.auth = AuthService(self.store, clock=lambda: self.now)
         self.owner = self.auth.create_owner(self.auth.issue_bootstrap(), "roman", PASSWORD)
