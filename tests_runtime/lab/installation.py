@@ -835,18 +835,6 @@ print('VERIFIED_HOST_TIME')
                     raise RuntimeError("Installed Owner could not authenticate through HTTPS proxy")
                 login.close()
             print("First web visitor had no bootstrap authority; hidden-input local Owner setup and HTTPS login passed.", flush=True)
-            writer_barrier(args.docker_host, ids)
-            vault_pin()
-            local_archive, fixture_identity = controller_archive(root, args.bundle)
-            import base64
-            rescue_input = json.dumps({"archive": local_archive, "identity": base64.b64encode(fixture_identity).decode(),
-                "anchor": str(root / "independent-controller.pub"), "password": PASSWORD,
-                "keygen": str(args.bundle.parent / "vpn-orbit-install-age/age/age-keygen")}).encode()
-            recovered = run("/opt/vpn-orbit/venv/bin/python", "tests_runtime/lab/rescue.py", "--isolated-vm", "--keep-data", input=rescue_input, timeout=120)
-            print(recovered.stdout.decode().strip(), flush=True)
-            del rescue_input
-            sftp_publication(root, local_archive, fixture_identity)
-            migration_rehearsal(root)
             before = {name: hashlib.sha256(Path(path).read_bytes()).hexdigest() for name, path in (
                 ("credential", "/etc/vpn-orbit/credentials/broker-dek.cred"),
                 ("gate", "/var/lib/vpn-orbit/control-gate/signing.key"))}

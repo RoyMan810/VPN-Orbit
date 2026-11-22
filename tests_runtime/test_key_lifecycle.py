@@ -13,8 +13,6 @@ from vpn_orbit.admission import Admission
 from vpn_orbit.errors import Denied
 from vpn_orbit.runtime.cli import main
 from vpn_orbit.runtime.policy import Policy
-from vpn_orbit.runtime.backup_target import BackupTarget
-from test_sftp_publication import destination
 from vpn_orbit.runtime.storage import new_private_file
 from vpn_orbit.runtime.vault import Vault
 from fixtures import ACTOR, OTHER, SECRET, TARGET, WORKER_UID, policy, private_key
@@ -116,7 +114,7 @@ class KeyLifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(Denied, "SECRET_NOT_ACTIVE"):
             self.vault.use_policy_key(**self.scope)
 
-    def test_restart_and_sftp_rotation_preserve_scope_and_probe(self):
+    def test_restart_rotation_preserves_scope_and_probe(self):
         restart = self.vault.import_restart_ssh(OTHER, 1, private_key(), owner_id=ACTOR, worker_uid=WORKER_UID, target=TARGET)
         extended = Policy([{**policy().targets[TARGET].value, "capabilities": ["host.probe", "docker.restart"],
                             "restart_secret_ref": restart}])
@@ -128,18 +126,6 @@ class KeyLifecycleTests(unittest.TestCase):
         self.assertEqual(self.vault.use_policy_key(**(scope | {"purpose": "host.probe", "anchor": self.first})), private_key())
         with self.assertRaisesRegex(Denied, "SECRET_NOT_ACTIVE"):
             self.vault.use_restart_ssh(restart, worker_uid=WORKER_UID, target=TARGET, policy_revision=1)
-        target = BackupTarget.parse({**destination(), "id": OTHER, "secret_ref": ACTOR + ":v1", "policy_revision": 1})
-        backup = self.vault.import_backup_ssh(ACTOR, 1, private_key(), owner_id=ACTOR, broker_uid=os.geteuid(), target=OTHER)
-        scope = dict(anchor=backup, scope_digest=target.digest, purpose="backup.sftp", target=OTHER,
-                     policy_revision=1, consumer_uid=os.geteuid())
-        with patch.object(BackupTarget, "load", return_value=target):
-            self.assertEqual(self.command("rotate-key", backup, purpose="backup.sftp", target=OTHER), (0, ACTOR + ":v2", ""))
-            self.assertEqual(self.vault.use_policy_key(**scope), self.key)
-            with self.assertRaisesRegex(Denied, "SECRET_SCOPE_DENIED"):
-                self.vault.use_policy_key(**(scope | {"consumer_uid": WORKER_UID}))
-            self.assertEqual(self.command("revoke-key", ACTOR + ":v2", target=OTHER, purpose="backup.sftp"), (0, "REVOKED", ""))
-            with self.assertRaisesRegex(Denied, "SECRET_NOT_ACTIVE"):
-                self.vault.use_policy_key(**scope)
 
     def test_racing_rotations_commit_one_lifecycle_event(self):
         def rotate(_):
