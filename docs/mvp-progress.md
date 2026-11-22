@@ -25,6 +25,17 @@
 - The first staging installation exposed a shallow Git checkout failure after
   package installation. Bootstrap now rejects shallow checkouts before changing
   packages; the installer requires a full checkout.
+- Staging installed `4e4ae9c` after retrying the pull of the same pinned image.
+  The HTTPS proxy restarted after Compose, with a brief interval before it
+  accepted connections. With a bounded HTTPS readiness check, the staging
+  smoke test verified that the original session survived and the audit chain
+  stayed valid. It also verified TLS, WebUI delivery, anonymous access denial,
+  Owner and Auditor access checks, CSRF, logout, a networkless Worker, and
+  loopback-only API port bindings.
+- CI on `4e4ae9c` passed in runs `45072402300` (main), `45072402306` (fresh
+  installer), `45073910913` (typed Docker restart), and `45073913947` (WebUI).
+  The one-command installation workflow now checks authenticated session and
+  audit persistence across a Compose restart.
 - `v1.0.0` blockers include product-backed staging for all four Compose profiles,
   ownership-verified removal with shared-resource preservation, and staging
   end-to-end and fault acceptance. The version and artifact path still target

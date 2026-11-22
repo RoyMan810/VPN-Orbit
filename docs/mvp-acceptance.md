@@ -17,6 +17,7 @@ Status date: November 23, 2026
 | Area | Evidence | Status |
 |---|---|---|
 | Pinned SSH fingerprint and VM preflight | Disposable VM console and SSH checks | PASS |
+| Staging controller install and restart | Pinned HTTPS, Owner/Auditor access checks, CSRF, session and audit integrity across Compose restart, networkless Worker, loopback-only API (`4e4ae9c`) | PASS |
 | Fresh helper onboarding | Disposable VM, Ubuntu 24.04.5, x86_64 | PASS |
 | Repair after disconnect/partial phase | Disposable VM fault injection and retry | PASS |
 | Target-bound cleanup | Disposable VM cleanup and artifact absence checks | PASS |

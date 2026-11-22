@@ -51,13 +51,14 @@ jobs:
             sudo systemctl is-active --quiet "$unit"
           done
           sudo python3 - <<'PY'
+          from http.cookiejar import CookieJar
           import importlib.util
           import json
           from pathlib import Path
           import secrets
           import ssl
           import subprocess
-          from urllib.request import Request, urlopen
+          from urllib.request import HTTPSHandler, HTTPCookieProcessor, Request, build_opener
 
           fixture_path = Path("tests_runtime/lab/installation.py")
           spec = importlib.util.spec_from_file_location("installation_fixture", fixture_path)
@@ -67,17 +68,35 @@ jobs:
           fixture.owner_create()
 
           origin = "https://127.0.0.1:18443"
-          context = ssl.create_default_context(cafile="/opt/vpn-orbit-bootstrap/web-ca.pem")
-          with urlopen(origin, context=context, timeout=10) as response:
+          ca = "/opt/vpn-orbit-bootstrap/web-ca.pem"
+          context = ssl.create_default_context(cafile=ca)
+          browser = build_opener(HTTPSHandler(context=context), HTTPCookieProcessor(CookieJar()))
+          with browser.open(origin, timeout=10) as response:
               assert b"/assets/" in response.read()
-          with urlopen(origin + "/healthz", context=context, timeout=10) as response:
+          with browser.open(origin + "/healthz", timeout=10) as response:
               assert json.load(response)["status"] == "alive"
           login = Request(origin + "/api/v1/auth/login",
                           data=json.dumps({"username": "roman", "password": fixture.PASSWORD}).encode(),
                           headers={"Content-Type": "application/json", "Origin": origin})
-          with urlopen(login, context=context, timeout=10) as response:
-              assert json.load(response)["user"]["role"] == "Owner"
+          with browser.open(login, timeout=10) as response:
+              user = json.load(response)["user"]
+              assert user["role"] == "Owner"
               assert "Secure" in response.headers["Set-Cookie"]
+          with browser.open(origin + "/api/v1/audit/integrity", timeout=10) as response:
+              assert json.load(response)["status"] == "verified"
+
+          subprocess.run(["systemctl", "restart", "vpn-orbit-compose.service"], check=True, timeout=195)
+          # systemd may complete the Compose job before the HTTPS proxy accepts connections.
+          subprocess.run([
+              "curl", "--disable", "--fail", "--silent", "--show-error", "--noproxy", "*",
+              "--retry", "8", "--retry-connrefused", "--retry-max-time", "30", "--max-time", "4",
+              "--cacert", ca, "--output", "/dev/null", origin + "/healthz",
+          ], check=True, timeout=40)
+          with browser.open(origin + "/api/v1/auth/session", timeout=10) as response:
+              assert json.load(response)["user"]["id"] == user["id"]
+          with browser.open(origin + "/api/v1/audit/integrity", timeout=10) as response:
+              assert json.load(response)["status"] == "verified"
+
           revision = subprocess.check_output(["git", "-c", f"safe.directory={Path.cwd()}",
                                               "rev-parse", "HEAD"], text=True).strip()
           installed = json.loads(Path("/opt/vpn-orbit/installation.json").read_bytes())
