@@ -24,7 +24,10 @@ class ChangeDraftTests(Fixture):
         self.queue.register_resource(SCOPE, "a" * 64, 1)
         self.probe_id = self.probe()
         self.token = self.client.cookies[COOKIE]
-        self.output = self.directory / "drafts.sqlite3"
+        self.snapshot("drafts")
+
+    def snapshot(self, name):
+        self.output = self.directory / f"{name}.sqlite3"
         with self.store.connect(readonly=True) as source, closing(sqlite3.connect(self.output, autocommit=True)) as copy:
             source.execute("BEGIN")
             source.backup(copy)
@@ -94,8 +97,10 @@ class ChangeDraftTests(Fixture):
     def test_pins_latest_completed_job_even_when_probe_timestamps_match(self):
         newest = self.probe()
         self.assertNotEqual(newest, self.probe_id)
+        self.snapshot("latest")
         self.assertEqual(self.save()[0]["baseline"]["observation_id"], newest)
         self.probe("FAILED")
+        self.snapshot("failed")
         with self.assertRaisesRegex(Denied, "FRESH_OBSERVATION_REQUIRED"):
             self.save()
 
@@ -105,6 +110,7 @@ class ChangeDraftTests(Fixture):
         client = self.other_client("operator")
         token = client.cookies[COOKIE]
         csrf = client.get("/api/v1/auth/session").json()["csrf_token"]
+        self.snapshot("scoped")
         with self.transaction() as db:
             draft, tag = save_draft(db, self.auth, token, csrf, SCOPE, CONTAINER)
             db.execute("DELETE FROM grants WHERE permission='vps:restart'")
@@ -208,6 +214,7 @@ class ChangeDraftTests(Fixture):
     def test_baseline_check_denies_revoked_restart_and_tampered_plan(self):
         self.create_user(grants=[{"permission": "vps:read", "resource_id": SCOPE}])
         observer = self.other_client("operator").cookies[COOKIE]
+        self.snapshot("read-only-operator")
         draft, tag = self.save()
         with self.transaction(write=False) as db:
             with self.assertRaisesRegex(Denied, "FORBIDDEN"):
@@ -519,6 +526,7 @@ class ChangeDraftTests(Fixture):
         client = self.other_client("operator")
         token = client.cookies[COOKIE]
         csrf = client.get("/api/v1/auth/session").json()["csrf_token"]
+        self.snapshot("operator-confirmation")
         with self.assertRaisesRegex(Denied, "RESTART_OWNER_CONFIRMATION_REQUIRED"), self.transaction() as db:
             save_draft(db, self.auth, token, csrf, SCOPE, CONTAINER, confirm_stateless_test=True)
         with self.assertRaisesRegex(Denied, "RESTART_CONFIRMATION_INVALID"):
