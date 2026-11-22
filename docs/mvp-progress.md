@@ -2,11 +2,11 @@
 
 ## Current state
 
-- Main: `798d5d1` (PR #136 merged).
-- PRs #126–#136 are merged.
+- Main: `b4c43db` (PR #139 merged).
+- PRs #126–#139 are merged.
 - P0 removal of excluded backup, rescue, activation, self-update, stage0, and recovery installation functionality is complete.
 - No production installations or data exist, and no real VPS has been used.
-- Active stage: P2 onboarding and repair/cleanup audit.
+- Active stage: P3 Firewall WebUI and disposable fault acceptance.
 
 ## Completed
 
@@ -38,7 +38,12 @@ The existing reconciliation paths now have browser and runtime coverage for lost
 responses, UNKNOWN_OUTCOME, restart receipt reconciliation, idempotency replay, and
 resource-scoped permissions. P1 regression verification is complete. The next task
 is a focused P2 audit of VPS onboarding, resumable repair, target-bound cleanup,
-and disposable acceptance coverage; deployment profiles remain out of scope.
+and disposable acceptance coverage are complete. The next stage is P3 Firewall
+WebUI and disposable fault acceptance; deployment profiles remain out of scope.
+
+## P2.3 verification
+
+- Disposable VM acceptance passed the separate typed firewall onboarding profile with exact cleanup; no remote managed artifacts remained after cleanup.
 
 ## P2.2 verification
 
@@ -67,6 +72,6 @@ and disposable acceptance coverage; deployment profiles remain out of scope.
 
 ## Blockers
 
-- The checked-out `origin/main` ref was refreshed to `798d5d1` after PR #136.
+- The checked-out `origin/main` ref was refreshed to `b4c43db` after PR #139.
 - No production VPS is available or permitted. The disposable VM remains the only
-  acceptance target; its `clear` rollback snapshot is available.
+  acceptance target; its `clear` rollback snapshot is available. P2 acceptance is complete.
