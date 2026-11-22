@@ -1,6 +1,7 @@
 """Typed, non-deploying Compose profile catalog for optional applications."""
 
 import json
+import hashlib
 import re
 from pathlib import Path
 
@@ -21,6 +22,11 @@ def load_catalog(path: Path):
     for name, profile in profiles.items():
         _validate_profile(name, profile)
     return value
+
+
+def catalog_digest(catalog):
+    raw = json.dumps(catalog, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    return hashlib.sha256(raw).hexdigest()
 
 
 def _validate_profile(name, profile):
@@ -110,7 +116,7 @@ def render(catalog, selected):
                 dep: {"condition": "service_healthy"} for dep in profile["depends_on"]
             }
         services[name] = service
-    return {"services": services, "networks": networks}
+    return {"v": 1, "catalog_sha256": catalog_digest(catalog), "services": services, "networks": networks}
 
 
 def load_selection(path: Path, catalog):

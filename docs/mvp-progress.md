@@ -61,6 +61,8 @@ is allowed.
   non-isolated Node profiles.
 - Related application services use an explicitly shared network group; isolated
   Node profiles remain networkless.
+- Rendered selections carry a canonical catalog SHA-256 so later deployment and
+  drift workflows can bind installed services to the approved profile catalog.
 
 ## P2.3 verification
 
