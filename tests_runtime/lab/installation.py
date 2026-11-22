@@ -92,63 +92,6 @@ def owner_create():
         os.close(master)
 
 
-def migration_rehearsal(root):
-    """Use only code/assets from the installed signed wheel on a legacy fixture."""
-    legacy = root / "legacy"
-    legacy.mkdir(mode=0o700)
-    path = legacy / "controller.sqlite3"
-    code = f"""import sqlite3
-from contextlib import closing
-from pathlib import Path
-from vpn_orbit.auth import AuthService
-from vpn_orbit.database import Store
-from vpn_orbit.migrations import historical_schema
-p=Path({str(path)!r})
-p.touch(mode=0o600)
-with closing(sqlite3.connect(p,autocommit=True)) as db:
- db.execute('PRAGMA journal_mode=WAL')
- db.executescript(historical_schema())
-s=Store(p)
-a=AuthService(s)
-a.create_owner(a.issue_bootstrap(),'legacy-owner',{PASSWORD!r})
-a.login('legacy-owner',{PASSWORD!r},ip='192.0.2.77',correlation='install-lab')
-print(s.verify_audit())
-"""
-    before = run("/opt/vpn-orbit/venv/bin/python", "-c", code).stdout.decode().strip()
-    output = root / "migration-review"
-    response = run("/opt/vpn-orbit/venv/bin/vpn-orbit", "--database", path,
-                   "migration-rehearsal", "--output", output)
-    report = json.loads(response.stdout)
-    if (report["status"] != "REHEARSAL_PASSED" or report["applied_to_source"] is not False
-            or report["live_apply"] != "BLOCKED" or report["source_audit_head"] != before
-            or report["preserved_table_rows"]["users"] != 1 or report["preserved_table_rows"]["sessions"] != 1):
-        raise RuntimeError("Installed historical migration rehearsal failed")
-    with sqlite3.connect(path) as source, sqlite3.connect(output / "migrated.sqlite3") as copied:
-        if (source.execute("PRAGMA user_version").fetchone() != (1,)
-                or copied.execute("PRAGMA user_version").fetchone() != (2,)
-                or source.execute("SELECT digest FROM audit ORDER BY seq DESC LIMIT 1").fetchone() != (before,)):
-            raise RuntimeError("Rehearsal changed the source or failed to migrate its private copy")
-    print("Installed wheel CLI rehearsed schema 1 to 2; Owner/session/audit survived and live schema stayed at 1.", flush=True)
-
-    schema_two = output / "migrated.sqlite3"
-    plan_output = root / "plan-migration-review"
-    response = run("/opt/vpn-orbit/venv/bin/vpn-orbit", "--database", schema_two,
-                   "migration-rehearsal", "--to-schema", "3", "--output", plan_output)
-    plan_report = json.loads(response.stdout)
-    if (plan_report["status"] != "REHEARSAL_PASSED" or plan_report["applied_to_source"] is not False
-            or (plan_report["schema_before"], plan_report["schema_after"]) != (2, 3)
-            or plan_report["source_audit_head"] != report["migrated_audit_head"]):
-        raise RuntimeError("Installed Change Plan migration rehearsal failed")
-    with sqlite3.connect(schema_two) as source, sqlite3.connect(plan_output / "migrated.sqlite3") as copied:
-        if (source.execute("PRAGMA user_version").fetchone() != (2,)
-                or copied.execute("PRAGMA user_version").fetchone() != (3,)
-                or copied.execute("SELECT count(*) FROM change_plan_drafts").fetchone() != (0,)):
-            raise RuntimeError("Plan migration changed the source or produced an invalid draft table")
-    with sqlite3.connect("file:/var/lib/vpn-orbit/app/controller.sqlite3?mode=ro", uri=True) as installed:
-        if (installed.execute("PRAGMA user_version").fetchone() != (5,)
-                or installed.execute("SELECT count(*) FROM change_plan_drafts").fetchone() != (0,)):
-            raise RuntimeError("Clean signed install did not initialize schema 5")
-    print("Installed wheel CLI rehearsed schema 2 to 3 and created an empty draft table on a private copy.", flush=True)
 
 
 def writer_barrier(host, ids):

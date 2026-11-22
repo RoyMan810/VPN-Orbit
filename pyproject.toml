@@ -17,7 +17,7 @@ vpn-orbit-runtime = "vpn_orbit.runtime.cli:main"
 include = ["vpn_orbit*"]
 
 [tool.setuptools.package-data]
-vpn_orbit = ["release-manifest.json", "schema_v1.sql"]
+vpn_orbit = ["release-manifest.json"]
 
 [tool.ruff]
 required-version = "==0.17.5"

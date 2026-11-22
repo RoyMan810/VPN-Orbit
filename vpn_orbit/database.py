@@ -14,7 +14,73 @@ from dataclasses import dataclass
 
 SCHEMA_VERSION = 5
 _ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-_SCHEMA = """
+_SCHEMA = r"""
+CREATE TABLE api_calls (user_id TEXT NOT NULL, ip TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE audit (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+    at INTEGER NOT NULL, actor_id TEXT NOT NULL, event TEXT NOT NULL,
+    target_id TEXT NOT NULL, outcome TEXT NOT NULL, correlation_id TEXT NOT NULL,
+    details TEXT NOT NULL, previous_hash TEXT NOT NULL, digest TEXT NOT NULL
+);
+CREATE TABLE bootstrap (
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1), digest BLOB NOT NULL,
+    issued_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
+);
+CREATE TABLE change_plan_drafts (
+    id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK(revision >= 1),
+    actor_id TEXT NOT NULL REFERENCES users(id),
+    resource_id TEXT NOT NULL REFERENCES resources(id),
+    action TEXT NOT NULL CHECK(action IN ('docker.restart','firewall.apply')),
+    baseline TEXT NOT NULL CHECK(json_valid(baseline) AND json_type(baseline) = 'object'),
+    plan_hash TEXT NOT NULL CHECK(length(plan_hash) = 64 AND plan_hash NOT GLOB '*[^0-9a-f]*'),
+    created_at INTEGER NOT NULL CHECK(created_at >= 0),
+    PRIMARY KEY(id, revision)
+) STRICT;
+CREATE TABLE critical_attempts (user_id TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE grants (
+    user_id TEXT NOT NULL REFERENCES users(id), permission TEXT NOT NULL,
+    resource_id TEXT NOT NULL, PRIMARY KEY(user_id, permission, resource_id)
+);
+CREATE TABLE job_incidents (
+    id TEXT PRIMARY KEY, job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id),
+    state TEXT NOT NULL CHECK(state='OPEN'), created_at INTEGER NOT NULL
+);
+CREATE TABLE jobs (
+    id TEXT PRIMARY KEY, actor_id TEXT NOT NULL REFERENCES users(id),
+    resource_id TEXT NOT NULL REFERENCES resources(id), action TEXT NOT NULL CHECK(action IN ('host.probe','docker.restart','firewall.apply')),
+    payload_hash TEXT NOT NULL, scope_digest TEXT NOT NULL, policy_revision INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('QUEUED','INTENT_PREPARED','DISPATCHING','EXECUTING','VERIFYING','SUCCEEDED','FAILED','UNKNOWN_OUTCOME','CANCELLED_SAFE')),
+    revision INTEGER NOT NULL DEFAULT 1, claimed_by TEXT, claim_nonce TEXT,
+    permit TEXT, result TEXT, reason TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE TABLE login_attempts (
+    id TEXT PRIMARY KEY, account TEXT NOT NULL, ip TEXT NOT NULL,
+    at INTEGER NOT NULL, failed INTEGER NOT NULL CHECK(failed IN (0,1))
+);
+CREATE TABLE login_requests (ip TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE outbox (
+    seq INTEGER PRIMARY KEY REFERENCES audit(seq), event_id TEXT NOT NULL UNIQUE,
+    payload TEXT NOT NULL, created_at INTEGER NOT NULL
+);
+CREATE TABLE reauth (
+    id TEXT PRIMARY KEY, session_digest BLOB NOT NULL REFERENCES sessions(digest) ON DELETE CASCADE,
+    plan_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, consumed INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE request_keys (
+    actor_id TEXT NOT NULL REFERENCES users(id), namespace TEXT NOT NULL,
+    request_key TEXT NOT NULL, payload_hash TEXT NOT NULL, job_id TEXT NOT NULL REFERENCES jobs(id),
+    expires_at INTEGER NOT NULL, PRIMARY KEY(actor_id,namespace,request_key)
+);
+CREATE TABLE resources (
+    id TEXT PRIMARY KEY, scope_digest TEXT NOT NULL, policy_revision INTEGER NOT NULL,
+    revision INTEGER NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE TABLE sessions (
+    digest BLOB PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+    csrf_digest BLOB NOT NULL, issued_at INTEGER NOT NULL, last_seen INTEGER NOT NULL
+);
 CREATE TABLE users (
     id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL, password_profile INTEGER NOT NULL,
@@ -23,138 +89,30 @@ CREATE TABLE users (
     revision INTEGER NOT NULL DEFAULT 1,
     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
-CREATE TABLE grants (
-    user_id TEXT NOT NULL REFERENCES users(id), permission TEXT NOT NULL,
-    resource_id TEXT NOT NULL, PRIMARY KEY(user_id, permission, resource_id)
-);
-CREATE TABLE sessions (
-    digest BLOB PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
-    csrf_digest BLOB NOT NULL, issued_at INTEGER NOT NULL, last_seen INTEGER NOT NULL
-);
-CREATE INDEX sessions_user ON sessions(user_id);
-CREATE TABLE bootstrap (
-    singleton INTEGER PRIMARY KEY CHECK(singleton=1), digest BLOB NOT NULL,
-    issued_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
-);
-CREATE TABLE login_attempts (
-    id TEXT PRIMARY KEY, account TEXT NOT NULL, ip TEXT NOT NULL,
-    at INTEGER NOT NULL, failed INTEGER NOT NULL CHECK(failed IN (0,1))
-);
-CREATE INDEX login_ip_time ON login_attempts(ip, at);
-CREATE INDEX login_account_ip_time ON login_attempts(account, ip, at);
-CREATE TABLE login_requests (ip TEXT NOT NULL, at INTEGER NOT NULL);
-CREATE INDEX login_requests_ip_time ON login_requests(ip, at);
-CREATE TABLE api_calls (user_id TEXT NOT NULL, ip TEXT NOT NULL, at INTEGER NOT NULL);
-CREATE INDEX api_user_time ON api_calls(user_id, at);
 CREATE INDEX api_ip_time ON api_calls(ip, at);
-CREATE TABLE critical_attempts (user_id TEXT NOT NULL, at INTEGER NOT NULL);
-CREATE INDEX critical_user_time ON critical_attempts(user_id, at);
-CREATE TABLE reauth (
-    id TEXT PRIMARY KEY, session_digest BLOB NOT NULL REFERENCES sessions(digest) ON DELETE CASCADE,
-    plan_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, consumed INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE audit (
-    seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
-    at INTEGER NOT NULL, actor_id TEXT NOT NULL, event TEXT NOT NULL,
-    target_id TEXT NOT NULL, outcome TEXT NOT NULL, correlation_id TEXT NOT NULL,
-    details TEXT NOT NULL, previous_hash TEXT NOT NULL, digest TEXT NOT NULL
-);
+CREATE INDEX api_user_time ON api_calls(user_id, at);
 CREATE INDEX audit_target_time ON audit(target_id, at);
-CREATE TRIGGER audit_no_update BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT,'AUDIT_APPEND_ONLY'); END;
-CREATE TRIGGER audit_no_delete BEFORE DELETE ON audit BEGIN SELECT RAISE(ABORT,'AUDIT_APPEND_ONLY'); END;
-CREATE TABLE outbox (
-    seq INTEGER PRIMARY KEY REFERENCES audit(seq), event_id TEXT NOT NULL UNIQUE,
-    payload TEXT NOT NULL, created_at INTEGER NOT NULL
-);
-CREATE TRIGGER outbox_no_update BEFORE UPDATE ON outbox BEGIN SELECT RAISE(ABORT,'OUTBOX_APPEND_ONLY'); END;
-CREATE TRIGGER outbox_no_delete BEFORE DELETE ON outbox BEGIN SELECT RAISE(ABORT,'OUTBOX_APPEND_ONLY'); END;
-CREATE TABLE resources (
-    id TEXT PRIMARY KEY, scope_digest TEXT NOT NULL, policy_revision INTEGER NOT NULL,
-    revision INTEGER NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
-    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-);
-CREATE TABLE jobs (
-    id TEXT PRIMARY KEY, actor_id TEXT NOT NULL REFERENCES users(id),
-    resource_id TEXT NOT NULL REFERENCES resources(id), action TEXT NOT NULL CHECK(action='host.probe'),
-    payload_hash TEXT NOT NULL, scope_digest TEXT NOT NULL, policy_revision INTEGER NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('QUEUED','INTENT_PREPARED','DISPATCHING','EXECUTING','VERIFYING','SUCCEEDED','FAILED','UNKNOWN_OUTCOME','CANCELLED_SAFE')),
-    revision INTEGER NOT NULL DEFAULT 1, claimed_by TEXT, claim_nonce TEXT,
-    permit TEXT, result TEXT, reason TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-);
+CREATE INDEX change_plan_drafts_hash ON change_plan_drafts(plan_hash);
+CREATE INDEX change_plan_drafts_resource ON change_plan_drafts(resource_id, id);
+CREATE INDEX critical_user_time ON critical_attempts(user_id, at);
 CREATE INDEX job_queue ON jobs(status,claimed_by,created_at);
 CREATE INDEX jobs_resource_time ON jobs(resource_id,updated_at);
-CREATE TABLE request_keys (
-    actor_id TEXT NOT NULL REFERENCES users(id), namespace TEXT NOT NULL,
-    request_key TEXT NOT NULL, payload_hash TEXT NOT NULL, job_id TEXT NOT NULL REFERENCES jobs(id),
-    expires_at INTEGER NOT NULL, PRIMARY KEY(actor_id,namespace,request_key)
-);
-CREATE TABLE job_incidents (
-    id TEXT PRIMARY KEY, job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id),
-    state TEXT NOT NULL CHECK(state='OPEN'), created_at INTEGER NOT NULL
-);
-PRAGMA user_version = 2;
-"""
-
-_PLAN_TABLE = """
-CREATE TABLE change_plan_drafts (
-    id TEXT NOT NULL,
-    revision INTEGER NOT NULL CHECK(revision >= 1),
-    actor_id TEXT NOT NULL REFERENCES users(id),
-    resource_id TEXT NOT NULL REFERENCES resources(id),
-    action TEXT NOT NULL CHECK(action = 'docker.restart'),
-    baseline TEXT NOT NULL CHECK(json_valid(baseline) AND json_type(baseline) = 'object'),
-    plan_hash TEXT NOT NULL CHECK(length(plan_hash) = 64 AND plan_hash NOT GLOB '*[^0-9a-f]*'),
-    created_at INTEGER NOT NULL CHECK(created_at >= 0),
-    PRIMARY KEY(id, revision)
-) STRICT;
-CREATE INDEX change_plan_drafts_resource ON change_plan_drafts(resource_id, id);
-CREATE INDEX change_plan_drafts_hash ON change_plan_drafts(plan_hash);
-"""
-
-_PLAN_SCHEMA = _PLAN_TABLE + "PRAGMA user_version = 3;\n"
-
-_JOBS_TABLE = _SCHEMA[_SCHEMA.index("CREATE TABLE jobs"):].removesuffix("PRAGMA user_version = 2;\n")
-
-
-def _with_jobs_actions(block, actions):
-    return block.replace("CHECK(action='host.probe')",
-                         "CHECK(action IN (" + ",".join(f"'{name}'" for name in actions) + "))")
-
-
-def _rebuild_jobs(actions):
-    return """
-ALTER TABLE request_keys RENAME TO old_request_keys;
-ALTER TABLE job_incidents RENAME TO old_job_incidents;
-ALTER TABLE jobs RENAME TO old_jobs;
-DROP INDEX job_queue;
-DROP INDEX jobs_resource_time;
-""" + _with_jobs_actions(_JOBS_TABLE, actions) + """
-INSERT INTO jobs SELECT * FROM old_jobs;
-INSERT INTO request_keys SELECT * FROM old_request_keys;
-INSERT INTO job_incidents SELECT * FROM old_job_incidents;
-DROP TABLE old_request_keys;
-DROP TABLE old_job_incidents;
-DROP TABLE old_jobs;
-"""
-
-
-_OPERATION_SCHEMA = _rebuild_jobs(("host.probe", "docker.restart")) + "PRAGMA user_version = 4;\n"
-
-_FIREWALL_SCHEMA = _rebuild_jobs(("host.probe", "docker.restart", "firewall.apply")) + """
-ALTER TABLE change_plan_drafts RENAME TO old_change_plan_drafts;
-DROP INDEX change_plan_drafts_resource;
-DROP INDEX change_plan_drafts_hash;
-""" + _PLAN_TABLE.replace("CHECK(action = 'docker.restart')",
-                          "CHECK(action IN ('docker.restart','firewall.apply'))") + """
-INSERT INTO change_plan_drafts SELECT * FROM old_change_plan_drafts;
-DROP TABLE old_change_plan_drafts;
+CREATE INDEX login_account_ip_time ON login_attempts(account, ip, at);
+CREATE INDEX login_ip_time ON login_attempts(ip, at);
+CREATE INDEX login_requests_ip_time ON login_requests(ip, at);
+CREATE INDEX sessions_user ON sessions(user_id);
+CREATE TRIGGER audit_no_delete BEFORE DELETE ON audit BEGIN SELECT RAISE(ABORT,'AUDIT_APPEND_ONLY'); END;
+CREATE TRIGGER audit_no_update BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT,'AUDIT_APPEND_ONLY'); END;
+CREATE TRIGGER outbox_no_delete BEFORE DELETE ON outbox BEGIN SELECT RAISE(ABORT,'OUTBOX_APPEND_ONLY'); END;
+CREATE TRIGGER outbox_no_update BEFORE UPDATE ON outbox BEGIN SELECT RAISE(ABORT,'OUTBOX_APPEND_ONLY'); END;
 PRAGMA user_version = 5;
 """
 
 
 def application_schema(version):
-    return (_SCHEMA + (_PLAN_SCHEMA if version >= 3 else "") + (_OPERATION_SCHEMA if version >= 4 else "")
-            + (_FIREWALL_SCHEMA if version >= 5 else ""))
+    if version != SCHEMA_VERSION:
+        raise ValueError("DATABASE_CONTRACT_MISMATCH")
+    return _SCHEMA
 
 
 def canonical(value):
@@ -199,7 +157,7 @@ class Store:
 
     @classmethod
     def initialize(cls, path: Path, *, access: DataAccess | None = None, schema=SCHEMA_VERSION):
-        if type(schema) is not int or schema not in (2, 3, 4, SCHEMA_VERSION):
+        if type(schema) is not int or schema != SCHEMA_VERSION:
             raise RuntimeError("DATABASE_CONTRACT_MISMATCH")
         store = cls(path, access=access)
         shared = store.access.shared_gid is not None
@@ -241,7 +199,7 @@ class Store:
             for name, expected in {"journal_mode": "wal", "synchronous": 2, "foreign_keys": 1, "busy_timeout": 5000,
                                    "user_version": 0 if initializing else SCHEMA_VERSION}.items():
                 actual = db.execute(f"PRAGMA {name}").fetchone()[0]
-                if actual != expected and not (name == "user_version" and not initializing and actual in (1, 2, 3, 4)):
+                if actual != expected:
                     raise RuntimeError("DATABASE_CONTRACT_MISMATCH")
             try:
                 yield db
@@ -295,7 +253,7 @@ class Store:
 
     @staticmethod
     def verify_audit_connection(db):
-        """Verify a caller's already pinned transaction, including migration copies."""
+        """Verify a caller's already pinned transaction."""
         previous = "0" * 64
         for row in db.execute("SELECT * FROM audit ORDER BY seq"):
             value = {key: row[key] for key in ("id", "at", "actor_id", "event", "target_id", "outcome", "correlation_id", "previous_hash")}

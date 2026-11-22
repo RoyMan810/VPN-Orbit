@@ -130,8 +130,6 @@ class Worker:
         path = self.queue.store.path.with_suffix(".worker.lock")
         with process_lock(path, shared_gid=self.queue.store.access.shared_gid):
             self.queue.recover(self._recover_result)
-            self.restart.recover_legacy_requests()
-            self.firewall.recover_legacy_requests()
             while not stop.is_set():
                 found = self.run_one()
                 if once:

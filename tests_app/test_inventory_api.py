@@ -231,14 +231,6 @@ class InventoryTests(Fixture):
         self.assertIn('MATERIALIZE page', plan)
         self.assertEqual(plan.count('SEARCH a USING INDEX audit_target_time'), 1)
 
-    def test_schema_one_is_not_silently_migrated(self):
-        with self.store.write() as db:
-            db.execute("PRAGMA user_version=1")
-        for url in ("/api/v1/resources", f"/api/v1/resources/{SCOPE}"):
-            response = self.client.get(url)
-            self.assertEqual(response.status_code, 503)
-        with self.store.read() as db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
 
     def test_equal_creation_times_use_completion_order_for_latest_and_last_success(self):
         with patch('vpn_orbit.queue.identifier', side_effect=[OTHER, SCOPE]):

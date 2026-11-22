@@ -48,7 +48,7 @@ def firewall_value(draft_id, revision, baseline):
 
 def _schema(db):
     if not db.in_transaction or db.execute("PRAGMA user_version").fetchone()[0] != 5:
-        raise Denied("FIREWALL_SCHEMA_REQUIRES_VERIFIED_MIGRATION", 503)
+        raise Denied("DATABASE_SCHEMA_UNSUPPORTED", 503)
 
 
 def _require(db, actor, resource_id):
@@ -301,25 +301,6 @@ class FirewallOperations:
         self.queue, self.store, self.clock = queue, queue.store, queue.clock
         self.gate, self.broker, self.secret_refs = gate, broker, secret_refs
 
-    def recover_legacy_requests(self):
-        with self.store.write(kind="control") as db:
-            if db.execute("PRAGMA user_version").fetchone()[0] != 5:
-                return
-            for row in db.execute("""SELECT a.* FROM audit a WHERE a.event=?
-                AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.id=json_extract(a.details,'$.operation_id'))
-                AND NOT EXISTS (SELECT 1 FROM audit b WHERE b.event=? AND b.target_id=a.target_id
-                    AND b.correlation_id=a.correlation_id
-                    AND json_extract(b.details,'$.operation_id')=json_extract(a.details,'$.operation_id'))
-                ORDER BY a.seq""", (REQUESTED, EVENTS[2])).fetchall():
-                operation = json.loads(row["details"])
-                prepared = db.execute("""SELECT 1 FROM audit WHERE event=? AND target_id=? AND correlation_id=?
-                    AND json_extract(details,'$.operation_id')=? LIMIT 1""",
-                    (EVENTS[1], row["target_id"], row["correlation_id"], operation["operation_id"])).fetchone()
-                Store.event(db, at=int(self.clock()), actor=row["actor_id"], target=row["target_id"],
-                            correlation=row["correlation_id"], kind=EVENTS[2],
-                            outcome="UNKNOWN_OUTCOME" if prepared else "CANCELLED_SAFE",
-                            details={"operation_id": operation["operation_id"], "revision": operation["revision"],
-                                     "reason": "WORKER_RESTART"})
 
     @staticmethod
     def pending_reconciliation(db):
