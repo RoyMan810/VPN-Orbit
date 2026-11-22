@@ -542,6 +542,41 @@ test('shows the Owner typed firewall plan without exposing arbitrary firewall ed
   await expect(page.getByText('nft flush ruleset', { exact: true })).toHaveCount(0)
 })
 
+test('resumes a firewall operation after a lost enqueue response and requests reconciliation', async ({ page }) => {
+  expect((await page.request.post('/__fixture__/reset-api-budget')).status()).toBe(204)
+  await signIn(page)
+  const plan = page.getByRole('region', { name: 'Firewall change plan' })
+  await plan.getByRole('button', { name: 'Review firewall plan' }).click()
+  const approve = plan.getByRole('button', { name: 'Approve firewall plan' })
+  await expect(approve).toBeDisabled()
+  await plan.getByRole('button', { name: 'Check baseline' }).click()
+  await plan.getByLabel('Password').fill(password)
+  await approve.click()
+  let acceptedId: string | undefined
+  await page.route('**/firewall-execution-requests', async route => {
+    const response = await route.fetch()
+    expect(response.status()).toBe(202)
+    acceptedId = (await response.json()).id
+    await route.abort()
+  }, { times: 1 })
+  const apply = plan.getByRole('button', { name: 'Apply firewall plan' })
+  await apply.click()
+  await expect(plan.getByRole('alert')).toBeVisible()
+  expect(acceptedId).toBeTruthy()
+  await page.reload()
+  await apply.click()
+  await expect(plan.getByText(acceptedId!, { exact: true })).toBeVisible()
+  await finishProbe(page, acceptedId!, 'UNKNOWN_OUTCOME')
+  await expect(plan.getByText('UNKNOWN_OUTCOME', { exact: true })).toBeVisible()
+  const receipt = page.waitForResponse(response => response.url().endsWith('/reconciliations/1'))
+  await plan.getByRole('button', { name: 'Check firewall receipts' }).click()
+  const result = await receipt
+  expect(result.request().method()).toBe('POST')
+  expect(result.status()).toBe(202)
+  await expect(plan.getByText('RECONCILIATION_REQUESTED', { exact: true })).toBeVisible()
+  await expect(apply).toHaveCount(0)
+})
+
 test('treats the missing Docker v3 port field as unavailable', async ({ page }) => {
   await page.route('**/api/v1/resources/' + fresh, async route => {
     const response = await route.fetch()
