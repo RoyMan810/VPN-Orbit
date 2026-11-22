@@ -178,6 +178,20 @@ def removal_plan(actual, expected, *, confirmed=False):
             "volumes": volumes, "data_preserved": True, "compose_down": False}
 
 
+def execute_removal(plan, runner):
+    """Remove owned containers/networks only; never remove volumes or run compose down."""
+    if not isinstance(plan, dict) or plan.get("status") != "REMOVAL_AUTHORIZED":
+        raise ValueError("COMPOSE_REMOVAL_CONFIRMATION_REQUIRED")
+    if plan.get("data_preserved") is not True or plan.get("compose_down") is not False:
+        raise ValueError("COMPOSE_REMOVAL_PLAN_INVALID")
+    for service in plan["services"]:
+        runner(["docker", "compose", "--project-name", "vpn-orbit", "rm", "--stop", "--force", service])
+    for network in plan["networks"]:
+        runner(["docker", "network", "rm", network])
+    return {"status": "REMOVAL_APPLIED", "services": plan["services"],
+            "networks": plan["networks"], "volumes": plan["volumes"], "data_preserved": True}
+
+
 def load_selection(path: Path, catalog):
     value = json.loads(Path(path).read_text())
     if not isinstance(value, dict) or value.get("v") != 1 or set(value) != {"v", "profiles"}:
