@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ApiError, hasApiStatus, isUlid, request } from './api'
+import { ApiError, apiErrorDetails, hasApiStatus, isUlid, request } from './api'
 import type { DockerContainer, Observation, Resource } from './api'
 import type { Copy } from './copy'
 import { restartHash } from './restart-timeline'
@@ -20,6 +20,18 @@ type Draft = {
   }
 }
 type SavedDraft = { id: string; revision: number; hash: string; tag: string; key: string; savedAt: number }
+type SavedRestart = { draft: SavedDraft; probe: string | null; approval: string | null; operation: string | null }
+
+function restartStorageKey(resource: Resource, container: DockerContainer) {
+  return `vpn-orbit.restart.${resource.id}.${container.id}`
+}
+
+function readSavedRestart(key: string): SavedRestart | null {
+  try {
+    const value = JSON.parse(localStorage.getItem(key) ?? 'null') as SavedRestart | null
+    return value?.draft?.id && typeof value.draft.key === 'string' ? value : null
+  } catch { return null }
+}
 
 export function RestartPlan({ resource, container, sample, csrf, t, expired }: {
   resource: Resource
@@ -29,17 +41,25 @@ export function RestartPlan({ resource, container, sample, csrf, t, expired }: {
   t: Copy
   expired: () => void
 }) {
-  const [confirmed, confirm] = useState(false)
-  const [draft, setDraft] = useState<SavedDraft | null>(null)
-  const [probe, setProbe] = useState<string | null>(null)
+  const storageKey = restartStorageKey(resource, container)
+  const saved = readSavedRestart(storageKey)
+  const [confirmed, confirm] = useState(Boolean(saved))
+  const [draft, setDraft] = useState<SavedDraft | null>(saved?.draft ?? null)
+  const [probe, setProbe] = useState<string | null>(saved?.probe ?? null)
   const [decision, setDecision] = useState<'waiting' | 'passed' | 'denied' | 'failed'>('waiting')
   const [password, setPassword] = useState('')
-  const [approval, setApproval] = useState<string | null>(null)
-  const [operation, setOperation] = useState<string | null>(null)
+  const [approval, setApproval] = useState<string | null>(saved?.approval ?? null)
+  const [operation, setOperation] = useState<string | null>(saved?.operation ?? null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const pending = useRef<AbortController | null>(null)
   useEffect(() => () => pending.current?.abort(), [])
+  useEffect(() => {
+    try {
+      if (draft) localStorage.setItem(storageKey, JSON.stringify({ draft, probe, approval, operation }))
+      else localStorage.removeItem(storageKey)
+    } catch { /* Recovery state is best effort only. */ }
+  }, [storageKey, draft, probe, approval, operation])
 
   const plan = draft && '/change-plans/' + draft.id
   const options = { csrf, ifMatch: draft?.tag, idempotencyKey: draft?.key }
@@ -56,8 +76,10 @@ export function RestartPlan({ resource, container, sample, csrf, t, expired }: {
     } catch (cause) {
       if (abort.signal.aborted) return
       if (hasApiStatus(cause, 401)) return expired()
-      setError(hasApiStatus(cause, 429) ? t.rateLimited :
-        hasApiStatus(cause, 409) ? t.restartPreviewStale : t.restartPlanError)
+      const base = hasApiStatus(cause, 429) ? t.rateLimited :
+        hasApiStatus(cause, 409) ? t.restartPreviewStale : t.restartPlanError
+      const details = apiErrorDetails(cause)
+      setError(details ? `${base} (${details})` : base)
     } finally {
       pending.current = null
       if (!abort.signal.aborted) setBusy(false)
@@ -82,7 +104,7 @@ export function RestartPlan({ resource, container, sample, csrf, t, expired }: {
         baseline.policy_revision !== resource.policy_revision) {
       throw new ApiError(409)
     }
-    return { id: value.id, revision: value.revision, hash: value.plan_hash, tag, key: crypto.randomUUID(), savedAt: performance.now() }
+    return { id: value.id, revision: value.revision, hash: value.plan_hash, tag, key: crypto.randomUUID(), savedAt: Date.now() }
   }
 
   async function prepare(signal: AbortSignal) {
@@ -92,7 +114,7 @@ export function RestartPlan({ resource, container, sample, csrf, t, expired }: {
     const path = '/change-plans/' + saved.id
     const headers = { csrf, ifMatch: saved.tag, idempotencyKey: saved.key, signal }
     // The server records drafts and observations in whole seconds.
-    const delay = Math.max(0, 1000 - (performance.now() - saved.savedAt))
+    const delay = Math.max(0, 1000 - (Date.now() - saved.savedAt))
     if (delay) await new Promise(resolve => window.setTimeout(resolve, delay))
     if (signal.aborted) return
     const id = probe ?? (await request<{ id: string }>(path + '/preflight', { ...headers, body: {} })).id

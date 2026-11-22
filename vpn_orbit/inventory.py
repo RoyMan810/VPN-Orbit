@@ -69,7 +69,7 @@ class Inventory:
     def __init__(self, store, *, clock=time.time):
         self.store, self.clock = store, clock
 
-    def _public(self, row, now):
+    def _public(self, row, now, actor, db):
         success = _sample(row['success_result'])
         status, reason = 'NOT_CHECKED', 'NO_COMPLETED_OBSERVATION'
         if row['job_status'] is not None:
@@ -90,8 +90,17 @@ class Inventory:
                     status, reason = 'REACHABLE', 'PROBE_SUCCEEDED'
         if not row['enabled']:
             status, reason = 'UNKNOWN', 'RESOURCE_DISABLED'
+        permissions = {}
+        for name, permission in (('probe', 'vps:probe'), ('restart', 'vps:restart'), ('firewall', 'vps:firewall')):
+            try:
+                AuthService.require(db, actor, permission, row['id'])
+            except Denied:
+                permissions[name] = False
+            else:
+                permissions[name] = True
         return {**{k: row[k] for k in ('id', 'revision', 'policy_revision', 'created_at', 'updated_at')},
                 'enabled': bool(row['enabled']), 'access_mode': 'READ_ONLY',
+                'permissions': permissions,
                 'observation': {'status': status, 'reason': reason,
                                 'last_checked_at': row['checked_at'], 'last_success': success}}
 
@@ -106,7 +115,7 @@ class Inventory:
                 AuthService.require(db, actor, 'vps:read', row['id'])
                 if permission is not None:
                     AuthService.require(db, actor, permission, row['id'])
-            return [self._public(row, now) for row in rows]
+            return [self._public(row, now, actor, db) for row in rows]
 
     def list(self, auth, token, *, after='', limit=50):
         if type(limit) is not int or not 1 <= limit <= 100 or (after and re.fullmatch(ULID, after) is None):

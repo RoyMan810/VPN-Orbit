@@ -60,6 +60,7 @@ export interface Resource {
   policy_revision: number
   created_at: number
   observation: Observation
+  permissions: { probe: boolean; restart: boolean; firewall: boolean }
 }
 export interface InventoryPage {
   items: Resource[]
@@ -67,13 +68,18 @@ export interface InventoryPage {
 }
 
 export class ApiError extends Error {
-  constructor(readonly status: number) {
+  constructor(readonly status: number, readonly code?: string, readonly correlationId?: string) {
     super('Controller request failed')
   }
 }
 
 export function hasApiStatus(error: unknown, ...statuses: number[]) {
   return error instanceof ApiError && statuses.includes(error.status)
+}
+
+export function apiErrorDetails(error: unknown) {
+  if (!(error instanceof ApiError) || (!error.code && !error.correlationId)) return null
+  return [error.code, error.correlationId && `correlation_id=${error.correlationId}`].filter(Boolean).join(' · ')
 }
 
 export async function request<T>(path: string, options: {
@@ -98,7 +104,14 @@ export async function request<T>(path: string, options: {
     redirect: 'error',
     headers,
   })
-  if (!response.ok) throw new ApiError(response.status)
+  if (!response.ok) {
+    let payload: unknown = null
+    try { payload = await response.json() } catch { /* Preserve the safe status-only error. */ }
+    const value = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {}
+    throw new ApiError(response.status,
+      typeof value.code === 'string' ? value.code : undefined,
+      typeof value.correlation_id === 'string' ? value.correlation_id : response.headers.get('X-Correlation-ID') ?? undefined)
+  }
   options.onHeaders?.(response.headers)
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
