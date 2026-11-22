@@ -1,9 +1,9 @@
 {
   "v": 1,
   "profiles": {
-    "remnawave-panel": {"kind": "remnawave-panel", "network": "internal", "ports": [3000], "env": ["PANEL_CONFIG"], "volumes": ["panel-data"], "depends_on": []},
-    "remnawave-node": {"kind": "remnawave-node", "network": "isolated", "ports": [], "env": ["NODE_CONFIG"], "volumes": ["node-data"], "depends_on": []},
-    "bedolaga-bot": {"kind": "bedolaga-bot", "network": "internal", "ports": [], "env": ["BOT_CONFIG"], "volumes": ["bot-data"], "depends_on": ["bedolaga-cabinet"]},
-    "bedolaga-cabinet": {"kind": "bedolaga-cabinet", "network": "internal", "ports": [8080], "env": ["CABINET_CONFIG"], "volumes": ["cabinet-data"], "depends_on": []}
+    "remnawave-panel": {"kind": "remnawave-panel", "network": "bridge", "network_group": "remnawave", "ports": [3000], "env": ["PANEL_CONFIG"], "volumes": ["panel-data"], "depends_on": []},
+    "remnawave-node": {"kind": "remnawave-node", "network": "isolated", "network_group": null, "ports": [], "env": ["NODE_CONFIG"], "volumes": ["node-data"], "depends_on": []},
+    "bedolaga-bot": {"kind": "bedolaga-bot", "network": "bridge", "network_group": "bedolaga", "ports": [], "env": ["BOT_CONFIG"], "volumes": ["bot-data"], "depends_on": ["bedolaga-cabinet"]},
+    "bedolaga-cabinet": {"kind": "bedolaga-cabinet", "network": "bridge", "network_group": "bedolaga", "ports": [8080], "env": ["CABINET_CONFIG"], "volumes": ["cabinet-data"], "depends_on": []}
   }
 }
