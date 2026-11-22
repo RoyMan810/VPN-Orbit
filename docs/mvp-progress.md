@@ -40,6 +40,10 @@ resource-scoped permissions. P1 regression verification is complete. The next ta
 is a focused P2 audit of VPS onboarding, resumable repair, target-bound cleanup,
 and disposable acceptance coverage; deployment profiles remain out of scope.
 
+## P2.2 verification
+
+- Disposable VM acceptance also passed the typed firewall onboarding profile: separate firewall key/account, helper/postcondition verification, and exact cleanup. Temporary sudo and all remote artifacts were removed.
+
 ## P2.1 verification
 
 - Audited `tools/prepare_vps.py`: SSH fingerprint pinning, resumable phases,
@@ -51,7 +55,7 @@ and disposable acceptance coverage; deployment profiles remain out of scope.
   LTS, x86_64, `192.168.122.244/24`, with the expected Ed25519 fingerprint and
   empty VPN-Orbit/Docker namespaces.
 - Disposable acceptance passed fresh onboarding, disconnect-after-account fault,
-  resumable repair, and exact cleanup. Temporary NOPASSWD sudo and all managed
+  resumable repair, exact cleanup, and the separate typed firewall profile. Temporary NOPASSWD sudo and all managed
   artifacts were removed afterward. No production VPS was used.
 
 ## P1.1 verification
