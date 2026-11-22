@@ -82,6 +82,14 @@ is allowed.
 - The CLI only emits JSON audit/plan results; it has no Docker execution or
   filesystem deletion capability.
 
+## P5.3 implementation
+
+- Added a read-only Docker state adapter contract: managed containers must carry
+  the approved catalog digest and known profile labels; missing/unknown/drifted
+  managed profiles block a match.
+- The adapter consumes supplied inspect-like JSON only and performs no Docker
+  calls or mutations.
+
 ## P2.3 verification
 
 - Disposable VM acceptance passed the separate typed firewall onboarding profile with exact cleanup; no remote managed artifacts remained after cleanup.
