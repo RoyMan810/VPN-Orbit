@@ -119,6 +119,34 @@ def render(catalog, selected):
     return {"v": 1, "catalog_sha256": catalog_digest(catalog), "services": services, "networks": networks}
 
 
+def audit(actual, expected):
+    if not isinstance(actual, dict) or actual.get("v") != 1:
+        raise ValueError("COMPOSE_METADATA_INVALID")
+    if actual.get("catalog_sha256") != expected.get("catalog_sha256"):
+        return {"status": "DRIFT", "reason": "CATALOG_DIGEST_MISMATCH"}
+    if actual.get("services") != expected.get("services") or actual.get("networks") != expected.get("networks"):
+        return {"status": "DRIFT", "reason": "COMPOSE_FRAGMENT_MISMATCH"}
+    return {"status": "MATCHED", "catalog_sha256": actual["catalog_sha256"]}
+
+
+def removal_plan(actual, expected, *, confirmed=False):
+    """Return a non-destructive removal plan; never runs Compose or deletes data."""
+    result = audit(actual, expected)
+    if result["status"] != "MATCHED":
+        raise ValueError("COMPOSE_REMOVAL_BLOCKED_DRIFT")
+    services = sorted(expected["services"])
+    networks = sorted(expected["networks"])
+    volumes = sorted({
+        volume["source"] for service in expected["services"].values()
+        for volume in service.get("volumes", [])
+    })
+    if not confirmed:
+        return {"status": "CONFIRMATION_REQUIRED", "services": services, "networks": networks,
+                "volumes": volumes, "data_preserved": True}
+    return {"status": "REMOVAL_AUTHORIZED", "services": services, "networks": networks,
+            "volumes": volumes, "data_preserved": True, "compose_down": False}
+
+
 def load_selection(path: Path, catalog):
     value = json.loads(Path(path).read_text())
     if not isinstance(value, dict) or value.get("v") != 1 or set(value) != {"v", "profiles"}:
