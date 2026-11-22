@@ -23,7 +23,7 @@ import traceback
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 
-from artifact import AGE_FILE, ArtifactError, canonical, snapshot, trusted_key
+from artifact import AGE_FILE, ArtifactError, bundle_channel, canonical, snapshot, trusted_key
 
 
 APP = Path("/opt/vpn-orbit")
@@ -243,15 +243,26 @@ def compose_document(config, image, port):
                               "driver_opts": {"com.docker.network.bridge.host_binding_ipv4": "127.0.0.1"}}}}
 
 
+def controller_image(channel, digest):
+    prefix = "dev" if channel == "development" else "release"
+    return f"vpn-orbit/controller:{prefix}-{digest[:24]}"
+
+
 def load_installation():
     path = APP / "installation.json"
     info = path.lstat()
     if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600:
         raise ArtifactError("INSTALLATION_METADATA_INVALID")
     value = json.loads(path.read_bytes())
-    if (not isinstance(value, dict) or value.get("v") != 1 or value.get("project") != "vpn-orbit"
-            or re.fullmatch(r"sha256:[0-9a-f]{64}", value.get("image_id", "")) is None
-            or re.fullmatch(r"vpn-orbit/controller:dev-[0-9a-f]{24}", value.get("image", "")) is None):
+    if not isinstance(value, dict) or value.get("v") != 1 or value.get("project") != "vpn-orbit":
+        raise ArtifactError("INSTALLATION_METADATA_INVALID")
+    channel = bundle_channel(value.get("version"))
+    digest = value.get("manifest_sha256")
+    image_id = value.get("image_id")
+    if (channel is None or value.get("channel") != channel
+            or not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or value.get("image") != controller_image(channel, digest)
+            or not isinstance(image_id, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None):
         raise ArtifactError("INSTALLATION_METADATA_INVALID")
     daemon(value["docker_host"])
     return value
@@ -307,8 +318,7 @@ def install(args):
                               "authentication": "signature" if key is not None else "sha256",
                               "recovery": "NOT_READY"}))
             return
-        image_channel = "dev" if channel == "development" else "release"
-        image = f"vpn-orbit/controller:{image_channel}-{digest[:24]}"
+        image = controller_image(channel, digest)
         try:
             docker(args.docker_host, "pull", "--platform", "linux/amd64", manifest["python_image"], timeout=600)
         except subprocess.TimeoutExpired:

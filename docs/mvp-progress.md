@@ -50,6 +50,10 @@
   and keep development bundles behind `--development`. Both channels use
   the same signature or exact local digest verification. The checked-in
   package version remains `0.1.0.dev1` pending release acceptance.
+- The `1.0.0` rehearsal exposed a development-only tag check in the
+  systemd preflight. The same tag derivation now binds installation and
+  startup to the channel and manifest digest. CI also exercises a signed
+  release-channel fixture through the actual systemd and Compose installation.
 - `v1.0.0` blockers include product-backed staging for all four Compose profiles,
   ownership-verified removal with shared-resource preservation, and staging
   end-to-end and fault acceptance. The [acceptance matrix](mvp-acceptance.md)

@@ -67,9 +67,19 @@ jobs:
             "$(command -v python)" tests_runtime/lab/time_health.py --isolated-vm --source "$TIME_SOURCE"
 
   installation:
-    name: Stage 1 signed fresh installation / systemd and Compose
+    name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - channel: checkout
+            name: Stage 1 signed fresh installation / systemd and Compose
+            artifact: stage1-bundle-evidence
+          - channel: release-fixture
+            name: Stage 1 signed release fixture / systemd and Compose
+            artifact: stage1-release-fixture-evidence
     steps:
       - *checkout
       - *setup_python
@@ -101,6 +111,28 @@ jobs:
           python_image="$VPN_ORBIT_LAB_PYTHON_IMAGE"
           docker pull "$python_image"
           docker run --rm --network none "$python_image" python -c 'import sys,sqlite3; print(sys.version); print(sqlite3.sqlite_version); assert sys.version_info[:2]==(3,15) and sqlite3.sqlite_version_info>=(3,45)'
+          if [ "${{ matrix.channel }}" = release-fixture ]; then
+            git worktree add --detach "$RUNNER_TEMP/vpn-orbit-release-fixture"
+            cd "$RUNNER_TEMP/vpn-orbit-release-fixture"
+            python - <<'PY'
+          import json
+          from pathlib import Path
+          import tomllib
+
+          project = Path("pyproject.toml")
+          version = tomllib.loads(project.read_text())["project"]["version"]
+          release = version.split(".dev", 1)[0]
+          project.write_text(project.read_text().replace(f'version = "{version}"', f'version = "{release}"', 1))
+          init = Path("vpn_orbit/__init__.py")
+          init.write_text(init.read_text().replace(f'__version__ = "{version}"', f'__version__ = "{release}"'))
+          path = Path("vpn_orbit/release-manifest.json")
+          manifest = json.loads(path.read_text())
+          path.write_text(json.dumps({**manifest, "version": release, "channel": "release"}, indent=2) + "\n")
+          PY
+            if ! git diff --quiet; then
+              git -c user.name='VPN-Orbit CI' -c user.email='ci@example.invalid' commit -am 'Prepare release installation fixture'
+            fi
+          fi
           python deploy/build_bundle.py --output "$RUNNER_TEMP/vpn-orbit-install-bundle" \
             --signing-key "$RUNNER_TEMP/vpn-orbit-lab-signer.seed" \
             --python-image "$python_image" --age-tool "$age_dir/age/age"
@@ -114,7 +146,7 @@ jobs:
       - name: Preserve public metadata for Stage1 revalidation
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: stage1-bundle-evidence
+          name: ${{ matrix.artifact }}
           if-no-files-found: error
           path: |
             ${{ runner.temp }}/vpn-orbit-install-bundle/manifest.json
