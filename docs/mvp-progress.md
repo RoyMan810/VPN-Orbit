@@ -6,7 +6,7 @@
 - PRs #126–#139 are merged.
 - P0 removal of excluded backup, rescue, activation, self-update, stage0, and recovery installation functionality is complete.
 - No production installations or data exist, and no real VPS has been used.
-- Active stage: P3 Firewall WebUI and disposable fault acceptance.
+- Active stage: P4 typed Compose profiles.
 
 ## Completed
 
@@ -39,11 +39,16 @@ responses, UNKNOWN_OUTCOME, restart receipt reconciliation, idempotency replay, 
 resource-scoped permissions. P1 regression verification is complete. The next task
 is a focused P2 audit of VPS onboarding, resumable repair, target-bound cleanup,
 and disposable acceptance coverage are complete. The next stage is P3 Firewall
-WebUI and disposable fault acceptance; deployment profiles remain out of scope.
+WebUI and disposable fault acceptance; P3 is complete. The next stage is P4 typed Compose profiles for Remnawave/Bedolaga; no production deployment is allowed.
 
 ## P2.3 verification
 
 - Disposable VM acceptance passed the separate typed firewall onboarding profile with exact cleanup; no remote managed artifacts remained after cleanup.
+
+## P3.3 verification
+
+- Browser acceptance covers typed firewall draft payloads and rejects arbitrary command input.
+- Full CI, WebUI browser tests, firewall helper rollback/fault tests, and disposable acceptance passed.
 
 ## P3.2 implementation
 
@@ -56,7 +61,7 @@ WebUI and disposable fault acceptance; deployment profiles remain out of scope.
   preservation through the API contract, baseline preview, re-authentication,
   approval, and durable execution enqueue.
 - Preserved the typed runtime, rollback timer, SSH verification, UNKNOWN_OUTCOME,
-  and reconciliation gates; full browser/fault acceptance remains pending CI.
+  and reconciliation gates; full browser/fault acceptance passed CI and disposable runtime checks.
 
 ## P2.2 verification
 
