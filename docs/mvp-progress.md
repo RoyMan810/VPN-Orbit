@@ -2,8 +2,8 @@
 
 ## Current state
 
-- Main: `2b4d6f1` (PR #148 merged).
-- PRs #126–#148 are merged.
+- Main: `21e7b1d` (PR #154 merged).
+- PRs #126–#154 are merged.
 - P0 removal of excluded backup, rescue, activation, self-update, stage0, and recovery installation functionality is complete.
 - No production installations or data exist, and no real VPS has been used.
 - Active stage: P6 final MVP acceptance.
