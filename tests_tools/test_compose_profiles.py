@@ -1,6 +1,7 @@
 from pathlib import Path
 import tempfile
 import unittest
+import sys
 
 from tools.compose_profiles import audit, catalog_digest, load_catalog, load_selection, removal_plan, render
 
@@ -79,3 +80,20 @@ class ComposeProfileTests(unittest.TestCase):
         self.assertTrue(plan["data_preserved"])
         authorized = removal_plan(selection, selection, confirmed=True)
         self.assertFalse(authorized["compose_down"])
+
+    def test_renderer_cli_audits_actual_fragments_without_side_effects(self):
+        import json
+        import subprocess
+        catalog = Path(__file__).parents[1] / "deploy/compose-profiles.example.json"
+        selection = Path(__file__).parents[1] / "deploy/compose-profiles.selection.example.json"
+        rendered = load_selection(selection, load_catalog(catalog))
+        with tempfile.TemporaryDirectory() as tmp:
+            actual = Path(tmp) / "actual.json"
+            actual.write_text(json.dumps(rendered))
+            result = subprocess.run(
+                [sys.executable, "-m", "tools.compose_profiles",
+                 "--catalog", str(catalog), "--selection", str(selection),
+                 "--actual", str(actual), "--removal-plan"],
+                capture_output=True, text=True, check=True,
+            )
+        self.assertEqual(json.loads(result.stdout)["status"], "CONFIRMATION_REQUIRED")

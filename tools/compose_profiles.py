@@ -159,8 +159,18 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--catalog", type=Path, required=True)
     parser.add_argument("--selection", type=Path, required=True)
+    parser.add_argument("--actual", type=Path, help="Existing rendered fragment to audit")
+    parser.add_argument("--removal-plan", action="store_true")
+    parser.add_argument("--confirm", action="store_true")
     args = parser.parse_args(argv)
-    print(json.dumps(load_selection(args.selection, load_catalog(args.catalog)), sort_keys=True))
+    catalog = load_catalog(args.catalog)
+    expected = load_selection(args.selection, catalog)
+    if args.actual:
+        actual = json.loads(args.actual.read_text())
+        value = removal_plan(actual, expected, confirmed=args.confirm) if args.removal_plan else audit(actual, expected)
+    else:
+        value = expected
+    print(json.dumps(value, sort_keys=True))
 
 
 if __name__ == "__main__":

@@ -76,6 +76,12 @@ is allowed.
   lists only owned services/networks/volumes, preserves data, and never runs
   `compose down` or deletes volumes.
 
+## P5.2 implementation
+
+- Added CLI audit/removal-plan interface over the typed catalog validator.
+- The CLI only emits JSON audit/plan results; it has no Docker execution or
+  filesystem deletion capability.
+
 ## P2.3 verification
 
 - Disposable VM acceptance passed the separate typed firewall onboarding profile with exact cleanup; no remote managed artifacts remained after cleanup.
