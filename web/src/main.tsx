@@ -11,6 +11,7 @@ import { RestartPreview } from './restart-preview'
 import { Audit } from './audit'
 import { readRestartHash, restartHash, RestartTimeline } from './restart-timeline'
 import { TimeZone } from './time-zone'
+import { FirewallPlan } from './firewall-plan'
 import './style.css'
 
 type Theme = 'system' | 'light' | 'dark'
@@ -177,6 +178,8 @@ function Detail({ resource, t, lang, now, expired, session }: {
         </li>)}
       </ul> : <p>{t.dockerStatus[docker.status]}</p>}
     </div>}
+    {resource.permissions.firewall && session.user.role === 'Owner' &&
+      <FirewallPlan resourceId={resource.id} csrf={session.csrf_token} t={t} expired={expired}/>}
   </>
 }
 
