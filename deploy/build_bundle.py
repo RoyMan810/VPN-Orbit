@@ -1,4 +1,4 @@
-"""Build an installable development bundle.
+"""Build an installable Controller bundle.
 
 A local build emits a v2 manifest authenticated by its SHA-256. An external
 bundle can still be signed with an offline Ed25519 key that stays outside it.
@@ -18,9 +18,9 @@ import tempfile
 import tomllib
 
 if __package__:
-    from .artifact import AGE_FILE, AGE_SHA256, AGE_VERSION, FIXED_FILES, IMAGE, canonical
+    from .artifact import AGE_FILE, AGE_SHA256, AGE_VERSION, FIXED_FILES, IMAGE, bundle_channel, canonical
 else:
-    from artifact import AGE_FILE, AGE_SHA256, AGE_VERSION, FIXED_FILES, IMAGE, canonical
+    from artifact import AGE_FILE, AGE_SHA256, AGE_VERSION, FIXED_FILES, IMAGE, bundle_channel, canonical
 
 
 @contextmanager
@@ -80,8 +80,12 @@ def main(argv=None):
     if subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=no"], cwd=root).strip():
         parser.error("Build from a committed source revision")
     with committed_source(root, source) as tree:
-        sqlite_schema = json.loads((tree / "vpn_orbit/release-manifest.json").read_text())["sqlite_schema"]
+        metadata = json.loads((tree / "vpn_orbit/release-manifest.json").read_text())
+        sqlite_schema = metadata["sqlite_schema"]
         version = tomllib.loads((tree / "pyproject.toml").read_text())["project"]["version"]
+        channel = bundle_channel(version)
+        if channel is None or metadata["version"] != version or metadata["channel"] != channel:
+            parser.error("Package version and release manifest must agree on a supported channel")
         try:
             requirements = wheel_lock(tree)
         except ValueError:
@@ -126,16 +130,16 @@ def main(argv=None):
               "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
              for path in sorted(output.rglob("*")) if path.is_file()]
     if signer is None:
-        value = {"v": 2, "application": "VPN-Orbit", "version": version, "channel": "development",
+        value = {"v": 2, "application": "VPN-Orbit", "version": version, "channel": channel,
                  "source_commit": source, "python_image": args.python_image, "platform": "ubuntu-24.04-amd64",
                  "python": "3.15", "sqlite_schema": sqlite_schema, "remote_mutation_enabled": False,
                  "authentication": "sha256", "files": files}
         data = canonical(value)
         (output / "manifest.json").write_bytes(data)
         result = {"bundle": str(output), "manifest_sha256": hashlib.sha256(data).hexdigest(),
-                  "authentication": "sha256", "channel": "development"}
+                  "authentication": "sha256", "channel": channel}
     else:
-        value = {"v": 1, "application": "VPN-Orbit", "version": version, "channel": "development",
+        value = {"v": 1, "application": "VPN-Orbit", "version": version, "channel": channel,
                  "source_commit": source, "python_image": args.python_image, "platform": "ubuntu-24.04-amd64",
                  "python": "3.15", "sqlite_schema": sqlite_schema, "remote_mutation_enabled": False, "files": files,
                  "signing_key_sha256": hashlib.sha256(bytes(signer.verify_key)).hexdigest()}
@@ -144,7 +148,7 @@ def main(argv=None):
         (output / "manifest.sig").write_bytes(signer.sign(data).signature)
         result = {"bundle": str(output), "manifest_sha256": hashlib.sha256(data).hexdigest(),
                   "authentication": "signature", "signing_key_sha256": value["signing_key_sha256"],
-                  "channel": "development"}
+                  "channel": channel}
     print(json.dumps(result))
     return 0
 

@@ -45,10 +45,16 @@
 - Docker needed more than three minutes to pull the pinned base image during
   the staging install. The installer now allows up to ten minutes and reports
   a dedicated error if that deadline expires before Controller state is created.
+  PR #161 passed CI runs `45076503840` and `45076503827`.
+- The bundle builder and installer validate release versions such as `1.0.0`
+  and keep development bundles behind `--development`. Both channels use
+  the same signature or exact local digest verification. The checked-in
+  package version remains `0.1.0.dev1` pending release acceptance.
 - `v1.0.0` blockers include product-backed staging for all four Compose profiles,
   ownership-verified removal with shared-resource preservation, and staging
-  end-to-end and fault acceptance. The version and artifact path still target
-  development builds.
+  end-to-end and fault acceptance. The [acceptance matrix](mvp-acceptance.md)
+  identifies the Node network and Bot dependency gaps. Closing these gates
+  requires a product-backed deployment path and ownership-verified removal.
 
 ## Completed
 

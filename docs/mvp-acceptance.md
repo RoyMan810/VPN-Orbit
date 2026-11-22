@@ -36,7 +36,7 @@ Status date: November 23, 2026
 | Typed firewall WebUI and reconciliation | Browser tests, runtime rollback/reconciliation tests | PASS |
 | Typed optional Compose profiles | Synthetic catalog, selection renderer and fragment diagnostics | FIXTURE PASS |
 | Existing Compose installations and protected removal | Runtime ownership, fresh Docker evidence and preservation of shared resources still require acceptance | BLOCKED |
-| Remnawave Panel/Node and Bedolaga Bot/Cabinet | Checked-in examples use placeholder images. Product-backed installation and health checks have not run | BLOCKED |
+| Remnawave Panel/Node and Bedolaga Bot/Cabinet | Examples use placeholder images. The Node profile has no network, while [upstream Node deployment](https://github.com/remnawave/node/blob/c1f083cab84b05ae2bb01d854248402d6073952d/docker-compose-prod.yml) uses host networking. The Bot profile lacks the PostgreSQL and Redis services declared by the [upstream Bot deployment](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/blob/dcefef9704311f97016257890df45ec181d0840c/docker-compose.yml). Product-backed installation and health checks are pending | BLOCKED |
 
 ## Remaining Boundary
 

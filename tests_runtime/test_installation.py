@@ -236,6 +236,36 @@ class InstallationTests(unittest.TestCase):
         with self.assertRaisesRegex(ArtifactError, "TRUST_KEY_PERMISSIONS"):
             trusted_key(public, owner=os.geteuid())
 
+    def test_release_requires_matching_version_channel_and_authentication(self):
+        version = "1.0.0"
+        old_wheel = Path("wheelhouse/vpn_orbit-0.1.0.dev1-py3-none-any.whl")
+        release_wheel = old_wheel.with_name(f"vpn_orbit-{version}-py3-none-any.whl")
+        (self.bundle / old_wheel).rename(self.bundle / release_wheel)
+        for entry in self.value["files"]:
+            if entry["path"] == str(old_wheel):
+                entry["path"] = str(release_wheel)
+        self.value.update(version=version, channel="release")
+        self.sign()
+        self.assertEqual(manifest(self.bundle, self.key)[0], self.value)
+        with self.assertRaisesRegex(ArtifactError, "CONTRACT_UNSUPPORTED"):
+            manifest(self.bundle, self.key, allow_development=True)
+        with self.assertRaisesRegex(ArtifactError, "SIGNATURE_INVALID"):
+            manifest(self.bundle, bytes(SigningKey.generate().verify_key))
+
+        value, digest = self.digest_manifest()
+        self.assertEqual(manifest(self.bundle, expected_sha256=digest)[0], value)
+        with self.assertRaisesRegex(ArtifactError, "CONTRACT_UNSUPPORTED"):
+            manifest(self.bundle, expected_sha256=digest, allow_development=True)
+        with self.assertRaisesRegex(ArtifactError, "DIGEST_MISMATCH"):
+            manifest(self.bundle, expected_sha256="0" * 64)
+
+        for changed in ({"version": "1.0.0.dev1"}, {"version": "01.0.0"}, {"channel": "development"}):
+            with self.subTest(changed=changed):
+                raw = canonical({**value, **changed})
+                (self.bundle / "manifest.json").write_bytes(raw)
+                with self.assertRaisesRegex(ArtifactError, "CONTRACT_UNSUPPORTED"):
+                    manifest(self.bundle, expected_sha256=hashlib.sha256(raw).hexdigest())
+
     def digest_manifest(self):
         value = {name: item for name, item in self.value.items() if name != "signing_key_sha256"}
         value.update({"v": 2, "authentication": "sha256"})

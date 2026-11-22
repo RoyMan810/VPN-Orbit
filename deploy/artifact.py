@@ -123,12 +123,22 @@ DIGEST_FIELDS = {"v", "application", "version", "channel", "source_commit", "pyt
                  "platform", "python", "sqlite_schema", "remote_mutation_enabled", "authentication"}
 
 
+def bundle_channel(version):
+    if isinstance(version, str):
+        if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+\.dev[0-9]+", version):
+            return "development"
+        if re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}", version):
+            return "release"
+    return None
+
+
 def manifest(bundle, key=None, *, expected_sha256=None, allow_development=False):
-    """Verify a signed (v1) or digest-authenticated (v2) development manifest.
+    """Verify a signed (v1) or digest-authenticated (v2) bundle manifest.
 
     A signed bundle needs an independently delivered Ed25519 public key. A
     locally built unsigned bundle needs the SHA-256 of manifest.json, which
     root obtains after the build; both are checked before any file is copied.
+    The development opt-in selects the development channel.
     """
     if (key is None) == (expected_sha256 is None):
         raise ArtifactError("BUNDLE_AUTHENTICATION_REQUIRED")
@@ -144,12 +154,12 @@ def manifest(bundle, key=None, *, expected_sha256=None, allow_development=False)
         signature = None
     value = parse(data)
     expected = SIGNED_FIELDS if key is not None else DIGEST_FIELDS
-    if (not isinstance(value, dict) or value.keys() != expected or not allow_development
-            or not isinstance(value.get("version"), str)
-            or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+\.dev[0-9]+", value["version"]) is None
+    channel = "development" if allow_development else "release"
+    if (not isinstance(value, dict) or value.keys() != expected
+            or bundle_channel(value.get("version")) != channel or value.get("channel") != channel
             or value.get("application") != "VPN-Orbit" or value.get("platform") != "ubuntu-24.04-amd64"
             or value.get("python") not in ("3.13", "3.15") or value.get("sqlite_schema") != 5
-            or value.get("remote_mutation_enabled") is not False or value.get("channel") != "development"
+            or value.get("remote_mutation_enabled") is not False
             or not isinstance(value.get("source_commit"), str)
             or re.fullmatch(r"[0-9a-f]{40}", value["source_commit"]) is None
             or not isinstance(value.get("python_image"), str)

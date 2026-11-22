@@ -301,12 +301,14 @@ def install(args):
             raise ArtifactError("PINNED_AGE_TOOL_REQUIRED")
         if args.web_enrollment and not args.targets:
             raise ArtifactError("WEB_ENROLLMENT_REQUIRES_TARGETS")
+        channel = manifest["channel"]
         if args.check:
-            print(json.dumps({"preflight": "PASS", "manifest_sha256": digest, "channel": "development",
+            print(json.dumps({"preflight": "PASS", "manifest_sha256": digest, "channel": channel,
                               "authentication": "signature" if key is not None else "sha256",
                               "recovery": "NOT_READY"}))
             return
-        image = "vpn-orbit/controller:dev-" + digest[:24]
+        image_channel = "dev" if channel == "development" else "release"
+        image = f"vpn-orbit/controller:{image_channel}-{digest[:24]}"
         try:
             docker(args.docker_host, "pull", "--platform", "linux/amd64", manifest["python_image"], timeout=600)
         except subprocess.TimeoutExpired:
@@ -396,7 +398,7 @@ def install(args):
         metadata = {"v": 1, "project": "vpn-orbit", "image": image, "image_id": image_id, "docker_host": args.docker_host,
                     "manifest_sha256": digest, "source_commit": manifest["source_commit"], "version": manifest["version"],
                     "authentication": "signature" if key is not None else "sha256",
-                    "channel": "development", "remote_mutation_enabled": False, "recovery": "NOT_READY", "port": args.port}
+                    "channel": channel, "remote_mutation_enabled": False, "recovery": "NOT_READY", "port": args.port}
         write(APP / "installation.json", canonical(metadata), mode=0o600)
         for path in (UNITS, Path("/etc/sysusers.d"), Path("/etc/tmpfiles.d")):
             system_config_directory(path)
@@ -425,7 +427,7 @@ def install(args):
             if json.load(response).get("status") != "alive":
                 raise ArtifactError("INSTALLATION_SMOKE_FAILED")
         write(APP / "install-state.json", canonical({"v": 1, "phase": "COMPLETE", "manifest_sha256": digest}), mode=0o600, replace=True)
-        print(json.dumps({"installed": True, "channel": "development", "endpoint": f"http://127.0.0.1:{args.port}",
+        print(json.dumps({"installed": True, "channel": channel, "endpoint": f"http://127.0.0.1:{args.port}",
                           "owner_setup": "/opt/vpn-orbit/admin create-owner --username <name>",
                           "recovery": "NOT_READY"}))
 
@@ -433,14 +435,14 @@ def install(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    new = commands.add_parser("install", help="Install a fresh verified development bundle; existing data is never replaced")
+    new = commands.add_parser("install", help="Install a fresh verified Controller bundle")
     new.add_argument("--bundle", type=Path, required=True)
     authentication = new.add_mutually_exclusive_group(required=True)
     authentication.add_argument("--trust-key", type=Path,
                                 help="Independently delivered 32-byte Ed25519 public key for an external bundle")
     authentication.add_argument("--manifest-sha256",
                                 help="SHA-256 of manifest.json for a bundle built locally by ./install")
-    new.add_argument("--development", action="store_true", help="Explicitly accept a development channel")
+    new.add_argument("--development", action="store_true", help="Select the development channel instead of the release channel")
     new.add_argument("--origin", required=True)
     new.add_argument("--port", type=int, default=18080)
     new.add_argument("--web-enrollment", action="store_true", help="Require Owner fingerprint confirmation for --targets")
