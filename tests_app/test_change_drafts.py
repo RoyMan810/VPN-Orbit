@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import json
 import sqlite3
 from unittest.mock import patch
@@ -24,6 +24,10 @@ class ChangeDraftTests(Fixture):
         self.queue.register_resource(SCOPE, "a" * 64, 1)
         self.probe_id = self.probe()
         self.token = self.client.cookies[COOKIE]
+        self.output = self.directory / "drafts.sqlite3"
+        with self.store.connect(readonly=True) as source, closing(sqlite3.connect(self.output, autocommit=True)) as copy:
+            source.execute("BEGIN")
+            source.backup(copy)
 
     def probe(self, outcome="SUCCEEDED", *, boot_id="11111111-1111-1111-1111-111111111111"):
         job = self.queue.enqueue_probe(self.auth, self.client.cookies[COOKIE], self.csrf, SCOPE, identifier())
@@ -55,10 +59,14 @@ class ChangeDraftTests(Fixture):
 
     @contextmanager
     def transaction(self, *, write=True):
-        with self.store.connect(readonly=not write) as db:
+        with closing(sqlite3.connect(self.output, autocommit=True)) as db:
             db.row_factory = sqlite3.Row
+            db.execute("PRAGMA foreign_keys=ON")
+            if not write:
+                db.execute("PRAGMA query_only=ON")
             db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             yield db
+            db.execute("COMMIT")
 
     def save(self, **kwargs):
         with self.transaction() as db:
