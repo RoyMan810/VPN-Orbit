@@ -45,6 +45,11 @@ WebUI and disposable fault acceptance; deployment profiles remain out of scope.
 
 - Disposable VM acceptance passed the separate typed firewall onboarding profile with exact cleanup; no remote managed artifacts remained after cleanup.
 
+## P3.2 implementation
+
+- Extended the typed Firewall WebUI with durable browser state, reload recovery,
+  operation timeline polling, and receipt reconciliation for UNKNOWN_OUTCOME.
+
 ## P3.1 implementation
 
 - Added Owner-only WebUI flow for typed firewall drafts: rule editing, SSH-port

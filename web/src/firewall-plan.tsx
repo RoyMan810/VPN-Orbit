@@ -1,22 +1,49 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { apiErrorDetails, request } from './api'
 import type { Copy } from './copy'
 
 type Rule = { action: 'allow' | 'deny'; direction: 'in' | 'out'; protocol: 'tcp' | 'udp'; port: number; cidr: string }
 type Draft = { id: string; plan_hash: string; revision: number; baseline: { ssh_port: number; rules: Rule[] }; diff: Record<string, unknown> }
+type Entry = { seq: number; status: string; reason: string | null; operation_id: string; attempt?: number }
+type Saved = { rules: Rule[]; sshPort: number; draft: Draft | null; etag: string | null; approval: string | null; operation: string | null }
 
 export function FirewallPlan({ resourceId, csrf, t, expired }: {
   resourceId: string; csrf: string; t: Copy; expired: () => void
 }) {
-  const [rules, setRules] = useState<Rule[]>([{ action: 'allow', direction: 'in', protocol: 'tcp', port: 22, cidr: '0.0.0.0/0' }])
-  const [sshPort, setSshPort] = useState(22)
-  const [draft, setDraft] = useState<Draft | null>(null)
-  const [etag, setEtag] = useState<string | null>(null)
-  const [approval, setApproval] = useState<string | null>(null)
-  const [operation, setOperation] = useState<string | null>(null)
+  const storageKey = `vpn-orbit.firewall.${resourceId}`
+  const saved = (() => { try { return JSON.parse(localStorage.getItem(storageKey) ?? 'null') as Saved | null } catch { return null } })()
+  const [rules, setRules] = useState<Rule[]>(saved?.rules ?? [{ action: 'allow', direction: 'in', protocol: 'tcp', port: 22, cidr: '0.0.0.0/0' }])
+  const [sshPort, setSshPort] = useState(saved?.sshPort ?? 22)
+  const [draft, setDraft] = useState<Draft | null>(saved?.draft ?? null)
+  const [etag, setEtag] = useState<string | null>(saved?.etag ?? null)
+  const [approval, setApproval] = useState<string | null>(saved?.approval ?? null)
+  const [operation, setOperation] = useState<string | null>(saved?.operation ?? null)
+  const [entries, setEntries] = useState<Entry[] | null>(null)
+  const [reconciling, setReconciling] = useState(false)
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  useEffect(() => {
+    try { localStorage.setItem(storageKey, JSON.stringify({ rules, sshPort, draft, etag, approval, operation })) } catch { /* Best effort recovery state. */ }
+  }, [storageKey, rules, sshPort, draft, etag, approval, operation])
+  useEffect(() => {
+    if (!draft || !operation) return
+    const abort = new AbortController()
+    let timer: number | undefined
+    async function load() {
+      try {
+        const result = await request<{ items: Entry[] }>(`/change-plans/${draft.id}/firewall-timeline`, { signal: abort.signal })
+        if (abort.signal.aborted) return
+        setEntries(result.items.filter(item => item.operation_id === operation))
+        const last = result.items.at(-1)?.status
+        if (['QUEUED', 'INTENT_PREPARED', 'DISPATCHING', 'RECONCILIATION_REQUESTED'].includes(last ?? '')) timer = window.setTimeout(load, 2000)
+      } catch (cause) {
+        if (!abort.signal.aborted) setError(apiErrorDetails(cause) ?? t.firewallError)
+      }
+    }
+    void load()
+    return () => { abort.abort(); window.clearTimeout(timer) }
+  }, [draft?.id, operation])
 
   async function run(action: () => Promise<void>) {
     if (busy) return
@@ -89,7 +116,16 @@ export function FirewallPlan({ resourceId, csrf, t, expired }: {
       })
       setOperation(result.id)
     })}>{t.firewallExecute}</button>}
-    {operation && <p role="status">{t.firewallQueued} <code>{operation}</code></p>}
+    {operation && <div role="status"><p>{t.firewallQueued} <code>{operation}</code></p>
+      {entries?.at(-1) && <p><strong>{entries.at(-1)?.status}</strong>{entries.at(-1)?.reason && <> · <code>{entries.at(-1)?.reason}</code></>}</p>}
+      {entries?.at(-1)?.status === 'UNKNOWN_OUTCOME' && <button type="button" disabled={reconciling} onClick={() => void run(async () => {
+        setReconciling(true)
+        try {
+          const attempt = (entries?.at(-1)?.attempt ?? 0) + 1
+          await request(`/change-plans/${draft.id}/firewall-execution-requests/${operation}/reconciliations/${attempt}`, { csrf })
+        } finally { setReconciling(false) }
+      })}>{t.firewallReconcile}</button>}
+    </div>}
     {error && <p className="error" role="alert">{error}</p>}
   </section>
 }
