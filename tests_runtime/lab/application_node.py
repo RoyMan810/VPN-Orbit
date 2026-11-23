@@ -30,11 +30,15 @@ def node_acceptance():
 
         openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=Staging Node CA",
                 "-days", "2", "-keyout", "ca.key", "-out", "ca.crt",
-                "-addext", "basicConstraints=critical,CA:TRUE")
+                "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0",
+                "-addext", "keyUsage=critical,keyCertSign,cRLSign")
         for name in ("node", "client"):
             openssl("req", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=" + ("localhost" if name == "node" else "staging"),
                     "-keyout", name + ".key", "-out", name + ".csr")
-            (directory / "extensions").write_text("subjectAltName=DNS:localhost,IP:127.0.0.1\n"
+            (directory / "extensions").write_text("basicConstraints=critical,CA:FALSE\n"
+                                                 "keyUsage=critical,digitalSignature,keyEncipherment\n"
+                                                 "authorityKeyIdentifier=keyid:always\n"
+                                                 "subjectAltName=DNS:localhost,IP:127.0.0.1\n"
                                                  "extendedKeyUsage=serverAuth,clientAuth\n")
             openssl("x509", "-req", "-in", name + ".csr", "-CA", "ca.crt", "-CAkey", "ca.key",
                     "-CAcreateserial", "-days", "2", "-extfile", "extensions", "-out", name + ".crt")
@@ -83,6 +87,8 @@ def main():
         frames = traceback.extract_tb(error.__traceback__)
         sites = ",".join(f"{Path(frame.filename).name}:{frame.lineno}" for frame in frames)
         code = error.code if isinstance(error, Denied) else type(error).__name__
+        if isinstance(error, ssl.SSLCertVerificationError):
+            code += f" ({error.verify_code})"
         print(f"Node acceptance diagnostic {code} at {sites}", flush=True)
         raise SystemExit("Node product acceptance failed") from None
 
