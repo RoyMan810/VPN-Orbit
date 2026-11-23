@@ -78,7 +78,7 @@ def ssh_acceptance():
             helper.mkdir(parents=True, mode=0o755)
             shutil.copyfile(REPOSITORY / "remote/apps-gateway", helper / "apps-gateway")
             (helper / "apps-gateway").chmod(0o755)
-            run("useradd", "--system", "--user-group", "--no-create-home", "--home-dir", "/nonexistent",
+            run("useradd", "--system", "--user-group", "--no-create-home", "--home-dir", "/",
                 "--shell", "/bin/sh", "--password", "*", ACCOUNT)
             account_created = True
             run("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", lab / "key")
