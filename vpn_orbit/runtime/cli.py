@@ -71,6 +71,7 @@ def run(config, command, *, once=False, listener=None, import_args=None):
                 "rotate-key": config["broker_uid"], "revoke-key": config["broker_uid"],
                 "import-restart-key": config["broker_uid"],
                  "import-firewall-key": config["broker_uid"],
+                 "import-application-key": config["broker_uid"],
                 "enrollment-catalog": 0, "register-observations": 0, "initialize-time-health": 0, "time-health": 0,
                 "initialize-credential": 0, "initialize-writers": 0}[command]
     if os.geteuid() != expected:
@@ -161,7 +162,8 @@ def run(config, command, *, once=False, listener=None, import_args=None):
         target = policy.targets.get(import_args.target)
         scope = target.value if target and purpose in target.value["capabilities"] else {}
         consumer = config["worker_uid"]
-        ref_field = {"docker.restart": "restart_secret_ref", "firewall.apply": "firewall_secret_ref"}.get(purpose, "secret_ref")
+        ref_field = {"docker.restart": "restart_secret_ref", "firewall.apply": "firewall_secret_ref",
+                     "apps.lifecycle": "application_secret_ref"}.get(purpose, "secret_ref")
         if (scope.get("id") != import_args.target
                 or scope.get("policy_revision") != import_args.policy_revision):
             raise Denied("SECRET_SCOPE_DENIED")
@@ -172,18 +174,21 @@ def run(config, command, *, once=False, listener=None, import_args=None):
                                        consumer_uid=consumer, policy_revision=import_args.policy_revision, key=key)
         print(replacement or "REVOKED")
         return
-    if command in {"import-key", "import-restart-key", "import-firewall-key"}:
+    if command in {"import-key", "import-restart-key", "import-firewall-key", "import-application-key"}:
         key = protected_bytes(import_args.key_file, owner=config["broker_uid"], maximum=8192, private=True)
         if command == "import-key":
             reference = vault.import_ssh(import_args.secret_id, import_args.version, key, owner_id=import_args.owner_id,
                                          worker_uid=config["worker_uid"], target=import_args.target, policy_revision=import_args.policy_revision)
-        elif command in ("import-restart-key", "import-firewall-key"):
-            field = "restart_secret_ref" if command == "import-restart-key" else "firewall_secret_ref"
+        else:
+            field, import_key = {
+                "import-restart-key": ("restart_secret_ref", vault.import_restart_ssh),
+                "import-firewall-key": ("firewall_secret_ref", vault.import_firewall_ssh),
+                "import-application-key": ("application_secret_ref", vault.import_application_ssh),
+            }[command]
             target = policy.targets.get(import_args.target)
             if (target is None or target.value.get(field) != f"{import_args.secret_id}:v{import_args.version}"
                     or target.revision != import_args.policy_revision):
                 raise Denied("CAPABILITY_DISABLED")
-            import_key = vault.import_restart_ssh if command == "import-restart-key" else vault.import_firewall_ssh
             reference = import_key(import_args.secret_id, import_args.version, key, owner_id=import_args.owner_id,
                                    worker_uid=config["worker_uid"], target=import_args.target,
                                    policy_revision=import_args.policy_revision)
@@ -220,9 +225,11 @@ def main(argv=None):
                                       help="Provision a dedicated Docker restart credential")
     commands.add_parser("import-firewall-key", parents=[key], add_help=False,
                                       help="Provision a dedicated typed firewall credential")
+    commands.add_parser("import-application-key", parents=[key], add_help=False,
+                                      help="Provision a dedicated typed application credential")
     for name in ("rotate-key", "revoke-key"):
         lifecycle = commands.add_parser(name, help="Retire the exact credential selected by the protected target policy")
-        lifecycle.add_argument("--purpose", choices=("host.probe", "docker.restart", "firewall.apply"), required=True)
+        lifecycle.add_argument("--purpose", choices=("host.probe", "docker.restart", "firewall.apply", "apps.lifecycle"), required=True)
         lifecycle.add_argument("--target", required=True)
         lifecycle.add_argument("--reference", required=True)
         lifecycle.add_argument("--policy-revision", type=int, required=True)

@@ -22,6 +22,7 @@ CAPABILITIES = {
     "host.probe": Capability(False, "vps:probe"),
     "docker.restart": Capability(True, "vps:restart"),
     "firewall.apply": Capability(True, "vps:firewall"),
+    "apps.lifecycle": Capability(True, "vps:apps"),
 }
 
 
@@ -32,7 +33,7 @@ class Target:
     @classmethod
     def parse(cls, value):
         base = ("id", "ip", "port", "allowed_cidrs", "host_key", "secret_ref", "policy_revision", "dependencies", "capabilities")
-        optional = ("restart_secret_ref", "firewall_secret_ref")
+        optional = ("restart_secret_ref", "firewall_secret_ref", "application_secret_ref", "applications")
         present = tuple(name for name in optional if isinstance(value, dict) and name in value)
         fields(value, base + present)
         text(value["id"], ULID)
@@ -62,12 +63,23 @@ class Target:
                 or any(not isinstance(v, str) or v not in CAPABILITIES for v in value["capabilities"])
                 or len(set(value["capabilities"])) != len(value["capabilities"])):
             raise Denied("CAPABILITY_DISABLED")
-        for capability, name in (("docker.restart", "restart_secret_ref"), ("firewall.apply", "firewall_secret_ref")):
+        for capability, name in (("docker.restart", "restart_secret_ref"), ("firewall.apply", "firewall_secret_ref"),
+                                 ("apps.lifecycle", "application_secret_ref")):
             if (capability in value["capabilities"]) != (name in value):
                 raise Denied("CAPABILITY_DISABLED")
             if name in value:
                 text(value[name], ULID + r":v[1-9][0-9]{0,8}")
-        identifiers = [value[name].split(":")[0] for name in ("secret_ref", *optional) if name in value]
+        if ("apps.lifecycle" in value["capabilities"]) != ("applications" in value):
+            raise Denied("CAPABILITY_DISABLED")
+        if "applications" in value:
+            applications = value["applications"]
+            if not isinstance(applications, dict) or not 1 <= len(applications) <= 8:
+                raise Denied("APP_POLICY_INVALID")
+            for identity, binding in applications.items():
+                text(identity, ULID)
+                text(binding, SHA256)
+        identifiers = [value[name].split(":")[0] for name in ("secret_ref", *optional)
+                       if name in value and name != "applications"]
         if len(identifiers) != len(set(identifiers)):
             raise Denied("CAPABILITY_DISABLED")
         return cls(value)

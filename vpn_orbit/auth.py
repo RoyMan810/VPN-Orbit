@@ -33,7 +33,7 @@ class Role(StrEnum):
     AUDITOR = "Auditor"
 
 
-PERMISSIONS = frozenset(("users:manage", "audit:read", "vps:read", "vps:probe", "vps:restart", "vps:firewall",
+PERMISSIONS = frozenset(("users:manage", "audit:read", "vps:read", "vps:probe", "vps:restart", "vps:firewall", "vps:apps",
                          "secrets:View Metadata", "secrets:Use", "secrets:Manage"))
 _ROLE_PERMISSIONS = {
     Role.ADMIN: PERMISSIONS,

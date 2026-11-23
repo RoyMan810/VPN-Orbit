@@ -14,7 +14,7 @@ from nacl.signing import SigningKey, VerifyKey
 
 from ..errors import Denied
 from . import policy as policy_module
-from .protocol import SHA256, ULID, canonical, checksum, fields, firewall_payload, integer, restart_payload, text
+from .protocol import SHA256, ULID, application_payload, canonical, checksum, fields, firewall_payload, integer, restart_payload, text
 from .storage import Journal, new_private_file, protected_bytes
 from .timehealth import ANCHOR_FIELDS, TimeHealth
 
@@ -46,6 +46,8 @@ def verify_permit(permit, verify_key, *, now):
         extras += ("restart",)
     if value.get("capability") == "firewall.apply":
         extras += ("firewall",)
+    if value.get("capability") == "apps.lifecycle":
+        extras += ("application",)
     claims = fields(value, (*_BINDING_FIELDS, "v", "authority_id", "epoch", "nonce", "issued_at",
                             "expires_at", "lock_closure_digest", "mutating", *extras))
     if type(claims["v"]) is not int or claims["v"] != 1 or type(claims["mutating"]) is not bool:
@@ -158,18 +160,24 @@ class Authority:
         name = request.get("capability") if isinstance(request, dict) else None
         capability = policy_module.CAPABILITIES.get(name) if isinstance(name, str) else None
         anchored = capability is not None and capability.mutating
-        if name in ("docker.restart", "firewall.apply"):
+        if name in ("docker.restart", "firewall.apply", "apps.lifecycle"):
             target_id = request.get("target")
             target = self.policy.targets.get(target_id) if isinstance(target_id, str) else None
             if target is None or name not in target.value["capabilities"]:
                 raise Denied("CAPABILITY_DISABLED")
         fields(request, (*_BINDING_FIELDS, *(("time_anchor",) if anchored else ()),
                          *(("restart",) if name == "docker.restart" else ()),
-                         *(("firewall",) if name == "firewall.apply" else ())))
+                         *(("firewall",) if name == "firewall.apply" else ()),
+                         *(("application",) if name == "apps.lifecycle" else ())))
         if name == "docker.restart" and restart_payload(request["restart"])["operation_id"] != request["job_id"]:
             raise Denied("PERMIT_BINDING_INVALID")
         if name == "firewall.apply" and firewall_payload(request["firewall"])["operation_id"] != request["job_id"]:
             raise Denied("PERMIT_BINDING_INVALID")
+        if name == "apps.lifecycle":
+            application = application_payload(request["application"])
+            if (application["operation_id"] != request["job_id"]
+                    or target.value["applications"].get(application["installation_id"]) != application["spec_digest"]):
+                raise Denied("APP_POLICY_MISMATCH")
         for key in ("job_id", "plan_id", "actor_id", "target"):
             text(request[key], ULID)
         text(request["approval_id"], ULID)
@@ -288,6 +296,29 @@ class Authority:
                 db.execute("UPDATE gate SET state='NORMAL' WHERE id=1")
         return self.status(request["job_id"])
 
+    def reconcile_application(self, request):
+        fields(request, ("job_id", "nonce", "spec_digest"))
+        text(request["job_id"], ULID)
+        text(request["nonce"], SHA256)
+        text(request["spec_digest"], SHA256)
+        with self.journal.write(kind="control") as db:
+            gate = self._gate(db)
+            row = db.execute("SELECT * FROM attempts WHERE job_id=? AND nonce=?",
+                             (request["job_id"], request["nonce"])).fetchone()
+            claims = json.loads(row["claims"]) if row else {}
+            if (claims.get("capability") != "apps.lifecycle"
+                    or claims.get("application", {}).get("spec_digest") != request["spec_digest"]
+                    or row["state"] not in ("UNKNOWN_OUTCOME", "RECONCILED_SUCCEEDED")):
+                raise Denied("APP_RECONCILIATION_UNVERIFIED")
+            db.execute("UPDATE attempts SET state='RECONCILED_SUCCEEDED' WHERE job_id=?", (request["job_id"],))
+            db.execute("DELETE FROM incidents WHERE job_id=?", (request["job_id"],))
+            if (gate["state"] == "RECOVERY_HOLD" and gate["activated"] and gate["update_ticket"] is None
+                    and not self.recovery_authorization
+                    and not db.execute("SELECT 1 FROM incidents").fetchone()
+                    and not db.execute("SELECT 1 FROM attempts WHERE mutating=1 AND state IN ('ISSUED','DISPATCHING','UNKNOWN_OUTCOME')").fetchone()):
+                db.execute("UPDATE gate SET state='NORMAL' WHERE id=1")
+        return self.status(request["job_id"])
+
     def update(self, operation, request):
         failed_time = False
         with self.journal.write(kind="business" if operation == "update.quiesce" else "control") as db:
@@ -350,6 +381,8 @@ class Authority:
             return self.complete(payload)
         if role == "broker" and operation == "firewall.reconcile":
             return self.reconcile_firewall(payload)
+        if role == "broker" and operation == "apps.reconcile":
+            return self.reconcile_application(payload)
         if role in ("worker", "broker") and operation == "permit.cancel":
             return self.cancel(payload)
         if role in ("worker", "broker", "updater") and operation == "attempt.status":

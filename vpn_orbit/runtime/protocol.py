@@ -19,6 +19,16 @@ DOCKER_STARTED_AT = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.
 MAX_FIREWALL_RULES = 32
 
 
+def application_payload(value):
+    fields(value, ("operation_id", "installation_id", "spec_digest", "action"))
+    text(value["operation_id"], ULID)
+    text(value["installation_id"], ULID)
+    text(value["spec_digest"], SHA256)
+    if value["action"] not in ("install", "start", "remove"):
+        raise Denied("APP_ACTION_INVALID")
+    return value
+
+
 def firewall_rules(value):
     """Validate the complete typed rule set. No free-form nftables is accepted."""
     if not isinstance(value, list) or not 1 <= len(value) <= MAX_FIREWALL_RULES:

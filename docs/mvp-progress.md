@@ -42,6 +42,15 @@
 - Added a Node acceptance scenario with a generated disposable CA, client and
   server certificates. It checks the real host-network image, TLS 1.3 and
   rejection of unauthenticated clients; no product security check is bypassed.
+- PR #168 passed all CI checks including actual Node and Panel product jobs.
+  The Node scenario also passed on staging and restored the original VM disk.
+- Added the separate `apps.lifecycle` capability, protected installation/digest
+  allowlist, dedicated Vault key purpose and bounded forced SSH gateway.
+  Authority/Broker tests check scope refusal, key separation, lost replies
+  and receipt-bound reconciliation. Controller enqueue integration is next.
+- Full Telegram Bot E2E needs a valid test bot token and administrator Telegram
+  ID. No such credentials were supplied; generated fixture tokens cannot
+  establish a real Telegram session. Independent product work continues.
 
 ## Release review
 

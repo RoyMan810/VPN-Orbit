@@ -37,3 +37,23 @@ with recorded IDs and configuration. An incomplete create without recorded
 IDs stays quarantined for operator investigation. Removal stops and deletes
 recorded containers by ID and preserves data volumes and networks. Docker
 networks and volumes used by other containers block removal.
+
+The `apps.lifecycle` runtime capability has its own `application_secret_ref`.
+The protected target policy maps `applications` installation IDs to specification
+digests. Authority signs that exact mapping, action and operation ID. Broker uses
+only the dedicated Vault purpose. A lost reply opens the existing incident gate;
+only readback through Broker can resolve the matching application receipt.
+
+The managed host needs a root-owned installed VPN-Orbit package, the private
+configuration above, and a dedicated `vpn-orbit-apps` SSH account. Its ForceCommand
+is the supplied `remote/apps-gateway`, installed as
+`/usr/local/libexec/vpn-orbit/apps-gateway`. Configure key-only authentication,
+no forwarding, no PTY or user RC, and the exact sudo rule:
+
+```text
+vpn-orbit-apps ALL=(root) NOPASSWD: /opt/vpn-orbit/venv/bin/vpn-orbit-app-helper ""
+```
+
+The helper accepts bounded JSON on stdin. It accepts no path, command or Compose
+fragment. `import-application-key` in the host runtime CLI imports the distinct
+SSH credential; key rotation uses purpose `apps.lifecycle`.

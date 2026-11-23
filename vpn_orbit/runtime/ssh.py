@@ -8,7 +8,7 @@ import time
 import asyncssh
 
 from ..errors import Denied
-from .protocol import SHA256, ULID, canonical, decode, docker_summary, fields, firewall_payload, integer, restart_payload, software_summary, text
+from .protocol import SHA256, ULID, application_payload, canonical, decode, docker_summary, fields, firewall_payload, integer, restart_payload, software_summary, text
 from .storage import new_private_file, protected_bytes
 
 
@@ -134,6 +134,37 @@ def restart(target, private_key, known_hosts, request):
     except (asyncssh.Error, OSError, TimeoutError):
         raise Denied("SSH_RESTART_UNCONFIRMED") from None
 
+
+async def exchange_application(target, key, known_hosts, request, *, operation="execute"):
+    connection = await connect(target, key, known_hosts, "vpn-orbit-apps")
+    try:
+        process = await connection.create_process(
+            "vpn-orbit.v1.apps", input=canonical({"operation": operation, "application": request}) + b"\n",
+            encoding=None, request_pty=False)
+        output, error, _ = await asyncio.gather(
+            bounded_read(process.stdout, 512), bounded_read(process.stderr, 512), process.wait_closed())
+        if error:
+            raise Denied("SSH_APP_REPLY_INVALID")
+        value = fields(decode(output.rstrip(b"\n"), canonical_required=False), ("outcome", "code"))
+        valid = {"SUCCEEDED": 0, "RECONCILED_SUCCEEDED": 0, "DENIED": 65, "UNKNOWN_OUTCOME": 70}
+        if not isinstance(value["outcome"], str) or valid.get(value["outcome"]) != process.exit_status:
+            raise Denied("SSH_APP_REPLY_INVALID")
+        text(value["code"], r"APP_[A-Z_]{1,59}")
+        return value
+    finally:
+        connection.abort()
+
+
+def application(target, private_key, known_hosts, request, *, operation="execute"):
+    application_payload(request)
+    if (target.value.get("applications", {}).get(request["installation_id"]) != request["spec_digest"]
+            or operation not in ("execute", "reconcile")):
+        raise Denied("APP_POLICY_MISMATCH")
+    try:
+        return asyncio.run(asyncio.wait_for(
+            exchange_application(target, validate_private_key(private_key), known_hosts, request, operation=operation), 900))
+    except (asyncssh.Error, OSError, TimeoutError):
+        raise Denied("SSH_APP_UNCONFIRMED") from None
 
 FIREWALL_USER = "vpn-orbit-firewall"
 FIREWALL_OUTCOMES = {"SUCCEEDED": 0, "DENIED": 65, "UNKNOWN_OUTCOME": 70}
