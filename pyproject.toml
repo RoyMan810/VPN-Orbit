@@ -12,6 +12,7 @@ dependencies = ["fastapi==0.162.4", "uvicorn==0.54.0", "argon2-cffi==25.1.0", "P
 [project.scripts]
 vpn-orbit = "vpn_orbit.cli:main"
 vpn-orbit-runtime = "vpn_orbit.runtime.cli:main"
+vpn-orbit-app = "vpn_orbit.app_lifecycle:main"
 
 [tool.setuptools.packages.find]
 include = ["vpn_orbit*"]

@@ -9,12 +9,12 @@ def specification():
         "v": 1, "id": "01JCYQZ4T9V8MNVYEH3D2M7Q1A", "profiles": list(PROFILES),
         "images": {name: repos[0] + "@sha256:" + "a" * 64 for name, repos in REPOSITORIES.items()},
         "settings": {
-            "remnawave-panel": {"database_password": "b" * 40, "app_secret": "s" * 64,
+            "remnawave-panel": {"database_password": "b" * 40, "app_secret": "s" * 64, "metrics_password": "m" * 64,
                                "domain": "panel.test.invalid", "subscription_domain": "sub.test.invalid"},
             "remnawave-node": {"secret_key": "n" * 64, "port": 2222},
             "bedolaga-bot": {"database_password": "c" * 40, "bot_token": "123456:" + "t" * 40,
                              "admin_ids": "123456", "panel_api_key": "k" * 64,
-                             "api_token": "a" * 64, "jwt_secret": "j" * 64},
+                             "panel_url": "https://panel.test.invalid", "api_token": "a" * 64, "jwt_secret": "j" * 64},
             "bedolaga-cabinet": {},
         },
     }
