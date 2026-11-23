@@ -6,6 +6,19 @@
 - P0 removal of excluded backup, rescue, activation, self-update, stage0, and recovery installation functionality is complete.
 - The dedicated disposable Ubuntu VM is the only server used for staging.
 - `v1.0.0` release acceptance is incomplete.
+- The MVP scope now includes typed deployment and lifecycle of all four
+  products, product dependencies, drift checks, and ownership-verified removal.
+  Production readiness still requires a separate decision.
+
+## Expanded MVP implementation
+
+- Replaced the temporary staging shell drill with `tools/staging_vm.py`.
+  It keeps the original XML as immutable restore input, pins the domain UUID
+  and SSH identity, requires the clean snapshot and loopback SPICE console,
+  and restores the original disk even when an acceptance scenario fails.
+  Regression tests cover the failed-scenario restore and host-key rejection.
+  The actual rollback drill booted a new clean overlay and restored the
+  original disk with pinned SSH on November 23, 2026.
 
 ## Release review
 
