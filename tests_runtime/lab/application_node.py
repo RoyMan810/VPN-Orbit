@@ -8,6 +8,7 @@ import socket
 import ssl
 import subprocess
 import tempfile
+import time
 import traceback
 
 from vpn_orbit.app_lifecycle import Lifecycle, ROOT
@@ -56,12 +57,19 @@ def node_acceptance():
         assert runtime.status()["state"] == "HEALTHY"
         context = ssl.create_default_context(cafile=directory / "ca.crt")
         context.load_cert_chain(directory / "client.crt", directory / "client.key")
+        encode = lambda value: base64.urlsafe_b64encode(value).rstrip(b"=")
+        claims = encode(json.dumps({"iat": int(time.time()), "exp": int(time.time()) + 60}).encode())
+        signing = encode(b'{"alg":"RS256","typ":"JWT"}') + b"." + claims
+        signature = subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(directory / "client.key")],
+                                   input=signing, capture_output=True, check=True, timeout=5).stdout
+        bearer = signing + b"." + encode(signature)
         with socket.create_connection(("127.0.0.1", 2222), timeout=4) as stream:
             with context.wrap_socket(stream, server_hostname="localhost") as tls:
                 assert tls.version() == "TLSv1.3"
-                tls.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                tls.sendall(b"GET /node/stats/get-system-stats HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer "
+                            + bearer + b"\r\nConnection: close\r\n\r\n")
                 response = tls.recv(4096)
-                assert response.startswith(b"HTTP/1.1 ")
+                assert response.startswith(b"HTTP/1.1 200")
         untrusted = ssl.create_default_context(cafile=directory / "ca.crt")
         try:
             with socket.create_connection(("127.0.0.1", 2222), timeout=4) as stream:
