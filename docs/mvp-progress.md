@@ -97,6 +97,19 @@
   proxy preserved the frontend `/api` prefix and returned 404 for backend
   routes. The Bot now builds its own asyncpg URL from typed PostgreSQL
   settings, and Cabinet health checks the proxied Bot endpoint.
+- PRs #175–#178 merged after CI. The Bedolaga profiles accept a separately
+  prepared Panel with a real API key. The pinned Bot's insecure local-hostname
+  mode is refused. A private Panel CA is mounted read-only alongside the
+  public system trust roots.
+- Staging reached healthy state for PostgreSQL, Redis, Bot and Cabinet on the
+  corrected profiles. The pinned Bot ran its Alembic migrations and Redis
+  returned `PONG`. Cabinet served its page and proxied API through verified
+  HTTPS. Telegram outbound connectivity has alternated between successful
+  API responses and TCP timeouts.
+- The staging VM is on a private libvirt NAT network. No Telegram-reachable
+  HTTPS origin has been provided for inbound webhook delivery. The typed
+  webhook profile requires that origin and a secret. Webhook delivery remains
+  a release gate.
 
 ## Release review
 

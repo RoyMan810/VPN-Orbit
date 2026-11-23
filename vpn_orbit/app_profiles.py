@@ -60,10 +60,14 @@ def hostname(value):
     return value
 
 
-def panel_origin(value):
+def https_origin(value, code):
     if not isinstance(value, str) or len(value) > 260 or re.fullmatch(r"https://[a-z0-9.-]+", value) is None:
-        error("APP_PANEL_URL_INVALID")
-    host = hostname(urlsplit(value).hostname)
+        error(code)
+    return hostname(urlsplit(value).hostname)
+
+
+def panel_origin(value):
+    host = https_origin(value, "APP_PANEL_URL_INVALID")
     # These hosts put the pinned Bot's Remnawave client into a mode that
     # disables certificate verification even when the URL uses HTTPS.
     if ("." not in host or host == "127.0.0.1" or host.startswith(("10.", "172.", "192.168."))
@@ -106,9 +110,11 @@ def validate(spec):
     if not isinstance(settings, dict) or set(settings) != set(profiles):
         error("APP_SETTINGS_INVALID")
     for name, values in settings.items():
-        optional = {"panel_ca_pem"} if name == "bedolaga-bot" else set()
+        optional = {"panel_ca_pem", "webhook_origin", "webhook_secret"} if name == "bedolaga-bot" else set()
         if not isinstance(values, dict) or not SETTING_KEYS[name] <= values.keys() <= SETTING_KEYS[name] | optional:
             error("APP_SETTINGS_INVALID")
+        if ("webhook_origin" in values) != ("webhook_secret" in values):
+            error("APP_WEBHOOK_SETTINGS_INCOMPLETE")
         for key, value in values.items():
             if key in ("domain", "subscription_domain"):
                 hostname(value)
@@ -116,6 +122,13 @@ def validate(spec):
                 panel_origin(value)
             elif key == "panel_ca_pem":
                 panel_ca(value)
+            elif key == "webhook_origin":
+                host = https_origin(value, "APP_WEBHOOK_URL_INVALID")
+                if "." not in host or host.endswith(".local") or not re.search(r"\.[a-z][a-z0-9-]*$", host):
+                    error("APP_WEBHOOK_URL_INVALID")
+            elif key == "webhook_secret":
+                if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9_-]{32,256}", value) is None:
+                    error("APP_WEBHOOK_SECRET_INVALID")
             elif key == "port":
                 if type(value) is not int or not 1024 <= value <= 65535 or value in (18080, 18443):
                     error("APP_NODE_PORT_INVALID")
@@ -218,6 +231,9 @@ def render(spec, owner):
                 env["SSL_CERT_FILE"] = PANEL_CA_MOUNT
                 bot["volumes"].append({"type": "bind", "source": f"/var/lib/vpn-orbit-apps/{spec['id']}/{PANEL_CA_FILE}",
                                        "target": PANEL_CA_MOUNT, "read_only": True, "bind": {"create_host_path": False}})
+            if "webhook_origin" in values:
+                env.update(BOT_RUN_MODE="webhook", WEBHOOK_URL=values["webhook_origin"],
+                           WEBHOOK_PATH="/webhook", WEBHOOK_SECRET_TOKEN=values["webhook_secret"])
             bot["ports"] = [{"target": 8080, "published": "8080", "host_ip": "127.0.0.1"}]
             bot["healthcheck"] = health(["python", "-c",
                 "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=3)"])

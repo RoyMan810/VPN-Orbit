@@ -20,6 +20,13 @@ client in its certificate-verifying HTTPS mode. For a private CA, include the
 public CA certificate as `panel_ca_pem` in Bot settings. The executor binds that
 certificate to the installation digest and mounts it read-only.
 
+Bot uses long polling by default. For Telegram webhook mode, set both
+`webhook_origin` and `webhook_secret` in its private settings. The HTTPS origin
+must have a DNS hostname reachable by Telegram. Its reverse proxy should
+forward only `POST /webhook` to the Bot loopback port, supplying the incoming
+`X-Telegram-Bot-Api-Secret-Token` unchanged. The Bot validates this header before
+processing a Telegram update. Cabinet keeps its separate `/api/` proxy.
+
 Node uses host networking and a bounded capability list that includes
 `NET_ADMIN`. This allows the product to configure the host network. Its
 deployment requires explicit administrator configuration; it must run only on
