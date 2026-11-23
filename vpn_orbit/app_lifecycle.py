@@ -23,6 +23,7 @@ from .runtime.storage import Journal, directory_sync, process_lock, protected_by
 
 
 ROOT = Path("/var/lib/vpn-orbit-apps")
+SYSTEM_CA_BUNDLE = Path("/etc/ssl/certs/ca-certificates.crt")
 SCHEMA = """
 CREATE TABLE installation(id INTEGER PRIMARY KEY CHECK(id=1), spec_digest TEXT NOT NULL,
     owner TEXT NOT NULL, inventory TEXT, removed INTEGER NOT NULL DEFAULT 0);
@@ -55,6 +56,17 @@ def atomic_write(path, data, *, mode=0o600):
         directory_sync(path.parent)
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+def managed_contents(name, pem):
+    if name != PANEL_CA_FILE:
+        return pem.encode()
+    # SSL_CERT_FILE replaces the default bundle. Keep the packaged public
+    # trust roots so the same process can still verify Telegram HTTPS.
+    system = protected_bytes(SYSTEM_CA_BUNDLE, owner=0, maximum=1024**2)
+    if b"-----BEGIN CERTIFICATE-----" not in system:
+        refuse("APP_SYSTEM_CA_UNAVAILABLE")
+    return system.rstrip(b"\n") + b"\n" + pem.encode()
 
 
 class Docker:
@@ -108,7 +120,7 @@ class Lifecycle:
         for name, contents in managed_files(spec).items():
             # The Bot reads its public CA certificate as an unprivileged user.
             mode = 0o644 if name == PANEL_CA_FILE else 0o600
-            atomic_write(directory / name, contents.encode(), mode=mode)
+            atomic_write(directory / name, managed_contents(name, contents), mode=mode)
         atomic_write(directory / "compose.json", canonical(render(spec, token)))
         directory_sync(root)
         return spec["id"]
@@ -132,7 +144,8 @@ class Lifecycle:
         for name, value in managed_files(spec).items():
             public_ca = name == PANEL_CA_FILE
             if protected_bytes(self.directory / name, owner=self.owner, private=not public_ca,
-                               exact_mode=0o644 if public_ca else None) != value.encode():
+                               maximum=2 * 1024**2 if public_ca else 16384,
+                               exact_mode=0o644 if public_ca else None) != managed_contents(name, value):
                 refuse("APP_CONFIG_DRIFT")
         return spec, expected, dict(row)
 

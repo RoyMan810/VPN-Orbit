@@ -114,6 +114,8 @@ class AppProfilesTests(unittest.TestCase):
                 continue
             bot = render(spec, "b" * 64)["services"]["bedolaga-bot"]
             self.assertEqual(bot["environment"]["SSL_CERT_FILE"], PANEL_CA_MOUNT)
+            self.assertFalse(any(PANEL_CA_MOUNT.startswith(mount.split(":", 1)[0] + "/")
+                                 for mount in bot["tmpfs"]))
             self.assertEqual(bot["volumes"][-1], {"type": "bind",
                 "source": f"/var/lib/vpn-orbit-apps/{spec['id']}/{PANEL_CA_FILE}",
                 "target": PANEL_CA_MOUNT, "read_only": True, "bind": {"create_host_path": False}})

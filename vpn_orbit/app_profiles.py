@@ -31,7 +31,7 @@ SETTING_KEYS = {
     "bedolaga-cabinet": set(),
 }
 PANEL_CA_FILE = "panel-ca.pem"
-PANEL_CA_MOUNT = "/run/vpn-orbit-panel-ca.pem"
+PANEL_CA_MOUNT = "/app/vpn-orbit-panel-ca.pem"
 
 
 def canonical(value):
