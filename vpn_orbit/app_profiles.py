@@ -207,8 +207,9 @@ def render(spec, owner):
     # acquiring Docker socket access; no service receives a host bind mount.
     for item in services.values():
         item["environment"] = {key: value.replace("$", "$$") for key, value in item["environment"].items()}
+    networks = {"apps": {"name": project + "-apps", "driver": "bridge", "labels": labels}}
     return {"name": project, "services": services, "volumes": volumes,
-            "networks": {"apps": {"name": project + "-apps", "driver": "bridge", "labels": labels}}}
+            "networks": networks if any("networks" in value for value in services.values()) else {}}
 
 
 def managed_files(spec):

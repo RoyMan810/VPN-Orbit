@@ -21,6 +21,13 @@ def specification():
 
 
 class AppProfilesTests(unittest.TestCase):
+    def test_node_only_profile_does_not_require_an_unused_bridge(self):
+        spec = specification()
+        spec["profiles"] = ["remnawave-node"]
+        spec["images"] = {"remnawave-node": spec["images"]["remnawave-node"]}
+        spec["settings"] = {"remnawave-node": spec["settings"]["remnawave-node"]}
+        self.assertEqual(render(spec, "b" * 64)["networks"], {})
+
     def test_real_service_layout_and_dependencies_are_fixed(self):
         spec = specification()
         rendered = render(spec, "b" * 64)
