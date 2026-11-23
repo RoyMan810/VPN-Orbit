@@ -92,6 +92,11 @@
   fixture passed install, loss of the start reply, reconciliation against the
   actual containers, removal and audit verification. The original VM disk
   and pinned SSH were verified after the run.
+- The first real Bedolaga startup exposed two profile bugs. The generic
+  PostgreSQL URL selected a driver missing from the Bot image. The Cabinet
+  proxy preserved the frontend `/api` prefix and returned 404 for backend
+  routes. The Bot now builds its own asyncpg URL from typed PostgreSQL
+  settings, and Cabinet health checks the proxied Bot endpoint.
 
 ## Release review
 

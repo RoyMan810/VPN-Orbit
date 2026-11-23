@@ -7,7 +7,8 @@ remains a diagnostic renderer; its fragments do not authorize deployment.
 
 Panel uses the upstream backend image, PostgreSQL and Redis. Bot has its own
 PostgreSQL and Redis, a Telegram token, an administrator ID, an HTTPS Panel
-endpoint and a Panel API key. Cabinet proxies `/api/` to Bot. Panel requires
+endpoint and a Panel API key. Cabinet strips the frontend `/api/` prefix when
+proxying requests to Bot. Its health check exercises that proxy. Panel requires
 an HTTPS reverse proxy that sets the forwarding headers on its loopback
 endpoint. Database credentials and application
 secrets must be supplied privately. They are never accepted as arbitrary
