@@ -19,6 +19,13 @@
   Regression tests cover the failed-scenario restore and host-key rejection.
   The actual rollback drill booted a new clean overlay and restored the
   original disk with pinned SSH on November 23, 2026.
+- PR #165 passed all nine CI checks and was merged.
+- Added fixed product service profiles with upstream image allowlists, Node
+  host networking, separate Panel/Bot databases and Redis, and Cabinet API
+  proxy configuration. Unknown commands, mounts, capabilities and image
+  repositories are rejected. Generated Compose was validated by the staging
+  Compose parser; real product startup remains pending. See the
+  [application lifecycle](application-lifecycle.md) contract.
 
 ## Release review
 

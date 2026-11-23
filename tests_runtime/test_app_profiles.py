@@ -1,0 +1,79 @@
+import copy
+import unittest
+
+from vpn_orbit.app_profiles import PROFILES, REPOSITORIES, digest, managed_files, render
+
+
+def specification():
+    return {
+        "v": 1, "id": "01JCYQZ4T9V8MNVYEH3D2M7Q1A", "profiles": list(PROFILES),
+        "images": {name: repos[0] + "@sha256:" + "a" * 64 for name, repos in REPOSITORIES.items()},
+        "settings": {
+            "remnawave-panel": {"database_password": "b" * 40, "app_secret": "s" * 64,
+                               "domain": "panel.test.invalid", "subscription_domain": "sub.test.invalid"},
+            "remnawave-node": {"secret_key": "n" * 64, "port": 2222},
+            "bedolaga-bot": {"database_password": "c" * 40, "bot_token": "123456:" + "t" * 40,
+                             "admin_ids": "123456", "panel_api_key": "k" * 64,
+                             "api_token": "a" * 64, "jwt_secret": "j" * 64},
+            "bedolaga-cabinet": {},
+        },
+    }
+
+
+class AppProfilesTests(unittest.TestCase):
+    def test_real_service_layout_and_dependencies_are_fixed(self):
+        spec = specification()
+        rendered = render(spec, "b" * 64)
+        services = rendered["services"]
+        self.assertEqual(len(services), 8)
+        self.assertEqual(services["remnawave-node"]["network_mode"], "host")
+        self.assertIn("NET_ADMIN", services["remnawave-node"]["cap_add"])
+        self.assertNotIn("networks", services["remnawave-node"])
+        self.assertEqual(set(services["bedolaga-bot"]["depends_on"]), {"bot-db", "bot-redis"})
+        self.assertEqual(set(services["remnawave-panel"]["depends_on"]), {"panel-db", "panel-redis"})
+        for name, service in services.items():
+            self.assertEqual(service["labels"]["com.vpn-orbit.spec"], digest(spec))
+            self.assertEqual(service["cap_drop"], ["ALL"])
+            self.assertNotIn("privileged", service)
+            self.assertNotIn("build", service)
+            for port in service.get("ports", []):
+                self.assertEqual(port["host_ip"], "127.0.0.1")
+            for mount in service.get("volumes", []):
+                if mount["type"] == "bind":
+                    self.assertEqual(name, "bedolaga-cabinet")
+                    self.assertEqual(mount["source"], f"/var/lib/vpn-orbit-apps/{spec['id']}/cabinet.conf")
+                    self.assertTrue(mount["read_only"])
+        self.assertIn("proxy_pass http://bedolaga-bot:8080", managed_files(spec)["cabinet.conf"])
+
+    def test_unknown_inputs_cannot_expand_commands_images_mounts_or_capabilities(self):
+        for key, value in (("command", "id"), ("volumes", ["/:/host"]), ("cap_add", ["SYS_ADMIN"])):
+            changed = specification()
+            changed[key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "APP_SPEC_INVALID"):
+                render(changed, "b" * 64)
+        for image in ("remnawave/node:latest", "docker.io/attacker/node@sha256:" + "a" * 64):
+            changed = specification()
+            changed["images"]["remnawave-node"] = image
+            with self.subTest(image=image), self.assertRaisesRegex(ValueError, "APP_IMAGE_PIN_REQUIRED"):
+                render(changed, "b" * 64)
+
+    def test_secrets_are_literal_and_dependencies_cannot_be_omitted(self):
+        changed = specification()
+        changed["settings"]["remnawave-panel"]["app_secret"] = "$DOLLAR" * 10
+        panel = render(changed, "b" * 64)["services"]["remnawave-panel"]
+        self.assertEqual(panel["environment"]["APP_SECRET"], "$$DOLLAR" * 10)
+        for name in ("bedolaga-bot", "remnawave-panel"):
+            changed = copy.deepcopy(specification())
+            changed["profiles"].remove(name)
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "APP_DEPENDENCY_MISSING"):
+                render(changed, "b" * 64)
+
+    def test_invalid_settings_fail_without_echoing_the_value(self):
+        for profile, key, value in (("remnawave-node", "port", 22),
+                                    ("remnawave-panel", "database_password", "secret;$"),
+                                    ("remnawave-panel", "domain", "host\ncommand"),
+                                    ("bedolaga-bot", "bot_token", "invalid-token")):
+            spec = specification()
+            spec["settings"][profile][key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "^APP_[A-Z_]+$"):
+                render(spec, "b" * 64)
