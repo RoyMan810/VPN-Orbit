@@ -50,7 +50,8 @@ class AppProfilesTests(unittest.TestCase):
                     self.assertEqual(name, "bedolaga-cabinet")
                     self.assertEqual(mount["source"], f"/var/lib/vpn-orbit-apps/{spec['id']}/cabinet.conf")
                     self.assertTrue(mount["read_only"])
-        self.assertIn("proxy_pass http://bedolaga-bot:8080", managed_files(spec)["cabinet.conf"])
+        self.assertIn("proxy_pass http://bedolaga-bot:8080/;", managed_files(spec)["cabinet.conf"])
+        self.assertIn("http://127.0.0.1:80/api/health", services["bedolaga-cabinet"]["healthcheck"]["test"])
 
     def test_unknown_inputs_cannot_expand_commands_images_mounts_or_capabilities(self):
         for key, value in (("command", "id"), ("volumes", ["/:/host"]), ("cap_add", ["SYS_ADMIN"])):
@@ -74,6 +75,16 @@ class AppProfilesTests(unittest.TestCase):
             changed["profiles"].remove(name)
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, "APP_DEPENDENCY_MISSING"):
                 render(changed, "b" * 64)
+
+    def test_bot_uses_upstream_async_database_settings(self):
+        spec = specification()
+        services = render(spec, "b" * 64)["services"]
+        env = services["bedolaga-bot"]["environment"]
+        self.assertNotIn("DATABASE_URL", env)
+        self.assertEqual(env["DATABASE_MODE"], "postgresql")
+        self.assertEqual(env["POSTGRES_HOST"], "bot-db")
+        self.assertEqual(env["POSTGRES_PASSWORD"], services["bot-db"]["environment"]["POSTGRES_PASSWORD"])
+        self.assertEqual(env["REDIS_URL"], "redis://bot-redis:6379/0")
 
     def test_invalid_settings_fail_without_echoing_the_value(self):
         for profile, key, value in (("remnawave-node", "port", 22),

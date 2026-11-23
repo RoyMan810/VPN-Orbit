@@ -174,8 +174,9 @@ def render(spec, owner):
             node["healthcheck"] = health(["node", "-e",
                 f"const s=require('net').connect({values['port']},'127.0.0.1');s.on('connect',()=>{{s.end();process.exit(0)}});s.on('error',()=>process.exit(1))"])
         elif name == "bedolaga-bot":
-            env = database("bot", values["database_password"])
-            env.update(BOT_TOKEN=values["bot_token"], ADMIN_IDS=values["admin_ids"],
+            database("bot", values["database_password"])
+            # Bedolaga builds its asyncpg URL from the PostgreSQL settings.
+            env = dict(BOT_TOKEN=values["bot_token"], ADMIN_IDS=values["admin_ids"],
                        REMNAWAVE_API_URL=values["panel_url"], REMNAWAVE_API_KEY=values["panel_api_key"],
                        DATABASE_MODE="postgresql", POSTGRES_HOST="bot-db", POSTGRES_PORT="5432", POSTGRES_USER="orbit",
                        POSTGRES_DB="orbit", POSTGRES_PASSWORD=values["database_password"],
@@ -196,7 +197,7 @@ def render(spec, owner):
             cabinet["read_only"] = False
             cabinet["cap_add"] = ["CHOWN", "SETGID", "SETUID", "NET_BIND_SERVICE"]
             cabinet["ports"] = [{"target": 80, "published": "3020", "host_ip": "127.0.0.1"}]
-            cabinet["healthcheck"] = health(["wget", "--quiet", "--spider", "http://127.0.0.1:80/"])
+            cabinet["healthcheck"] = health(["wget", "--quiet", "-O", "/dev/null", "http://127.0.0.1:80/api/health"])
             cabinet["volumes"] = [{"type": "bind",
                                   "source": f"/var/lib/vpn-orbit-apps/{spec['id']}/cabinet.conf",
                                   "target": "/etc/nginx/conf.d/default.conf", "read_only": True,
@@ -222,7 +223,7 @@ def managed_files(spec):
     root /usr/share/nginx/html;
     location / { try_files $uri /index.html; }
     location /api/ {
-        proxy_pass http://bedolaga-bot:8080;
+        proxy_pass http://bedolaga-bot:8080/;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $remote_addr;
