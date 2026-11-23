@@ -82,6 +82,16 @@
   Docker Hub and GHCR over HTTPS, but subsequent digest-pinned downloads for
   PostgreSQL, Bot and Cabinet timed out. The original disk and pinned SSH were
   restored. Connecting to the Telegram API also timed out.
+- A follow-up staging run resolved registry and Telegram DNS and completed
+  verified TLS over IPv4. The VM has no IPv6 default route. Both Bedolaga
+  images downloaded by digest. Docker Hub downloads still stalled, although
+  its authenticated manifest and a small CDN range request succeeded. Telegram
+  `getMe` confirmed the test token.
+- An overlay backed by the previous disposable Panel acceptance disk supplied
+  the exact pinned Panel, PostgreSQL and Redis images. The forced-command SSH
+  fixture passed install, loss of the start reply, reconciliation against the
+  actual containers, removal and audit verification. The original VM disk
+  and pinned SSH were verified after the run.
 
 ## Release review
 
