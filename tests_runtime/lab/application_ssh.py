@@ -186,6 +186,8 @@ LogLevel ERROR
                     return dict(db.execute("SELECT * FROM jobs WHERE id=?", (job["id"],)).fetchone())
 
             job = submit("install")
+            if job["status"] != "SUCCEEDED":
+                print("Application install diagnostic:", job["status"], job["reason"], flush=True)
             assert job["status"] == "SUCCEEDED", job["reason"]
             def lost_reply(*args, **kwargs):
                 # Reconciliation reads the existing receipt without replaying.
