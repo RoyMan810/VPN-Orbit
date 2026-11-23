@@ -6,7 +6,7 @@ import time
 from ..errors import Denied
 from .authority import verify_permit
 from .protocol import ULID, canonical, checksum, decode, fields, text
-from .ssh import apply_firewall, firewall_status, probe, provision_known_hosts, restart, verify_known_hosts
+from .ssh import application, apply_firewall, firewall_status, probe, provision_known_hosts, restart, verify_known_hosts
 from .storage import Journal
 
 
@@ -18,12 +18,13 @@ CREATE TABLE receipts(job_id TEXT PRIMARY KEY, nonce TEXT NOT NULL UNIQUE, state
 
 class Broker:
     def __init__(self, directory, policy, vault, gate, verify_key, *, worker_uid, execute=probe, execute_restart=restart,
-                 execute_firewall=apply_firewall, clock=time.time, writers=None):
+                 execute_firewall=apply_firewall, execute_application=application, clock=time.time, writers=None):
         self.directory, self.policy = Path(directory), policy
         self.vault, self.gate, self.verify_key = vault, gate, verify_key
         self.worker_uid, self.execute, self.clock = worker_uid, execute, clock
         self.execute_restart = execute_restart
         self.execute_firewall = execute_firewall
+        self.execute_application = execute_application
         self.firewall_status = firewall_status
         self.journal = Journal(self.directory / "receipts.sqlite3", writers=writers)
         verify_known_hosts(self.directory / "known_hosts", policy)
@@ -80,6 +81,11 @@ class Broker:
             anchor = target.value["restart_secret_ref"]
         elif capability == "firewall.apply" and claims["mutating"]:
             anchor = target.value["firewall_secret_ref"]
+        elif capability == "apps.lifecycle" and claims["mutating"]:
+            anchor = target.value["application_secret_ref"]
+            app = claims["application"]
+            if target.value["applications"].get(app["installation_id"]) != app["spec_digest"]:
+                raise Denied("APP_POLICY_MISMATCH")
         else:
             raise Denied("BROKER_SCOPE_DENIED")
         text(request[ref_field], ULID + r":v[1-9][0-9]{0,8}")
@@ -100,9 +106,13 @@ class Broker:
         self.gate.call("permit.consume", request["permit"])
         with self.journal.write() as db:
             db.execute("UPDATE receipts SET state='DISPATCHING' WHERE job_id=?", (claims["job_id"],))
-        if claims["capability"] in ("docker.restart", "firewall.apply"):
-            execute = self.execute_restart if claims["capability"] == "docker.restart" else self.execute_firewall
-            payload = claims["restart"] if claims["capability"] == "docker.restart" else claims["firewall"]
+        if claims["capability"] in ("docker.restart", "firewall.apply", "apps.lifecycle"):
+            execute, payload_key = {
+                "docker.restart": (self.execute_restart, "restart"),
+                "firewall.apply": (self.execute_firewall, "firewall"),
+                "apps.lifecycle": (self.execute_application, "application"),
+            }[claims["capability"]]
+            payload = claims[payload_key]
             try:
                 result = execute(target, key, self.directory / "known_hosts", payload)
             except Denied as error:
@@ -157,6 +167,35 @@ class Broker:
             return self.use(payload, peer)
         if operation == "firewall.status":
             return self.remote_firewall_status(payload, peer)
+        if operation == "apps.reconcile":
+            fields(payload, ("job_id",))
+            text(payload["job_id"], ULID)
+            with self.journal.connect() as db:
+                row = db.execute("SELECT permit FROM receipts WHERE job_id=?", (payload["job_id"],)).fetchone()
+            if row is None:
+                raise Denied("APP_RECONCILIATION_UNVERIFIED")
+            claims = decode(row["permit"].encode())["claims"]
+            if claims["capability"] != "apps.lifecycle":
+                raise Denied("BROKER_SCOPE_DENIED")
+            target = self.policy.target(claims["target"], claims["capability"], claims["scope_digest"])
+            request = claims["application"]
+            if target.value["applications"].get(request["installation_id"]) != request["spec_digest"]:
+                raise Denied("APP_POLICY_MISMATCH")
+            anchor = target.value["application_secret_ref"]
+            with self.vault.key_lock(anchor, shared=True):
+                key = self.vault.use_policy_key(anchor, consumer_uid=peer.uid, target=target.id, purpose="apps.lifecycle",
+                                                scope_digest=target.scope_digest, policy_revision=target.revision)
+                remote = self.execute_application(target, key, self.directory / "known_hosts", request, operation="reconcile")
+            if (remote.get("outcome") not in ("SUCCEEDED", "RECONCILED_SUCCEEDED")
+                    or remote.get("code") not in ("APP_READBACK_VERIFIED", "APP_HEALTH_VERIFIED", "APP_REMOVED_DATA_PRESERVED")):
+                raise Denied("APP_RECONCILIATION_UNVERIFIED")
+            receipt = self.gate.call("attempt.status", {"job_id": claims["job_id"]})
+            if receipt["state"] in ("UNKNOWN_OUTCOME", "RECONCILED_SUCCEEDED"):
+                self.gate.call("apps.reconcile", {"job_id": claims["job_id"], "nonce": claims["nonce"],
+                                                 "spec_digest": request["spec_digest"]})
+            elif receipt["state"] != "SUCCEEDED":
+                raise Denied("APP_RECONCILIATION_UNVERIFIED")
+            return remote
         if operation == "receipt.get":
             fields(payload, ("job_id",))
             text(payload["job_id"], ULID)

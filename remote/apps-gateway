@@ -1,0 +1,28 @@
+#!/usr/bin/python3 -I
+"""Accept one bounded application request; no shell input or command substitution."""
+
+import os
+import signal
+import subprocess
+import sys
+
+
+def main():
+    if len(sys.argv) != 1 or os.environ.get("SSH_ORIGINAL_COMMAND") != "vpn-orbit.v1.apps":
+        return 65
+    signal.alarm(5)
+    request = sys.stdin.buffer.read(2049)
+    signal.alarm(0)
+    if not request or len(request) > 2048:
+        return 65
+    try:
+        return subprocess.run(
+            ["/usr/bin/sudo", "-n", "--", "/opt/vpn-orbit/venv/bin/vpn-orbit-app-helper"],
+            input=request, timeout=900, env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"},
+        ).returncode
+    except (OSError, subprocess.SubprocessError):
+        return 70
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
