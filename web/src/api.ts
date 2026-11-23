@@ -60,7 +60,7 @@ export interface Resource {
   policy_revision: number
   created_at: number
   observation: Observation
-  permissions: { probe: boolean; restart: boolean; firewall: boolean }
+  permissions: { probe: boolean; restart: boolean; firewall: boolean; applications?: boolean }
 }
 export interface InventoryPage {
   items: Resource[]

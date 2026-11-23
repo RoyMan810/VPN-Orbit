@@ -124,7 +124,7 @@ class InventoryTests(Fixture):
         self.assertEqual(item["observation"], {"status": "NOT_CHECKED", "reason": "NO_COMPLETED_OBSERVATION",
                                               "last_checked_at": None, "last_success": None})
         self.assertEqual(item["access_mode"], "READ_ONLY")
-        self.assertEqual(item["permissions"], {"probe": True, "restart": True, "firewall": True})
+        self.assertEqual(item["permissions"], {"probe": True, "restart": True, "firewall": True, "applications": True})
         self.assertTrue(item["enabled"])
         self.assertEqual(response.headers["cache-control"], "no-store")
         self.assertIn("etag", response.headers)
@@ -140,7 +140,7 @@ class InventoryTests(Fixture):
         ])
         response = self.other_client("scoped").get(f"/api/v1/resources/{SCOPE}")
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["permissions"], {"probe": True, "restart": False, "firewall": False})
+        self.assertEqual(response.json()["permissions"], {"probe": True, "restart": False, "firewall": False, "applications": False})
 
     def test_scope_is_filtered_before_pagination_and_foreign_detail_is_hidden(self):
         self.create_user(grants=[{"permission": "vps:read", "resource_id": OTHER}])

@@ -151,6 +151,20 @@ class ApplicationOperations:
         return binding, ref, validate
 
 
+def timeline(db, queue, auth, token, identity):
+    actor = owner(db, auth, token)
+    job = queue._read_job(db, auth, token, identity)
+    if job["action"] != "apps.lifecycle":
+        raise Denied("RESOURCE_NOT_FOUND", 404)
+    AuthService.require(db, actor, "vps:apps", job["resource_id"])
+    items = db.execute("""SELECT seq,event,outcome,details FROM audit WHERE correlation_id=?
+        AND event IN ('application.reconciliation_requested','application.reconciled') ORDER BY seq""",
+                       (identity,)).fetchall()
+    return {"items": [{"seq": row["seq"], "event": row["event"], "outcome": row["outcome"],
+                       **{key: value for key, value in json.loads(row["details"]).items()
+                          if key in ("attempt", "code")}} for row in items]}
+
+
 def reconcile(db, queue, auth, token, csrf, identity, attempt):
     actor = owner(db, auth, token, csrf, True)
     if type(attempt) is not int or not 1 <= attempt <= 3:

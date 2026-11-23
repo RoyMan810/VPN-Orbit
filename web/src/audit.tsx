@@ -10,7 +10,7 @@ type AuditEvent = {
   seq: number
   event: {
     at: number; actor_id: string; event: string; target_id: string; outcome: string; correlation_id: string
-    details?: { revision?: unknown; operation_id?: unknown; plan_hash?: unknown }
+    details?: { revision?: unknown; operation_id?: unknown; plan_hash?: unknown; action?: unknown }
   }
 }
 
@@ -70,6 +70,7 @@ function sshAuditExport(items: AuditEvent[], statuses: Copy['probeStatus']) {
   for (const { event } of items) {
     const { at, event: kind, outcome, correlation_id: jobId } = event
     if (!jobEvents.has(kind) || !isUlid(jobId) || !Object.hasOwn(statuses, outcome)) continue
+    if (event.details?.action !== undefined && event.details.action !== 'host.probe') continue
     const timestamp = auditExportTime(at)
     if (timestamp === null) continue
     const job = jobs.get(jobId) ?? jobs.size + 1

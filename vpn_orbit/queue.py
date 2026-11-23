@@ -68,7 +68,8 @@ class JobQueue:
     def _event(self, db, row, event, *, reason=None):
         self.store.event(db, at=int(self.clock()), actor=row["actor_id"], kind=event,
                          target=row["resource_id"], outcome=row["status"], correlation=row["id"],
-                         details={"job_id": row["id"], "revision": row["revision"], "reason": reason})
+                         details={"job_id": row["id"], "revision": row["revision"], "reason": reason,
+                                  "action": row["action"]})
 
         if row["action"] not in ("docker.restart", "firewall.apply"):
             return

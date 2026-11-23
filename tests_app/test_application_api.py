@@ -25,6 +25,16 @@ class ApplicationApiTests(Fixture):
         again = self.client.post(plan + "/application-execution-requests", headers=headers,
                                  json={"approval_id": approved.json()["approval_id"]})
         self.assertEqual(again.json(), queued.json())
+        timeline = f"/api/v1/jobs/{queued.json()['id']}/application-timeline"
+        response = self.client.get(timeline)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {"items": []})
+        self.create_user(name="operator", role="Admin", grants=[
+            {"permission": "vps:apps", "resource_id": SCOPE},
+            {"permission": "vps:read", "resource_id": SCOPE},
+        ])
+        response = self.other_client("operator").get(timeline)
+        self.assertEqual(response.status_code, 403, response.text)
         with self.store.read() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM jobs").fetchone()[0], 1)
             self.assertEqual(db.execute("SELECT action FROM jobs").fetchone()[0], "apps.lifecycle")
