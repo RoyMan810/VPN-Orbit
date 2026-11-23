@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+from urllib.parse import urlsplit
 
 
 PROFILES = ("remnawave-panel", "remnawave-node", "bedolaga-bot", "bedolaga-cabinet")
@@ -22,9 +23,9 @@ DEPENDENCIES = {
     "bedolaga-cabinet": ("bedolaga-bot",),
 }
 SETTING_KEYS = {
-    "remnawave-panel": {"database_password", "app_secret", "domain", "subscription_domain"},
+    "remnawave-panel": {"database_password", "app_secret", "metrics_password", "domain", "subscription_domain"},
     "remnawave-node": {"secret_key", "port"},
-    "bedolaga-bot": {"database_password", "bot_token", "admin_ids", "panel_api_key", "api_token", "jwt_secret"},
+    "bedolaga-bot": {"database_password", "bot_token", "admin_ids", "panel_url", "panel_api_key", "api_token", "jwt_secret"},
     "bedolaga-cabinet": set(),
 }
 
@@ -84,6 +85,10 @@ def validate(spec):
         for key, value in values.items():
             if key in ("domain", "subscription_domain"):
                 hostname(value)
+            elif key == "panel_url":
+                if not isinstance(value, str) or len(value) > 260 or re.fullmatch(r"https://[a-z0-9.-]+", value) is None:
+                    error("APP_PANEL_URL_INVALID")
+                hostname(urlsplit(value).hostname)
             elif key == "port":
                 if type(value) is not int or not 1024 <= value <= 65535 or value in (18080, 18443):
                     error("APP_NODE_PORT_INVALID")
@@ -153,12 +158,14 @@ def render(spec, owner):
             env.update(APP_SECRET=values["app_secret"], PANEL_DOMAIN=values["domain"],
                        FRONT_END_DOMAIN="https://" + values["domain"], SUB_PUBLIC_DOMAIN=values["subscription_domain"],
                        APP_PORT="3000", METRICS_PORT="3001", API_INSTANCES="1",
+                       METRICS_USER="orbit", METRICS_PASS=values["metrics_password"],
                        PM2_HOME="/tmp/pm2", IS_TELEGRAM_NOTIFICATIONS_ENABLED="false")
             panel = service(name, name, env)
             panel["ports"] = [{"target": 3000, "published": "3000", "host_ip": "127.0.0.1"}]
             panel["healthcheck"] = health(["curl", "--fail", "--silent", "http://127.0.0.1:3001/health"])
         elif name == "remnawave-node":
-            node = service(name, name, {"NODE_PORT": str(values["port"]), "SECRET_KEY": values["secret_key"]})
+            node = service(name, name, {"NODE_PORT": str(values["port"]), "SECRET_KEY": values["secret_key"],
+                                       "S6_READ_ONLY_ROOT": "1", "NFTABLES_TABLE_NAME": "vo_" + spec["id"].lower()})
             del node["networks"]
             node["network_mode"] = "host"
             node["cap_add"] = ["NET_ADMIN", "NET_BIND_SERVICE", "CHOWN", "SETGID", "SETUID", "KILL", "DAC_OVERRIDE", "FOWNER"]
@@ -168,7 +175,7 @@ def render(spec, owner):
         elif name == "bedolaga-bot":
             env = database("bot", values["database_password"])
             env.update(BOT_TOKEN=values["bot_token"], ADMIN_IDS=values["admin_ids"],
-                       REMNAWAVE_API_URL="http://remnawave-panel:3000", REMNAWAVE_API_KEY=values["panel_api_key"],
+                       REMNAWAVE_API_URL=values["panel_url"], REMNAWAVE_API_KEY=values["panel_api_key"],
                        DATABASE_MODE="postgresql", POSTGRES_HOST="bot-db", POSTGRES_PORT="5432", POSTGRES_USER="orbit",
                        POSTGRES_DB="orbit", POSTGRES_PASSWORD=values["database_password"],
                        REDIS_URL="redis://bot-redis:6379/0", CABINET_ENABLED="true",

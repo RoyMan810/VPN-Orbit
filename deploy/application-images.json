@@ -1,0 +1,19 @@
+{
+  "v": 1,
+  "images": {
+    "remnawave-panel": "docker.io/remnawave/backend@sha256:a5b9f81fe2cfacec1c41bd2bb43fa1a5980228b81aa2e744be4adffa3a00135b",
+    "remnawave-node": "docker.io/remnawave/node@sha256:3d5fde656a36920f53c5c080f2dc821df8318f453803b07c4e5242752a549d69",
+    "bedolaga-bot": "ghcr.io/bedolaga-dev/remnawave-bedolaga-telegram-bot@sha256:5b2eeee7ec2e742dbd1b20d66e5a6fb2ee76b3bb6b45d2d2def9644c340b9b7d",
+    "bedolaga-cabinet": "ghcr.io/bedolaga-dev/bedolaga-cabinet@sha256:63b4cf143008242858d9419712bf3fe172f0b3607b0d8fbc7a27e26d71428a77",
+    "postgres": "docker.io/library/postgres@sha256:a02db8cac496f15b094798a38254f14d6e00741f709360e5e00bb6668ea31636",
+    "redis": "docker.io/library/redis@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe"
+  },
+  "verified_tags": {
+    "remnawave-panel": "3.4.11",
+    "remnawave-node": "3.4.6",
+    "bedolaga-bot": "v5.3.0",
+    "bedolaga-cabinet": "1.83.0",
+    "postgres": "18.4",
+    "redis": "7-alpine"
+  }
+}

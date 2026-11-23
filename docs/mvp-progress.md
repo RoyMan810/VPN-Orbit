@@ -26,6 +26,15 @@
   repositories are rejected. Generated Compose was validated by the staging
   Compose parser; real product startup remains pending. See the
   [application lifecycle](application-lifecycle.md) contract.
+- Added the host-local `vpn-orbit-app` CLI and its private operation journal.
+  It binds requests to a protected spec digest, records Docker identities
+  before startup, checks drift, and removes recorded containers while retaining
+  data volumes and networks. A separate receipt records reconciliation.
+  Staging confirmed PostgreSQL and Redis health, and the Panel API returned
+  HTTP 200 with the headers required by its HTTPS reverse proxy. The first
+  staging runs exposed a missing Panel metrics credential and Docker
+  normalizing `OomKillDisable` on start. Both are covered by the implementation
+  and the product lifecycle CI job.
 
 ## Release review
 

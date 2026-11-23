@@ -1,0 +1,44 @@
+name: VPN-Orbit product lifecycle
+
+on:
+  pull_request:
+    paths: &application_paths
+      - vpn_orbit/app_*.py
+      - deploy/application-images.json
+      - tests_runtime/test_app_*.py
+      - tests_runtime/lab/application_lifecycle.py
+      - .github/workflows/applications.yml
+  push:
+    branches: [main]
+    paths: *application_paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  panel:
+    name: Remnawave Panel / actual lifecycle and fault acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15.2"
+      - uses: docker/setup-docker-action@3f1ab1ab0e29231562e4db4ca600c1a49653bac6 # v5.7.0
+        with:
+          version: v29.9.3
+          set-host: true
+      - name: Exercise actual product startup and ownership protection
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          # The lifecycle executor deliberately uses the normal local socket.
+          # Keep the action's private daemon and expose exactly that socket.
+          sudo systemctl stop docker.service docker.socket || true
+          sudo ln -sfn "${DOCKER_HOST#unix://}" /run/docker.sock
+          sudo -n env PYTHONPATH="$PWD" GITHUB_ACTIONS=true \
+            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" \
+            "$(command -v python)" -m tests_runtime.lab.application_lifecycle
