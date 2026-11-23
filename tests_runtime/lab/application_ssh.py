@@ -133,7 +133,7 @@ LogLevel ERROR
             Lifecycle.configure(spec)
             target = {"id": IDENTITY, "ip": ip, "port": 2229, "allowed_cidrs": [ip + "/32"],
                       "host_key": " ".join((lab / "host.pub").read_text().split()[:2]),
-                      "secret_ref": (IDENTITY[:-1] + "U") + ":v1", "application_secret_ref": SECRET + ":v1",
+                      "secret_ref": (IDENTITY[:-1] + "V") + ":v1", "application_secret_ref": SECRET + ":v1",
                       "capabilities": ["host.probe", "apps.lifecycle"], "policy_revision": 1,
                       "dependencies": [], "applications": {ACTOR: digest(spec)}}
             policy = Policy([target])
