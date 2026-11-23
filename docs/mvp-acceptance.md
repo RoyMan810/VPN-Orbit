@@ -35,10 +35,10 @@ Status date: November 24, 2026
 | Correlation IDs and safe API error codes | Browser/API tests | PASS |
 | Resource-level permissions | API projection, browser controls, CI | PASS |
 | Typed firewall WebUI and reconciliation | Browser tests, runtime rollback/reconciliation tests | PASS |
-| Staging fault acceptance with a managed target | Loss before and after dispatch, reconciliation, idempotency replay, firewall rollback and typed Docker restart have disposable CI coverage. The staging Controller was installed with an empty target policy | PENDING |
+| Staging fault acceptance with a managed target | Real application SSH effects and journal recovery passed on staging. Separate disposable CI verifies the native process, firewall rollback and typed Docker restart boundaries | PASS |
 | Remnawave Panel | Staging passed API health, idempotent replay, loss of the start reply, executor restart, reconciliation, shared network refusal, and exact-ID removal with volume and network retention | PASS |
 | Remnawave Node | CI and staging passed host networking, TLS 1.3, mutual TLS enforcement, health and exact-ID removal | PASS |
-| Application Controller-to-host SSH | CI runs `45207718030` and `45228644739`. The disposable staging fixture passed the real SSH install, lost start reply, readback and removal with exact digest images already present | PASS |
+| Application Controller-to-host SSH | The disposable staging fixture passed real SSH install, a crash after starting a stopped Panel, Authority/Broker/Worker journal recovery, readback without a second start and removal. It uses direct runtime handlers and deterministic TimeHealth. Native process and clock faults have separate CI coverage | PASS |
 | Bedolaga Bot and Cabinet | November 24 staging run passed pinned images, migrations, Redis `PONG`, health, verified HTTPS and the native Bot-to-Panel client with a real API key. Replay, stop/start, database readback, drift/shared-resource refusal, and exact-ID removal with volume and network retention passed | PASS |
 | Telegram webhook receiver | The pinned Bot image rejected missing and wrong secrets and invalid payloads, then passed a valid synthetic update to the processor on staging | PASS |
 | Telegram delivery | `getMe` confirmed the test token and `getWebhookInfo` reported no existing webhook. IPv4 TCP connectivity is intermittent. Live inbound webhook delivery needs a Telegram-reachable HTTPS origin for the NAT-only staging VM | PENDING |

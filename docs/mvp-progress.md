@@ -119,6 +119,12 @@
   Bot rejected missing and incorrect secrets and invalid payloads. It handed
   a valid synthetic update to the webhook processor. Telegram delivery to the
   staging origin remains a release gate.
+- The application SSH staging fixture passed a queued install with a fresh
+  Worker and a crash after starting a stopped Panel. Reopening Authority,
+  Broker and Worker journals left the job in `UNKNOWN_OUTCOME` until readback.
+  The Panel container's `StartedAt` stayed unchanged during reconciliation.
+  The original job remained `UNKNOWN_OUTCOME`, the reconciliation receipt
+  closed its incident, and exact-ID removal and audit verification passed.
 
 ## Release review
 
