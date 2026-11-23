@@ -5,6 +5,8 @@ import json
 import re
 from urllib.parse import urlsplit
 
+from cryptography import x509
+
 
 PROFILES = ("remnawave-panel", "remnawave-node", "bedolaga-bot", "bedolaga-cabinet")
 REPOSITORIES = {
@@ -28,6 +30,8 @@ SETTING_KEYS = {
     "bedolaga-bot": {"database_password", "bot_token", "admin_ids", "panel_url", "panel_api_key", "api_token", "jwt_secret"},
     "bedolaga-cabinet": set(),
 }
+PANEL_CA_FILE = "panel-ca.pem"
+PANEL_CA_MOUNT = "/run/vpn-orbit-panel-ca.pem"
 
 
 def canonical(value):
@@ -56,6 +60,30 @@ def hostname(value):
     return value
 
 
+def panel_origin(value):
+    if not isinstance(value, str) or len(value) > 260 or re.fullmatch(r"https://[a-z0-9.-]+", value) is None:
+        error("APP_PANEL_URL_INVALID")
+    host = hostname(urlsplit(value).hostname)
+    # These hosts put the pinned Bot's Remnawave client into a mode that
+    # disables certificate verification even when the URL uses HTTPS.
+    if ("." not in host or host == "127.0.0.1" or host.startswith(("10.", "172.", "192.168."))
+            or host.endswith(".local")):
+        error("APP_PANEL_TLS_REQUIRED")
+
+
+def panel_ca(value):
+    pattern = r"-----BEGIN CERTIFICATE-----\n[A-Za-z0-9+/=\n]+-----END CERTIFICATE-----\n?"
+    if not isinstance(value, str) or len(value) > 8192 or re.fullmatch(pattern, value) is None:
+        error("APP_PANEL_CA_INVALID")
+    try:
+        certificate = x509.load_pem_x509_certificate(value.encode("ascii"))
+        is_ca = certificate.extensions.get_extension_for_class(x509.BasicConstraints).value.ca
+    except (ValueError, x509.ExtensionNotFound):
+        error("APP_PANEL_CA_INVALID")
+    if not is_ca:
+        error("APP_PANEL_CA_INVALID")
+
+
 def validate(spec):
     if (not isinstance(spec, dict) or set(spec) != {"v", "id", "profiles", "images", "settings"}
             or type(spec["v"]) is not int or spec["v"] != 1
@@ -66,8 +94,6 @@ def validate(spec):
             or len(set(profiles)) != len(profiles)):
         error("APP_PROFILE_INVALID")
     if "bedolaga-cabinet" in profiles and "bedolaga-bot" not in profiles:
-        error("APP_DEPENDENCY_MISSING")
-    if "bedolaga-bot" in profiles and "remnawave-panel" not in profiles:
         error("APP_DEPENDENCY_MISSING")
     images, settings = spec["images"], spec["settings"]
     needed = set(profiles) | ({"postgres", "redis"} if set(profiles) & {"remnawave-panel", "bedolaga-bot"} else set())
@@ -80,15 +106,16 @@ def validate(spec):
     if not isinstance(settings, dict) or set(settings) != set(profiles):
         error("APP_SETTINGS_INVALID")
     for name, values in settings.items():
-        if not isinstance(values, dict) or set(values) != SETTING_KEYS[name]:
+        optional = {"panel_ca_pem"} if name == "bedolaga-bot" else set()
+        if not isinstance(values, dict) or not SETTING_KEYS[name] <= values.keys() <= SETTING_KEYS[name] | optional:
             error("APP_SETTINGS_INVALID")
         for key, value in values.items():
             if key in ("domain", "subscription_domain"):
                 hostname(value)
             elif key == "panel_url":
-                if not isinstance(value, str) or len(value) > 260 or re.fullmatch(r"https://[a-z0-9.-]+", value) is None:
-                    error("APP_PANEL_URL_INVALID")
-                hostname(urlsplit(value).hostname)
+                panel_origin(value)
+            elif key == "panel_ca_pem":
+                panel_ca(value)
             elif key == "port":
                 if type(value) is not int or not 1024 <= value <= 65535 or value in (18080, 18443):
                     error("APP_NODE_PORT_INVALID")
@@ -187,6 +214,10 @@ def render(spec, owner):
             bot = service(name, name, env)
             bot["volumes"] = [volume("bot-data", "/app/data"), volume("bot-logs", "/app/logs"),
                               volume("bot-uploads", "/app/uploads")]
+            if "panel_ca_pem" in values:
+                env["SSL_CERT_FILE"] = PANEL_CA_MOUNT
+                bot["volumes"].append({"type": "bind", "source": f"/var/lib/vpn-orbit-apps/{spec['id']}/{PANEL_CA_FILE}",
+                                       "target": PANEL_CA_MOUNT, "read_only": True, "bind": {"create_host_path": False}})
             bot["ports"] = [{"target": 8080, "published": "8080", "host_ip": "127.0.0.1"}]
             bot["healthcheck"] = health(["python", "-c",
                 "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=3)"])
@@ -216,9 +247,12 @@ def render(spec, owner):
 
 def managed_files(spec):
     validate(spec)
+    files = {}
+    if "panel_ca_pem" in spec["settings"].get("bedolaga-bot", {}):
+        files[PANEL_CA_FILE] = spec["settings"]["bedolaga-bot"]["panel_ca_pem"]
     if "bedolaga-cabinet" not in spec["profiles"]:
-        return {}
-    return {"cabinet.conf": """server {
+        return files
+    files["cabinet.conf"] = """server {
     listen 80;
     root /usr/share/nginx/html;
     location / { try_files $uri /index.html; }
@@ -230,4 +264,5 @@ def managed_files(spec):
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
-"""}
+"""
+    return files

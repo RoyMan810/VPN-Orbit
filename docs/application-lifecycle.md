@@ -14,6 +14,12 @@ endpoint. Database credentials and application
 secrets must be supplied privately. They are never accepted as arbitrary
 Compose YAML, commands or mount paths.
 
+Prepare Panel and its API key before configuring Bot and Cabinet. They can be
+managed in their own installation. Use a DNS name that keeps the upstream Bot
+client in its certificate-verifying HTTPS mode. For a private CA, include the
+public CA certificate as `panel_ca_pem` in Bot settings. The executor binds that
+certificate to the installation digest and mounts it read-only.
+
 Node uses host networking and a bounded capability list that includes
 `NET_ADMIN`. This allows the product to configure the host network. Its
 deployment requires explicit administrator configuration; it must run only on

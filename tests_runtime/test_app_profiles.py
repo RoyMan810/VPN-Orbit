@@ -1,7 +1,12 @@
 import copy
+from datetime import UTC, datetime, timedelta
 import unittest
 
-from vpn_orbit.app_profiles import PROFILES, REPOSITORIES, digest, managed_files, render
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+from vpn_orbit.app_profiles import PANEL_CA_FILE, PANEL_CA_MOUNT, PROFILES, REPOSITORIES, digest, managed_files, render
 
 
 def specification():
@@ -70,11 +75,49 @@ class AppProfilesTests(unittest.TestCase):
         changed["settings"]["remnawave-panel"]["app_secret"] = "$DOLLAR" * 10
         panel = render(changed, "b" * 64)["services"]["remnawave-panel"]
         self.assertEqual(panel["environment"]["APP_SECRET"], "$$DOLLAR" * 10)
-        for name in ("bedolaga-bot", "remnawave-panel"):
-            changed = copy.deepcopy(specification())
-            changed["profiles"].remove(name)
-            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "APP_DEPENDENCY_MISSING"):
-                render(changed, "b" * 64)
+        changed = copy.deepcopy(specification())
+        changed["profiles"].remove("bedolaga-bot")
+        with self.assertRaisesRegex(ValueError, "APP_DEPENDENCY_MISSING"):
+            render(changed, "b" * 64)
+
+    def test_bot_and_cabinet_can_use_a_separately_prepared_panel(self):
+        spec = specification()
+        for item in ("remnawave-panel", "remnawave-node"):
+            spec["profiles"].remove(item)
+            del spec["settings"][item], spec["images"][item]
+        self.assertEqual(set(render(spec, "b" * 64)["services"]),
+                         {"bot-db", "bot-redis", "bedolaga-bot", "bedolaga-cabinet"})
+
+    def test_bot_refuses_panel_hosts_that_disable_upstream_certificate_verification(self):
+        for host in ("api", "remnawave", "localhost", "127.0.0.1", "10.1.2.3", "172.16.1.1",
+                     "192.168.1.1", "panel.local"):
+            spec = specification()
+            spec["settings"]["bedolaga-bot"]["panel_url"] = "https://" + host
+            with self.subTest(host=host), self.assertRaisesRegex(ValueError, "APP_PANEL_TLS_REQUIRED"):
+                render(spec, "b" * 64)
+
+    def test_bot_mounts_only_a_ca_certificate_from_the_bound_spec(self):
+        key = ec.generate_private_key(ec.SECP256R1())
+        name = x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, "VPN-Orbit test CA")])
+        now = datetime.now(UTC)
+        builder = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+                   .serial_number(x509.random_serial_number()).not_valid_before(now)
+                   .not_valid_after(now + timedelta(days=1)))
+        spec = specification()
+        for is_ca in (False, True):
+            cert = builder.add_extension(x509.BasicConstraints(ca=is_ca, path_length=None), critical=True)
+            pem = cert.sign(key, hashes.SHA256()).public_bytes(serialization.Encoding.PEM).decode()
+            spec["settings"]["bedolaga-bot"]["panel_ca_pem"] = pem
+            if not is_ca:
+                with self.assertRaisesRegex(ValueError, "APP_PANEL_CA_INVALID"):
+                    render(spec, "b" * 64)
+                continue
+            bot = render(spec, "b" * 64)["services"]["bedolaga-bot"]
+            self.assertEqual(bot["environment"]["SSL_CERT_FILE"], PANEL_CA_MOUNT)
+            self.assertEqual(bot["volumes"][-1], {"type": "bind",
+                "source": f"/var/lib/vpn-orbit-apps/{spec['id']}/{PANEL_CA_FILE}",
+                "target": PANEL_CA_MOUNT, "read_only": True, "bind": {"create_host_path": False}})
+            self.assertEqual(managed_files(spec)[PANEL_CA_FILE], pem)
 
     def test_bot_uses_upstream_async_database_settings(self):
         spec = specification()

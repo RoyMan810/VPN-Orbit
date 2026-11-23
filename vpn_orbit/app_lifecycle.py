@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 import time
 
-from .app_profiles import canonical, digest, managed_files, render, validate
+from .app_profiles import PANEL_CA_FILE, canonical, digest, managed_files, render, validate
 from .errors import Denied
 from .runtime.storage import Journal, directory_sync, process_lock, protected_bytes
 
@@ -43,10 +43,11 @@ def private_directory(path, owner):
         refuse("APP_DIRECTORY_UNPROTECTED")
 
 
-def atomic_write(path, data):
+def atomic_write(path, data, *, mode=0o600):
     fd, temporary = tempfile.mkstemp(prefix=".app-", dir=path.parent)
     try:
         with os.fdopen(fd, "wb") as stream:
+            os.fchmod(stream.fileno(), mode)
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
@@ -105,9 +106,9 @@ class Lifecycle:
         with journal.write() as db:
             db.execute("INSERT INTO installation(id,spec_digest,owner) VALUES(1,?,?)", (digest(spec), token))
         for name, contents in managed_files(spec).items():
-            # nginx config is read by the image's entrypoint, while all parent
-            # directories remain private to the root executor.
-            atomic_write(directory / name, contents.encode())
+            # The Bot reads its public CA certificate as an unprivileged user.
+            mode = 0o644 if name == PANEL_CA_FILE else 0o600
+            atomic_write(directory / name, contents.encode(), mode=mode)
         atomic_write(directory / "compose.json", canonical(render(spec, token)))
         directory_sync(root)
         return spec["id"]
@@ -129,7 +130,9 @@ class Lifecycle:
         if protected_bytes(self.directory / "compose.json", owner=self.owner, private=True, maximum=131072) != canonical(expected):
             refuse("APP_CONFIG_DRIFT")
         for name, value in managed_files(spec).items():
-            if protected_bytes(self.directory / name, owner=self.owner, private=True) != value.encode():
+            public_ca = name == PANEL_CA_FILE
+            if protected_bytes(self.directory / name, owner=self.owner, private=not public_ca,
+                               exact_mode=0o644 if public_ca else None) != value.encode():
                 refuse("APP_CONFIG_DRIFT")
         return spec, expected, dict(row)
 
