@@ -66,9 +66,12 @@ def node_acceptance():
         with socket.create_connection(("127.0.0.1", 2222), timeout=4) as stream:
             with context.wrap_socket(stream, server_hostname="localhost") as tls:
                 assert tls.version() == "TLSv1.3"
-                tls.sendall(b"GET /node/stats/get-system-stats HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer "
+                tls.sendall(b"GET /node/xray/healthcheck HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer "
                             + bearer + b"\r\nConnection: close\r\n\r\n")
                 response = tls.recv(4096)
+                if not response.startswith(b"HTTP/1.1 200"):
+                    status = response.split(b"\r\n", 1)[0]
+                    print("Node HTTP status:", status.decode("ascii", errors="replace")[:50], flush=True)
                 assert response.startswith(b"HTTP/1.1 200")
         untrusted = ssl.create_default_context(cafile=directory / "ca.crt")
         try:
