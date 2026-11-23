@@ -46,6 +46,10 @@ class Direct:
         self.call = function
 
 
+class FixtureCrash(BaseException):
+    """Interrupt fixture handlers without running their normal error handling."""
+
+
 def run(*argv, **kwargs):
     return subprocess.run([str(x) for x in argv], check=True, capture_output=True, timeout=60, **kwargs)
 
@@ -159,19 +163,25 @@ LogLevel ERROR
                         "rate_ppm": 500, "measurement_id": str(time.time_ns())}
             health = TimeHealth.initialize(lab / "time", source=source, clock=clock, watch=Watch())
             gate = Authority.initialize(lab / "gate", policy, time_health=health)
-            cleanup.callback(gate.close)
+            cleanup.callback(lambda: gate.close())
             new_private_file(lab / "dek", os.urandom(32))
             vault = Vault.initialize(lab / "vault", lab / "dek")
             vault.import_application_ssh(SECRET, 1, (lab / "key").read_bytes(), owner_id=owner,
                                          worker_uid=WORKER_UID, target=IDENTITY)
             Broker.initialize(lab / "broker", policy)
-            broker = Broker(lab / "broker", policy, vault,
-                            Direct(lambda op, data: gate.dispatch("broker", Peer(1, BROKER_UID, BROKER_UID), op, data)),
-                            bytes(gate.key.verify_key), worker_uid=WORKER_UID)
+            def open_broker():
+                peer = Peer(1, BROKER_UID, BROKER_UID)
+                return Broker(lab / "broker", policy, vault, Direct(lambda op, data: gate.dispatch("broker", peer, op, data)),
+                              bytes(gate.key.verify_key), worker_uid=WORKER_UID)
+
+            broker = open_broker()
             worker_peer = Peer(1, WORKER_UID, WORKER_UID)
-            worker = Worker(queue, Direct(lambda op, data: gate.dispatch("worker", worker_peer, op, data)),
-                            Direct(lambda op, data: broker.dispatch("worker", worker_peer, op, data)),
-                            secret_refs={}, application_refs={IDENTITY: SECRET + ":v1"})
+            def open_worker():
+                return Worker(queue, Direct(lambda op, data: gate.dispatch("worker", worker_peer, op, data)),
+                              Direct(lambda op, data: broker.dispatch("worker", worker_peer, op, data)),
+                              secret_refs={}, application_refs={IDENTITY: SECRET + ":v1"})
+
+            worker = open_worker()
 
             def submit(action):
                 with store.write() as db:
@@ -180,36 +190,68 @@ LogLevel ERROR
                 with store.write() as db:
                     approval = approve(db, auth, tokens.session, tokens.csrf, draft["id"], tag, grant["id"])
                 with store.write() as db:
-                    job = enqueue(db, queue, auth, tokens.session, tokens.csrf, draft["id"], tag, approval["approval_id"])
-                assert worker.run_one()
+                    return enqueue(db, queue, auth, tokens.session, tokens.csrf, draft["id"], tag, approval["approval_id"])
+
+            def job_status(job):
                 with store.read() as db:
                     return dict(db.execute("SELECT * FROM jobs WHERE id=?", (job["id"],)).fetchone())
 
             job = submit("install")
+            assert job_status(job)["status"] == "QUEUED"
+            assert Lifecycle(ACTOR).status()["state"] == "CONFIGURED"
+            worker = open_worker()
+            assert worker.run(once=True)
+            job = job_status(job)
             if job["status"] != "SUCCEEDED":
                 print("Application install diagnostic:", job["status"], job["reason"], flush=True)
             assert job["status"] == "SUCCEEDED", job["reason"]
-            def lost_reply(*args, **kwargs):
-                # Reconciliation reads the existing receipt without replaying.
-                if kwargs.get("operation") == "reconcile":
-                    return application(*args, **kwargs)
-                application(*args, **kwargs)
-                raise Denied("SSH_APP_UNCONFIRMED")
-            broker.execute_application = lost_reply
+            runtime = Lifecycle(ACTOR)
+            _, document, installation = runtime.configuration()
+            containers = runtime.verify_inventory(document, installation)["containers"]
+            panel_id = containers["remnawave-panel"]["Id"]
+            runtime.docker("container", "stop", panel_id)
+            assert runtime.status()["state"] == "UNHEALTHY"
+
+            def crash_after_effect(*args, **kwargs):
+                result = application(*args, **kwargs)
+                assert result["outcome"] == "SUCCEEDED", result["code"]
+                raise FixtureCrash()
+
+            broker.execute_application = crash_after_effect
             job = submit("start")
-            assert job["status"] == "UNKNOWN_OUTCOME"
+            try:
+                worker.run_one()
+            except FixtureCrash:
+                pass
+            else:
+                raise AssertionError("Fixture did not interrupt dispatch")
+            assert job_status(job)["status"] == "DISPATCHING"
+            assert runtime.status()["state"] == "HEALTHY"
+            started_at = runtime.inspect("container", panel_id)["State"]["StartedAt"]
+            gate.close()
+            gate = Authority(lab / "gate", policy, time_health=TimeHealth(lab / "time", source=source, clock=clock, watch=Watch()))
+            gate.recover()
+            broker = open_broker()
+            broker.recover()
+            worker = open_worker()
+            assert not worker.run(once=True)
+            assert job_status(job)["status"] == "UNKNOWN_OUTCOME"
             with store.write() as db:
                 reconcile(db, queue, auth, tokens.session, tokens.csrf, job["id"], 1)
-            broker.execute_application = application
             assert worker.run_one()
             with store.read() as db:
                 assert not db.execute("SELECT 1 FROM job_incidents").fetchone()
                 assert db.execute("SELECT status FROM jobs WHERE id=?", (job["id"],)).fetchone()[0] == "UNKNOWN_OUTCOME"
+                assert db.execute("""SELECT outcome FROM audit
+                    WHERE event='application.reconciled' AND correlation_id=?""", (job["id"],)).fetchone()[0] == "RECONCILED_SUCCEEDED"
+            assert runtime.inspect("container", panel_id)["State"]["StartedAt"] == started_at
             job = submit("remove")
+            assert worker.run_one()
+            job = job_status(job)
             assert job["status"] == "SUCCEEDED", job["reason"]
             assert Lifecycle(ACTOR).status()["state"] == "REMOVED"
             store.verify_audit()
-            print("PASS actual SSH application install/start/remove, durable jobs, lost reply, reconciliation and Audit/Outbox.")
+            print("PASS actual SSH lifecycle, recovery before and after dispatch, reconciliation without replay and audit integrity.")
         finally:
             cleanup.close()
             if account_created:
