@@ -161,6 +161,11 @@
   `APP_QUARANTINED`. The install used the local lifecycle journal, so no
   Authority, Broker or Worker receipts exist for it. The original disk
   was retained offline.
+- PR #184 passed all 15 PR checks. The patched staging Panel returned to
+  `HEALTHY` after restarting Docker with unchanged container IDs, networks,
+  volumes and protected configuration. Follow-up Telegram probes on the
+  workstation briefly got HTTPS 302 and then timed out again. The application
+  VM still could not establish TCP, so no new webhook was registered.
 - The application SSH staging fixture passed a queued install with a fresh
   Worker and a crash after starting a stopped Panel. Reopening Authority,
   Broker and Worker journals left the job in `UNKNOWN_OUTCOME` until readback.
