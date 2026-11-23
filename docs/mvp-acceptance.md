@@ -39,7 +39,7 @@ Status date: November 24, 2026
 | Remnawave Panel | Staging passed API health, idempotent replay, loss of the start reply, executor restart, reconciliation, shared network refusal, and exact-ID removal with volume and network retention | PASS |
 | Remnawave Node | CI and staging passed host networking, TLS 1.3, mutual TLS enforcement, health and exact-ID removal | PASS |
 | Application Controller-to-host SSH | CI runs `45207718030` and `45228644739`. The disposable staging fixture passed the real SSH install, lost start reply, readback and removal with exact digest images already present | PASS |
-| Bedolaga Bot and Cabinet | Both pinned images downloaded on staging. PostgreSQL migrations, Redis `PONG`, both product health checks and Cabinet page/API over HTTPS passed. Full lifecycle and authenticated Bot-to-Panel acceptance are tracked independently of the startup checks | PENDING |
+| Bedolaga Bot and Cabinet | November 24 staging run passed pinned images, migrations, Redis `PONG`, health, verified HTTPS and the native Bot-to-Panel client with a real API key. Replay, stop/start, database readback, drift/shared-resource refusal, and exact-ID removal with volume and network retention passed | PASS |
 | Telegram delivery | `getMe` confirmed the test token and `getWebhookInfo` reported no existing webhook. IPv4 TCP connectivity is intermittent. Live inbound webhook delivery needs a Telegram-reachable HTTPS origin for the NAT-only staging VM | PENDING |
 | Existing Compose installations | Fragment comparison and labels support manual review. The managed removal executor requires a journal of Docker identities from a VPN-Orbit installation | MANUAL |
 
