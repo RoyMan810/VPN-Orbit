@@ -115,8 +115,10 @@
   and the temporary disk holding test credentials was removed.
 - The staging VM is on a private libvirt NAT network. No Telegram-reachable
   HTTPS origin has been provided for inbound webhook delivery. The typed
-  webhook profile requires that origin and a secret. Webhook delivery remains
-  a release gate.
+  webhook profile requires that origin and a secret. On staging the pinned
+  Bot rejected missing and incorrect secrets and invalid payloads. It handed
+  a valid synthetic update to the webhook processor. Telegram delivery to the
+  staging origin remains a release gate.
 
 ## Release review
 
