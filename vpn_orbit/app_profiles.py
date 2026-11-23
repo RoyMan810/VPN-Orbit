@@ -169,7 +169,8 @@ def render(spec, owner):
             del node["networks"]
             node["network_mode"] = "host"
             node["cap_add"] = ["NET_ADMIN", "NET_BIND_SERVICE", "CHOWN", "SETGID", "SETUID", "KILL", "DAC_OVERRIDE", "FOWNER"]
-            node["tmpfs"].append("/var/log/xray")
+            # s6-overlay executes its own pinned init binaries from this mount.
+            node["tmpfs"] = ["/tmp", "/run:rw,exec,nosuid,nodev,mode=0755,size=64m", "/var/log/xray"]
             node["healthcheck"] = health(["node", "-e",
                 f"const s=require('net').connect({values['port']},'127.0.0.1');s.on('connect',()=>{{s.end();process.exit(0)}});s.on('error',()=>process.exit(1))"])
         elif name == "bedolaga-bot":
@@ -207,8 +208,9 @@ def render(spec, owner):
     # acquiring Docker socket access; no service receives a host bind mount.
     for item in services.values():
         item["environment"] = {key: value.replace("$", "$$") for key, value in item["environment"].items()}
+    networks = {"apps": {"name": project + "-apps", "driver": "bridge", "labels": labels}}
     return {"name": project, "services": services, "volumes": volumes,
-            "networks": {"apps": {"name": project + "-apps", "driver": "bridge", "labels": labels}}}
+            "networks": networks if any("networks" in value for value in services.values()) else {}}
 
 
 def managed_files(spec):

@@ -35,6 +35,13 @@
   staging runs exposed a missing Panel metrics credential and Docker
   normalizing `OomKillDisable` on start. Both are covered by the implementation
   and the product lifecycle CI job.
+- PR #167 passed the complete required CI and real product acceptance job.
+  The same Panel fixture passed on staging: install/API, idempotent replay,
+  a deliberately lost start response, executor restart, read-only reconciliation,
+  shared network refusal, and exact-ID removal preserving volumes and networks.
+- Added a Node acceptance scenario with a generated disposable CA, client and
+  server certificates. It checks the real host-network image, TLS 1.3 and
+  rejection of unauthenticated clients; no product security check is bypassed.
 
 ## Release review
 
