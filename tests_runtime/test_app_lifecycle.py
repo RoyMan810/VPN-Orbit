@@ -158,6 +158,32 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.app.reconcile(INSTALL)["code"], "APP_QUARANTINED")
         self.assertFalse(any(call[0] == "compose" for call in self.docker.calls))
 
+    def test_install_health_timeout_keeps_quarantine_until_readback_verifies_health(self):
+        def start_unhealthy(kind, verb, *args, **options):
+            result = self.docker(kind, verb, *args, **options)
+            if (kind, verb) == ("container", "start"):
+                for identity in args:
+                    self.docker.containers[identity]["State"]["Health"]["Status"] = "starting"
+            return result
+
+        self.app.docker = start_unhealthy
+        with patch("vpn_orbit.app_lifecycle.time.monotonic", side_effect=[0, 151]):
+            receipt = self.app.execute(INSTALL, "install", self.binding)
+        self.assertEqual((receipt["outcome"], receipt["code"]), ("UNKNOWN_OUTCOME", "APP_HEALTH_UNVERIFIED"))
+
+        mutations = tuple(call for call in self.docker.calls if call[1] in {"start", "stop", "rm"})
+        self.assertEqual(self.app.reconcile(INSTALL)["code"], "APP_QUARANTINED")
+        self.assertEqual(self.app.status()["state"], "UNKNOWN_OUTCOME")
+        with self.assertRaisesRegex(Denied, "APP_RECONCILIATION_REQUIRED"):
+            self.app.execute(REMOVE, "remove", self.binding)
+
+        # Complete the dependency startup out of band and observe the same IDs.
+        for container in self.docker.containers.values():
+            container["State"] = {"Running": True, "Health": {"Status": "healthy"}}
+        self.assertEqual(self.app.reconcile(INSTALL)["outcome"], "RECONCILED_SUCCEEDED")
+        self.assertEqual(self.app.status()["state"], "HEALTHY")
+        self.assertEqual(tuple(call for call in self.docker.calls if call[1] in {"start", "stop", "rm"}), mutations)
+
     def test_only_the_exact_pinned_platform_image_can_skip_pull(self):
         reference = self.spec["images"]["postgres"]
         short = reference.removeprefix("docker.io/library/")

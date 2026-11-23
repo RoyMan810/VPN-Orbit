@@ -42,7 +42,8 @@ Status date: November 24, 2026
 | Bedolaga Bot and Cabinet | November 24 staging run passed pinned images, migrations, Redis `PONG`, health, verified HTTPS and the native Bot-to-Panel client with a real API key. Replay, stop/start, database readback, drift/shared-resource refusal, and exact-ID removal with volume and network retention passed | PASS |
 | Telegram webhook receiver | The pinned Bot image rejected missing and wrong secrets and invalid payloads, then passed a valid synthetic update to the processor on staging | PASS |
 | Staging webhook ingress | Temporary Cloudflare Quick Tunnel on an isolated application guest. Verified public HTTPS returns `401` without the correct secret and `404` for other methods and routes, including health and API. Controller stayed online on its original VM | PASS |
-| Telegram delivery | `getMe` confirmed the test token and `getWebhookInfo` reported no existing webhook. The staging network still intermittently times out reaching the Telegram API. Live registration and message delivery through the tunnel remain open | PENDING |
+| Bedolaga installation reconciliation | Readback matched the original Docker IDs. PostgreSQL and Redis were healthy and Bot was still starting. `APP_QUARANTINED` preserved `UNKNOWN_OUTCOME` without replay. The original test disk is retained offline | BLOCKED |
+| Telegram delivery | `getMe` previously confirmed the test token. On the new overlay, `getWebhookInfo` exhausted IPv4 retries before TCP connected. IPv6 had no route. The tunnel passed scope checks, but a successful `setWebhook`, live URL readback and Telegram `/start` remain unverified | BLOCKED |
 | Existing Compose installations | Fragment comparison and labels support manual review. The managed removal executor requires a journal of Docker identities from a VPN-Orbit installation | MANUAL |
 
 ## Remaining Boundary
