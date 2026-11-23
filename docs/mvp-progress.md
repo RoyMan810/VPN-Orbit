@@ -56,6 +56,11 @@
   binds the payload to Authority and Broker and preserves UNKNOWN_OUTCOME
   across reconciliation. New installations use schema 6; older development
   databases are refused rather than migrated or overwritten.
+- PR #170 passed all required CI. Added a disposable acceptance scenario using
+  a real forced-command SSH account and dedicated key. It drives the actual
+  Panel through the Controller queue, Authority and Broker, including a lost
+  SSH reply, readback and removal. TimeHealth is explicitly deterministic in
+  this fixture; native daemon and clock-fault acceptance remain separate.
 
 ## Release review
 
