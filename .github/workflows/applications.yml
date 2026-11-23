@@ -4,10 +4,14 @@ on:
   pull_request:
     paths: &application_paths
       - vpn_orbit/app_*.py
+      - vpn_orbit/application_requests.py
+      - vpn_orbit/worker.py
+      - vpn_orbit/runtime/**
       - deploy/application-images.json
       - tests_runtime/test_app_*.py
       - tests_runtime/lab/application_lifecycle.py
       - tests_runtime/lab/application_node.py
+      - tests_runtime/lab/application_ssh.py
       - .github/workflows/applications.yml
   push:
     branches: [main]
@@ -30,6 +34,8 @@ jobs:
             module: application_lifecycle
           - name: Remnawave Node / host network and mutual TLS
             module: application_node
+          - name: Application SSH / durable jobs and reconciliation
+            module: application_ssh
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -44,6 +50,9 @@ jobs:
       - name: Exercise actual product startup and ownership protection
         run: |
           test "$RUNNER_ENVIRONMENT" = github-hosted
+          python -m pip install -r requirements-app.txt
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends openssh-server iproute2 sudo
           # The lifecycle executor deliberately uses the normal local socket.
           # Keep the action's private daemon and expose exactly that socket.
           sudo systemctl stop docker.service docker.socket || true

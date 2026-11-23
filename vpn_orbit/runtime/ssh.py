@@ -144,11 +144,17 @@ async def exchange_application(target, key, known_hosts, request, *, operation="
         output, error, _ = await asyncio.gather(
             bounded_read(process.stdout, 512), bounded_read(process.stderr, 512), process.wait_closed())
         if error:
-            raise Denied("SSH_APP_REPLY_INVALID")
+            if b"sudo:" in error:
+                raise Denied("SSH_APP_SUDO_FAILED")
+            if b"Traceback" in error:
+                raise Denied("SSH_APP_HELPER_FAILED")
+            if b"lecture" in error or b"lecture" in error.lower() or b"privacy" in error.lower():
+                raise Denied("SSH_APP_SUDO_LECTURE")
+            raise Denied("SSH_APP_REMOTE_STDERR")
         value = fields(decode(output.rstrip(b"\n"), canonical_required=False), ("outcome", "code"))
         valid = {"SUCCEEDED": 0, "RECONCILED_SUCCEEDED": 0, "DENIED": 65, "UNKNOWN_OUTCOME": 70}
         if not isinstance(value["outcome"], str) or valid.get(value["outcome"]) != process.exit_status:
-            raise Denied("SSH_APP_REPLY_INVALID")
+            raise Denied("SSH_APP_REPLY_STATUS_INVALID")
         text(value["code"], r"APP_[A-Z_]{1,59}")
         return value
     finally:
