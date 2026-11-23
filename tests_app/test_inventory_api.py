@@ -130,7 +130,7 @@ class InventoryTests(Fixture):
         self.assertIn("etag", response.headers)
         with self.store.read() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM jobs").fetchone()[0], 0)
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 5)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 6)
         self.assertEqual(self.store.verify_audit(), before)
 
     def test_inventory_projects_resource_permissions_without_granting_them(self):

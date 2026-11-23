@@ -14,6 +14,7 @@ from starlette.exceptions import HTTPException
 from starlette.concurrency import run_in_threadpool
 
 from . import __version__
+from . import application_requests as applications
 from .admission import Admission
 from .audit_plan import audit_plan_revision
 from .auth import ABSOLUTE_SECONDS, COOKIE, AuthService, Role
@@ -143,7 +144,7 @@ class Login(Input):
 
 
 class Grant(Input):
-    permission: Literal["users:manage", "audit:read", "vps:read", "vps:probe", "vps:restart", "vps:firewall", "secrets:View Metadata", "secrets:Use", "secrets:Manage"]
+    permission: Literal["users:manage", "audit:read", "vps:read", "vps:probe", "vps:restart", "vps:firewall", "vps:apps", "secrets:View Metadata", "secrets:Use", "secrets:Manage"]
     resource_id: Annotated[str, Field(min_length=1, max_length=26)]
 
 
@@ -215,6 +216,11 @@ class FirewallApproval(Input):
 
 class FirewallExecution(Input):
     approval_id: Annotated[str, Field(pattern="^" + ULID + "$", max_length=26)]
+
+class ApplicationDraft(Input):
+    installation_id: Annotated[str, Field(pattern="^" + ULID + "$", max_length=26)]
+    spec_digest: Annotated[str, Field(pattern="^[0-9a-f]{64}$")]
+    action: Literal["install", "start", "remove"]
 
 
 def create_app(settings: Settings, *, auth: AuthService | None = None, enrollment_catalog=None):
@@ -545,6 +551,36 @@ def create_app(settings: Settings, *, auth: AuthService | None = None, enrollmen
     def get_firewall_timeline(draft_id: str, request: Request, actor=Depends(principal)):
         with service.store.read() as db:
             return firewall_timeline(db, service, token(request), draft_id)
+
+    @app.post("/api/v1/resources/{resource_id}/application-drafts", status_code=201)
+    def application_draft(resource_id: str, body: ApplicationDraft, request: Request, response: Response,
+                          actor=Depends(principal)):
+        with service.store.write() as db:
+            value, tag = applications.save(db, service, token(request), csrf(request), resource_id,
+                                           body.installation_id, body.spec_digest, body.action)
+        response.headers["ETag"] = tag
+        response.headers["Location"] = f'/api/v1/change-plans/{value["id"]}'
+        return value
+
+    @app.post("/api/v1/change-plans/{draft_id}/application-approval")
+    def application_approval(draft_id: str, body: FirewallApproval, request: Request, actor=Depends(principal)):
+        with service.store.write() as db:
+            return applications.approve(db, service, token(request), csrf(request), draft_id,
+                                        request.headers.get("if-match"), body.reauth_id)
+
+    @app.post("/api/v1/change-plans/{draft_id}/application-execution-requests", status_code=202)
+    def application_enqueue(draft_id: str, body: FirewallExecution, request: Request, response: Response,
+                            actor=Depends(principal)):
+        with service.store.write() as db:
+            result = applications.enqueue(db, queue, service, token(request), csrf(request), draft_id,
+                                          request.headers.get("if-match"), body.approval_id)
+        response.headers["Location"] = f'/api/v1/jobs/{result["id"]}'
+        return result
+
+    @app.post("/api/v1/jobs/{job_id}/application-reconciliations/{attempt}", status_code=202)
+    def application_reconcile(job_id: str, attempt: int, body: Input, request: Request, actor=Depends(principal)):
+        with service.store.write() as db:
+            return applications.reconcile(db, queue, service, token(request), csrf(request), job_id, attempt)
 
     @app.get("/api/v1/jobs/{job_id}")
     def get_job(job_id: str, request: Request, response: Response, actor=Depends(principal)):

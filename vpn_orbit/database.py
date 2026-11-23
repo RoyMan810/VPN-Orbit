@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 _ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _SCHEMA = r"""
 CREATE TABLE api_calls (user_id TEXT NOT NULL, ip TEXT NOT NULL, at INTEGER NOT NULL);
@@ -31,7 +31,7 @@ CREATE TABLE change_plan_drafts (
     revision INTEGER NOT NULL CHECK(revision >= 1),
     actor_id TEXT NOT NULL REFERENCES users(id),
     resource_id TEXT NOT NULL REFERENCES resources(id),
-    action TEXT NOT NULL CHECK(action IN ('docker.restart','firewall.apply')),
+    action TEXT NOT NULL CHECK(action IN ('docker.restart','firewall.apply','apps.lifecycle')),
     baseline TEXT NOT NULL CHECK(json_valid(baseline) AND json_type(baseline) = 'object'),
     plan_hash TEXT NOT NULL CHECK(length(plan_hash) = 64 AND plan_hash NOT GLOB '*[^0-9a-f]*'),
     created_at INTEGER NOT NULL CHECK(created_at >= 0),
@@ -48,7 +48,7 @@ CREATE TABLE job_incidents (
 );
 CREATE TABLE jobs (
     id TEXT PRIMARY KEY, actor_id TEXT NOT NULL REFERENCES users(id),
-    resource_id TEXT NOT NULL REFERENCES resources(id), action TEXT NOT NULL CHECK(action IN ('host.probe','docker.restart','firewall.apply')),
+    resource_id TEXT NOT NULL REFERENCES resources(id), action TEXT NOT NULL CHECK(action IN ('host.probe','docker.restart','firewall.apply','apps.lifecycle')),
     payload_hash TEXT NOT NULL, scope_digest TEXT NOT NULL, policy_revision INTEGER NOT NULL,
     status TEXT NOT NULL CHECK(status IN ('QUEUED','INTENT_PREPARED','DISPATCHING','EXECUTING','VERIFYING','SUCCEEDED','FAILED','UNKNOWN_OUTCOME','CANCELLED_SAFE')),
     revision INTEGER NOT NULL DEFAULT 1, claimed_by TEXT, claim_nonce TEXT,
@@ -105,7 +105,7 @@ CREATE TRIGGER audit_no_delete BEFORE DELETE ON audit BEGIN SELECT RAISE(ABORT,'
 CREATE TRIGGER audit_no_update BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT,'AUDIT_APPEND_ONLY'); END;
 CREATE TRIGGER outbox_no_delete BEFORE DELETE ON outbox BEGIN SELECT RAISE(ABORT,'OUTBOX_APPEND_ONLY'); END;
 CREATE TRIGGER outbox_no_update BEFORE UPDATE ON outbox BEGIN SELECT RAISE(ABORT,'OUTBOX_APPEND_ONLY'); END;
-PRAGMA user_version = 5;
+PRAGMA user_version = 6;
 """
 
 

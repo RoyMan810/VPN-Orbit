@@ -13,7 +13,7 @@ from .runtime.protocol import SHA256, ULID, canonical, checksum
 
 
 def _session(db, auth, token, *, csrf=None, mutating=False):
-    if not db.in_transaction or db.execute("PRAGMA user_version").fetchone()[0] != 5:
+    if not db.in_transaction or db.execute("PRAGMA user_version").fetchone()[0] != 6:
         raise Denied("DATABASE_SCHEMA_UNSUPPORTED", 503)
     return auth._session(db, token, csrf=csrf, mutating=mutating)
 
@@ -37,6 +37,9 @@ def _latest(db, draft_id):
 
 
 def _value(draft_id, revision, baseline, action="docker.restart"):
+    if action == "apps.lifecycle":
+        from .application_requests import application_value
+        return application_value(draft_id, revision, baseline)
     if action == "firewall.apply":
         from .firewall_requests import firewall_value
         return firewall_value(draft_id, revision, baseline)
@@ -57,7 +60,7 @@ def _stored(row):
     value = _value(row["id"], row["revision"], baseline, row["action"])
     if (checksum(value) != row["plan_hash"] or value["action"] != row["action"]
             or (row["action"] == "docker.restart" and baseline["target"]["resource_id"] != row["resource_id"])
-            or (row["action"] == "firewall.apply" and baseline["resource_id"] != row["resource_id"])):
+            or (row["action"] in ("firewall.apply", "apps.lifecycle") and baseline["resource_id"] != row["resource_id"])):
         raise Denied("CHANGE_PLAN_INTEGRITY", 503)
     return value
 
@@ -132,7 +135,7 @@ def _probe_audit(db, resource_id, probe_id):
 
 def _probe_source(draft_db, source_db, auth, token, resource_id, original_probe_id):
     if (not source_db.in_transaction or source_db.execute("PRAGMA query_only").fetchone()[0] != 1
-            or source_db.execute("PRAGMA user_version").fetchone()[0] != 5):
+            or source_db.execute("PRAGMA user_version").fetchone()[0] != 6):
         raise Denied("PROBE_SOURCE_UNSUPPORTED", 503)
     actor = auth._session(source_db, token)
     _require(source_db, actor, resource_id, restart=True)

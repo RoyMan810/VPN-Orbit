@@ -3,6 +3,7 @@
 from threading import Event
 
 from .database import identifier
+from .application_requests import ApplicationOperations, reconcile_pending as reconcile_applications
 from .errors import Denied
 from .firewall_requests import FirewallOperations
 from .queue import JobQueue
@@ -12,11 +13,13 @@ from .runtime.storage import process_lock
 
 
 class Worker:
-    def __init__(self, queue: JobQueue, gate, broker, *, secret_refs, observe=None, restart_refs=None, firewall_refs=None):
+    def __init__(self, queue: JobQueue, gate, broker, *, secret_refs, observe=None, restart_refs=None, firewall_refs=None,
+                 application_refs=None):
         self.queue, self.gate, self.broker = queue, gate, broker
         self.secret_refs = secret_refs
         self.restart = RestartOperations(queue, gate, broker, restart_refs if restart_refs is not None else {})
         self.firewall = FirewallOperations(queue, gate, broker, firewall_refs if firewall_refs is not None else {})
+        self.applications = ApplicationOperations(queue, gate, broker, application_refs or {})
         self.id = identifier()
         self.observe = observe or (lambda _: None)
 
@@ -41,6 +44,8 @@ class Worker:
                 return True
             if self.firewall.reconcile_pending():
                 return True
+            if reconcile_applications(self.applications):
+                return True
             claimed = self.queue.claim(self.id)
         except Denied as error:
             if error.code in {"WRITER_ADMISSION_CLOSED", "WRITER_BARRIER_TIMEOUT"}:
@@ -54,10 +59,13 @@ class Worker:
         try:
             restart = row["action"] == "docker.restart"
             firewall = row["action"] == "firewall.apply"
+            application = row["action"] == "apps.lifecycle"
             if restart:
                 binding, secret_ref, revalidate = self.restart.prepare(row)
             elif firewall:
                 binding, secret_ref, revalidate = self.firewall.prepare(row)
+            elif application:
+                binding, secret_ref, revalidate = self.applications.prepare(row)
             else:
                 binding, secret_ref, revalidate = self.queue.binding(row), self.secret_refs[row["resource_id"]], None
             permit = self.gate.call("permit.admit", binding)
@@ -78,8 +86,11 @@ class Worker:
                     or receipt["result_digest"] != checksum(result)):
                 raise Denied("BROKER_RECEIPT_INVALID")
             text(response["code"], r"[A-Z][A-Z0-9_]{1,63}")
-            if restart:
+            if restart or application:
                 if response["outcome"] not in ("SUCCEEDED", "FAILED", "UNKNOWN_OUTCOME") or response["observation"] is not None:
+                    raise Denied("BROKER_RECEIPT_INVALID")
+                if application and response["outcome"] == "SUCCEEDED" and response["code"] not in (
+                        "APP_HEALTH_VERIFIED", "APP_REMOVED_DATA_PRESERVED", "APP_READBACK_VERIFIED"):
                     raise Denied("BROKER_RECEIPT_INVALID")
                 self.queue.finish(claim, response["outcome"], response["code"])
             elif firewall:

@@ -188,7 +188,7 @@ class RestartOperations:
 
     def reconcile_pending(self):
         with self.store.write(kind="dispatch") as db:
-            if db.execute("PRAGMA user_version").fetchone()[0] != 5:
+            if db.execute("PRAGMA user_version").fetchone()[0] != 6:
                 return False
             row = self.pending_reconciliation(db)
         return self.reconcile_one(row) if row is not None else False

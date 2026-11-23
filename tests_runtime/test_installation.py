@@ -148,7 +148,7 @@ class InstallationTests(unittest.TestCase):
             p.write_bytes(content)
         self.value = {"v": 1, "application": "VPN-Orbit", "version": "0.1.0.dev1", "channel": "development",
                       "source_commit": "a" * 40, "python_image": "docker.io/library/python@sha256:" + "b" * 64,
-                      "platform": "ubuntu-24.04-amd64", "python": "3.13", "sqlite_schema": 5,
+                      "platform": "ubuntu-24.04-amd64", "python": "3.13", "sqlite_schema": 6,
                       "remote_mutation_enabled": False, "signing_key_sha256": hashlib.sha256(self.key).hexdigest(),
                       "files": [{"path": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
                                 for name, data in sorted(self.contents.items())]}
