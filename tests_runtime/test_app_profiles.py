@@ -131,6 +131,29 @@ class AppProfilesTests(unittest.TestCase):
         self.assertEqual(env["POSTGRES_PASSWORD"], services["bot-db"]["environment"]["POSTGRES_PASSWORD"])
         self.assertEqual(env["REDIS_URL"], "redis://bot-redis:6379/0")
 
+    def test_bot_webhook_requires_https_origin_and_secret_without_extra_ports(self):
+        spec = specification()
+        settings = spec["settings"]["bedolaga-bot"]
+        render_bot = lambda: render(spec, "b" * 64)["services"]["bedolaga-bot"]
+        self.assertNotIn("WEBHOOK_URL", render_bot()["environment"])
+        settings["webhook_origin"] = "https://bot.example.com"
+        with self.assertRaisesRegex(ValueError, "APP_WEBHOOK_SETTINGS_INCOMPLETE"):
+            render_bot()
+        settings["webhook_secret"] = "s" * 32
+        bot = render_bot()
+        self.assertEqual(bot["ports"], [{"target": 8080, "published": "8080", "host_ip": "127.0.0.1"}])
+        keys = ("BOT_RUN_MODE", "WEBHOOK_URL", "WEBHOOK_PATH", "WEBHOOK_SECRET_TOKEN")
+        self.assertEqual(tuple(bot["environment"][key] for key in keys),
+                         ("webhook", "https://bot.example.com", "/webhook", "s" * 32))
+        for origin in ("http://bot.example.com", "https://192.168.122.244", "https://bot.example.com/api"):
+            settings["webhook_origin"] = origin
+            with self.subTest(origin=origin), self.assertRaisesRegex(ValueError, "APP_WEBHOOK_URL_INVALID"):
+                render_bot()
+        settings["webhook_origin"] = "https://bot.example.com"
+        settings["webhook_secret"] = "weak"
+        with self.assertRaisesRegex(ValueError, "APP_WEBHOOK_SECRET_INVALID"):
+            render_bot()
+
     def test_invalid_settings_fail_without_echoing_the_value(self):
         for profile, key, value in (("remnawave-node", "port", 22),
                                     ("remnawave-panel", "database_password", "secret;$"),
