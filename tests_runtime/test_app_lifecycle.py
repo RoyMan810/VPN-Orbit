@@ -184,6 +184,26 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.app.status()["state"], "HEALTHY")
         self.assertEqual(tuple(call for call in self.docker.calls if call[1] in {"start", "stop", "rm"}), mutations)
 
+    def test_dns_defaults_after_docker_restart_keep_existing_inventory_valid(self):
+        self.assertEqual(self.app.execute(INSTALL, "install", self.binding)["outcome"], "SUCCEEDED")
+        _, document, initial = self.app.configuration()
+        legacy = json.loads(initial["inventory"])
+        fields = ("Dns", "DnsOptions", "DnsSearch")
+        for index, item in enumerate(legacy["containers"].values()):
+            container = self.docker.containers[item["Id"]]
+            host = {**container["HostConfig"], "OomKillDisable": False}
+            host.update({key: ([] if index % 2 else None) for key in fields})
+            item["configuration"] = digest({
+                "Image": container["Image"], "Config": container["Config"], "HostConfig": host, "Mounts": [],
+            })
+            container["HostConfig"].update({key: (None if index % 2 else []) for key in fields})
+        initial["inventory"] = json.dumps(legacy)
+        self.assertEqual(self.app.verify_inventory(document, initial), legacy)
+
+        container["HostConfig"]["Dns"] = ["192.0.2.53"]
+        with self.assertRaisesRegex(Denied, "APP_CONTAINER_DRIFT"):
+            self.app.verify_inventory(document, initial)
+
     def test_only_the_exact_pinned_platform_image_can_skip_pull(self):
         reference = self.spec["images"]["postgres"]
         short = reference.removeprefix("docker.io/library/")

@@ -146,6 +146,21 @@
   `APP_HEALTH_UNVERIFIED` code. The regression test verifies quarantine while
   the recorded containers are unready and successful readback without
   restarting them once health is verified.
+- A bounded TCP traceroute for Telegram reached hops beyond the LAN gateway.
+  Both the application guest and workstation timed out before TLS, while
+  GHCR and Cloudflare remained reachable over verified HTTPS. The trace
+  cannot identify the device or policy dropping the connection. Both clients
+  share the same uplink, and no independent authorized route is configured.
+- On a disposable child of the quarantined disk, Bedolaga logs showed transport
+  failures around webhook registration and the local health check reported
+  connection refused. A separate Docker daemon restart reproduced empty
+  DNS list normalization from `null` to `[]`. The inventory comparison now
+  accepts either unset representation, including in older journals. The
+  original container IDs and inventory verified on the child after the fix.
+  Real Bot health remains a requirement and reconciliation still returned
+  `APP_QUARANTINED`. The install used the local lifecycle journal, so no
+  Authority, Broker or Worker receipts exist for it. The original disk
+  was retained offline.
 - The application SSH staging fixture passed a queued install with a fresh
   Worker and a crash after starting a stopped Panel. Reopening Authority,
   Broker and Worker journals left the job in `UNKNOWN_OUTCOME` until readback.

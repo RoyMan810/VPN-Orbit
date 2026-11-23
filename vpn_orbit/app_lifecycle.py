@@ -7,6 +7,7 @@ directory, outside the API and Worker.
 
 from contextlib import contextmanager
 import argparse
+from itertools import product
 import json
 import os
 from pathlib import Path
@@ -32,6 +33,7 @@ CREATE TABLE operations(id TEXT PRIMARY KEY, action TEXT NOT NULL, binding TEXT 
 """
 ULID = r"[0-7][0-9A-HJKMNP-TV-Z]{25}"
 ID = r"[0-9a-f]{64}"
+DNS_LIST_FIELDS = ("Dns", "DnsOptions", "DnsSearch")
 
 
 def refuse(code):
@@ -182,19 +184,32 @@ class Lifecycle:
         self.docker("pull", "--platform", "linux/amd64", reference, timeout=600)
 
     @staticmethod
-    def stable(container):
+    def stable(container, *, expected=None):
         # Runtime counters, PIDs and health transitions are intentionally excluded.
         # Security configuration, exact image identity and mounts are included.
         host = dict(container["HostConfig"])
         # Engine 29 can normalize the default false pointer to null on start.
         if host.get("OomKillDisable") is None:
             host["OomKillDisable"] = False
+        # Engine 29 can replace null DNS lists with empty lists on daemon
+        # restart. Neither sets an override. Preserve all nonempty values.
+        unset_dns = [key for key in DNS_LIST_FIELDS if key in host and host[key] in (None, [])]
+        for key in unset_dns:
+            host[key] = None
         configuration = {"Image": container["Image"], "Config": container["Config"],
                          "HostConfig": host, "Mounts": sorted(container.get("Mounts", []), key=canonical)}
-        return {"Id": container["Id"], "configuration": digest(configuration)}
+        current = digest(configuration)
+        if unset_dns and expected is not None and current != expected:
+            # Older journals can contain hashes of either representation.
+            for defaults in product((None, []), repeat=len(unset_dns)):
+                host.update(zip(unset_dns, defaults, strict=True))
+                if digest(configuration) == expected:
+                    return {"Id": container["Id"], "configuration": expected}
+        return {"Id": container["Id"], "configuration": current}
 
-    def inventory(self, document, *, complete=True):
+    def inventory(self, document, *, complete=True, expected_containers=None):
         containers, volumes, networks = {}, {}, {}
+        expected_containers = expected_containers or {}
         selector = "label=com.docker.compose.project=" + document["name"]
         found = self.docker("container", "ls", "--all", "--quiet", "--no-trunc", "--filter", selector).split()
         for identity in found:
@@ -215,7 +230,9 @@ class Lifecycle:
                                  else {document["networks"][key]["name"] for key in service["networks"]})
             if set(attached) - expected_networks or (value["State"]["Running"] and set(attached) != expected_networks):
                 refuse("APP_NETWORK_DRIFT")
-            containers[name] = self.stable(value)
+            stored = expected_containers.get(name, {})
+            match = stored.get("configuration") if stored.get("Id") == identity else None
+            containers[name] = self.stable(value, expected=match)
         if complete and set(containers) != set(document["services"]):
             refuse("APP_SERVICE_SET_DRIFT")
         for name, requested in document["volumes"].items():
@@ -240,7 +257,7 @@ class Lifecycle:
         if installation["inventory"] is None:
             refuse("APP_OWNERSHIP_UNVERIFIED")
         saved = json.loads(installation["inventory"])
-        current = self.inventory(document, complete=not allow_missing)
+        current = self.inventory(document, complete=not allow_missing, expected_containers=saved["containers"])
         if current["volumes"] != saved["volumes"] or current["networks"] != saved["networks"]:
             refuse("APP_RESOURCE_DRIFT")
         for name, container in current["containers"].items():
