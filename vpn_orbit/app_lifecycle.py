@@ -385,7 +385,9 @@ class Lifecycle:
                     if not self.healthy(current):
                         refuse("APP_HEALTH_UNVERIFIED")
                 return self.finish(operation, "SUCCEEDED", "APP_REMOVED_DATA_PRESERVED" if action == "remove" else "APP_HEALTH_VERIFIED")
-            except Exception:
+            except Exception as error:
+                if isinstance(error, Denied) and error.code == "APP_HEALTH_UNVERIFIED":
+                    unverified = error.code
                 return self.finish(operation, "UNKNOWN_OUTCOME", unverified)
 
     def reconcile(self, operation):

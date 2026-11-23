@@ -131,6 +131,21 @@
   A fresh attempt reached healthy PostgreSQL and Redis but left the Bot
   unhealthy and the operation in `UNKNOWN_OUTCOME`. It was not replayed.
   The Quick Tunnels were stopped; registration and delivery are not verified.
+- Readback of the original quarantined installation matched the Docker IDs
+  in its journal. PostgreSQL and Redis were healthy and Bot was still
+  starting. Reconciliation returned `APP_QUARANTINED` and preserved
+  `UNKNOWN_OUTCOME`. The disk was retained offline. A separate disposable
+  overlay was used for the next ingress check.
+- The new overlay passed the restricted public HTTPS ingress check. Its
+  Telegram API preflight exhausted bounded IPv4 retries before establishing
+  TCP. The workstation reproduced the same timeout, while GHCR and
+  Cloudflare completed verified TLS from both environments. Telegram's A
+  and AAAA records resolved, and the guest had no IPv6 route. No `setWebhook`
+  was sent on this run because the current registration could not be read.
+- Application health deadline failures now retain the safe
+  `APP_HEALTH_UNVERIFIED` code. The regression test verifies quarantine while
+  the recorded containers are unready and successful readback without
+  restarting them once health is verified.
 - The application SSH staging fixture passed a queued install with a fresh
   Worker and a crash after starting a stopped Panel. Reopening Authority,
   Broker and Worker journals left the job in `UNKNOWN_OUTCOME` until readback.
