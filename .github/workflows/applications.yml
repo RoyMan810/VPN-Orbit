@@ -12,6 +12,7 @@ on:
       - tests_runtime/lab/application_lifecycle.py
       - tests_runtime/lab/application_node.py
       - tests_runtime/lab/application_ssh.py
+      - tests_runtime/lab/application_webhook.py
       - .github/workflows/applications.yml
   push:
     branches: [main]
@@ -36,6 +37,8 @@ jobs:
             module: application_node
           - name: Application SSH / durable jobs and reconciliation
             module: application_ssh
+          - name: Bedolaga Bot / webhook receiver and header authentication
+            module: application_webhook
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
