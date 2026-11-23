@@ -47,7 +47,7 @@ def firewall_value(draft_id, revision, baseline):
 
 
 def _schema(db):
-    if not db.in_transaction or db.execute("PRAGMA user_version").fetchone()[0] != 5:
+    if not db.in_transaction or db.execute("PRAGMA user_version").fetchone()[0] != 6:
         raise Denied("DATABASE_SCHEMA_UNSUPPORTED", 503)
 
 
@@ -363,7 +363,7 @@ class FirewallOperations:
 
     def reconcile_pending(self):
         with self.store.write(kind="dispatch") as db:
-            if db.execute("PRAGMA user_version").fetchone()[0] != 5:
+            if db.execute("PRAGMA user_version").fetchone()[0] != 6:
                 return False
             row = self.pending_reconciliation(db)
         return self.reconcile_one(row) if row is not None else False

@@ -158,7 +158,7 @@ def manifest(bundle, key=None, *, expected_sha256=None, allow_development=False)
     if (not isinstance(value, dict) or value.keys() != expected
             or bundle_channel(value.get("version")) != channel or value.get("channel") != channel
             or value.get("application") != "VPN-Orbit" or value.get("platform") != "ubuntu-24.04-amd64"
-            or value.get("python") not in ("3.13", "3.15") or value.get("sqlite_schema") != 5
+            or value.get("python") not in ("3.13", "3.15") or value.get("sqlite_schema") != 6
             or value.get("remote_mutation_enabled") is not False
             or not isinstance(value.get("source_commit"), str)
             or re.fullmatch(r"[0-9a-f]{40}", value["source_commit"]) is None

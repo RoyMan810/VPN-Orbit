@@ -18,7 +18,7 @@ def main():
     try:
         return subprocess.run(
             ["/usr/bin/sudo", "-n", "--", "/opt/vpn-orbit/venv/bin/vpn-orbit-app-helper"],
-            input=request, timeout=900, env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"},
+            input=request, timeout=910, env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"},
         ).returncode
     except (OSError, subprocess.SubprocessError):
         return 70

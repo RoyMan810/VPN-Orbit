@@ -51,6 +51,11 @@
 - Full Telegram Bot E2E needs a valid test bot token and administrator Telegram
   ID. No such credentials were supplied; generated fixture tokens cannot
   establish a real Telegram session. Independent product work continues.
+- PR #169 passed all required checks. Controller application drafts now require
+  Owner re-authentication, exact revision approval and durable enqueue. Worker
+  binds the payload to Authority and Broker and preserves UNKNOWN_OUTCOME
+  across reconciliation. New installations use schema 6; older development
+  databases are refused rather than migrated or overwritten.
 
 ## Release review
 

@@ -162,7 +162,7 @@ def application(target, private_key, known_hosts, request, *, operation="execute
         raise Denied("APP_POLICY_MISMATCH")
     try:
         return asyncio.run(asyncio.wait_for(
-            exchange_application(target, validate_private_key(private_key), known_hosts, request, operation=operation), 900))
+            exchange_application(target, validate_private_key(private_key), known_hosts, request, operation=operation), 920))
     except (asyncssh.Error, OSError, TimeoutError):
         raise Denied("SSH_APP_UNCONFIRMED") from None
 

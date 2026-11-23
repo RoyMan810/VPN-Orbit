@@ -139,12 +139,15 @@ def run(config, command, *, once=False, listener=None, import_args=None):
         return
     if command == "worker":
         worker = Worker(JobQueue(Store(config["database"], access=access, writers=writers)), Client(config["gate_socket"], server_uids={0}),
-                        Client(config["broker_socket"], server_uids={0, config["broker_uid"]}, timeout=160),
+                        Client(config["broker_socket"], server_uids={0, config["broker_uid"]},
+                               timeout=940 if any("apps.lifecycle" in t.value["capabilities"] for t in policy.targets.values()) else 160),
                         secret_refs={t.id: t.value["secret_ref"] for t in policy.targets.values()},
                         restart_refs={t.id: t.value["restart_secret_ref"] for t in policy.targets.values()
                                       if "docker.restart" in t.value["capabilities"]},
                         firewall_refs={t.id: t.value["firewall_secret_ref"] for t in policy.targets.values()
-                                       if "firewall.apply" in t.value["capabilities"]})
+                                       if "firewall.apply" in t.value["capabilities"]},
+                        application_refs={t.id: t.value["application_secret_ref"] for t in policy.targets.values()
+                                          if "apps.lifecycle" in t.value["capabilities"]})
         with worker_shutdown() as stop:
             return worker.run(once=once, stop=stop)
     managed_credential = "CREDENTIALS_DIRECTORY" in os.environ

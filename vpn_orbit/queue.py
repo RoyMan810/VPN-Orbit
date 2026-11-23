@@ -29,7 +29,7 @@ class JobQueue:
 
     @staticmethod
     def _schema(db):
-        if db.execute("PRAGMA user_version").fetchone()[0] != 5:
+        if db.execute("PRAGMA user_version").fetchone()[0] != 6:
             raise Denied("DATABASE_SCHEMA_UNSUPPORTED", 503)
 
     @staticmethod
@@ -56,12 +56,12 @@ class JobQueue:
         self._event(db, db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone(), "job.accepted")
 
     def enqueue_restart(self, db, job_id, actor, target, scope, policy_revision, plan_hash):
-        if db.execute("PRAGMA user_version").fetchone()[0] != 5:
+        if db.execute("PRAGMA user_version").fetchone()[0] != 6:
             raise Denied("DATABASE_SCHEMA_UNSUPPORTED", 503)
         self._enqueue_mutation(db, job_id, actor, target, scope, policy_revision, plan_hash, "docker.restart")
 
     def enqueue_firewall(self, db, job_id, actor, target, scope, policy_revision, plan_hash):
-        if db.execute("PRAGMA user_version").fetchone()[0] != 5:
+        if db.execute("PRAGMA user_version").fetchone()[0] != 6:
             raise Denied("DATABASE_SCHEMA_UNSUPPORTED", 503)
         self._enqueue_mutation(db, job_id, actor, target, scope, policy_revision, plan_hash, "firewall.apply")
 
@@ -146,7 +146,8 @@ class JobQueue:
         AuthService.require(db, row, permission, resource)
 
     def _authorize_job(self, db, row):
-        permission = {"docker.restart": "vps:restart", "firewall.apply": "vps:firewall"}.get(row["action"], "vps:probe")
+        permission = {"docker.restart": "vps:restart", "firewall.apply": "vps:firewall",
+                      "apps.lifecycle": "vps:apps"}.get(row["action"], "vps:probe")
         self._actor(db, row["actor_id"], row["resource_id"], permission)
 
     @staticmethod

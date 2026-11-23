@@ -2,20 +2,13 @@
   "application": "VPN-Orbit",
   "version": "0.1.0.dev1",
   "channel": "development",
-  "sqlite_schema": 5,
+  "sqlite_schema": 6,
   "sqlite_compatibility": {
     "authentication": [
-      1,
-      2,
-      3,
-      4,
-      5
+      6
     ],
     "observation_queue": [
-      2,
-      3,
-      4,
-      5
+      6
     ]
   },
   "password_profile": {

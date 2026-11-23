@@ -57,3 +57,23 @@ vpn-orbit-apps ALL=(root) NOPASSWD: /opt/vpn-orbit/venv/bin/vpn-orbit-app-helper
 The helper accepts bounded JSON on stdin. It accepts no path, command or Compose
 fragment. `import-application-key` in the host runtime CLI imports the distinct
 SSH credential; key rotation uses purpose `apps.lifecycle`.
+
+Controller uses schema 6 for application jobs and drafts. Existing development
+databases are not migrated automatically.
+
+The Owner API flow is:
+
+1. `POST /api/v1/resources/{resource}/application-drafts` with `installation_id`,
+   `spec_digest` and action `install`, `start` or `remove`.
+2. Re-authenticate against the returned `plan_hash`, then POST the re-authentication
+   ID to `/api/v1/change-plans/{draft}/application-approval` with `If-Match`.
+3. POST its `approval_id` to the draft's `/application-execution-requests`.
+   Repeating that request returns the same durable job.
+4. Read `/api/v1/jobs/{job}` and `/api/v1/jobs/{job}/timeline`.
+5. For an unknown result, POST an empty object to
+   `/api/v1/jobs/{job}/application-reconciliations/{attempt}`. Up to three
+   sequential readback attempts are allowed. The original job remains
+   `UNKNOWN_OUTCOME`; a separate audit event records resolution.
+
+These operations require the normal HTTPS/Origin/CSRF controls. Product secrets
+stay on the managed host, outside API payloads and audit events.
