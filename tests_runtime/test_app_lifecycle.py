@@ -7,8 +7,8 @@ import unittest
 from unittest.mock import patch
 
 from test_app_profiles import specification
-from vpn_orbit.app_lifecycle import Lifecycle
-from vpn_orbit.app_profiles import digest
+from vpn_orbit.app_lifecycle import Lifecycle, managed_contents
+from vpn_orbit.app_profiles import PANEL_CA_FILE, digest
 from vpn_orbit.errors import Denied
 from vpn_orbit.runtime.storage import Journal
 
@@ -173,3 +173,10 @@ class LifecycleTests(unittest.TestCase):
                 self.docker.calls.clear()
                 self.app.acquire_image(reference)
                 self.assertEqual(any(call[0] == "pull" for call in self.docker.calls), pull)
+
+    def test_private_panel_ca_preserves_public_trust_roots(self):
+        system = b"-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----\n"
+        private = "-----BEGIN CERTIFICATE-----\nprivate\n-----END CERTIFICATE-----\n"
+        with patch("vpn_orbit.app_lifecycle.protected_bytes", return_value=system) as read:
+            self.assertEqual(managed_contents(PANEL_CA_FILE, private), system + private.encode())
+            self.assertEqual(read.call_args.kwargs["owner"], 0)
