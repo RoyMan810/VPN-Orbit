@@ -113,12 +113,24 @@
   restart, shared-network and drift refusal, and exact-ID removal preserving
   volume and network identities. The original disk and pinned SSH were verified,
   and the temporary disk holding test credentials was removed.
-- The staging VM is on a private libvirt NAT network. No Telegram-reachable
-  HTTPS origin has been provided for inbound webhook delivery. The typed
-  webhook profile requires that origin and a secret. On staging the pinned
-  Bot rejected missing and incorrect secrets and invalid payloads. It handed
-  a valid synthetic update to the webhook processor. Telegram delivery to the
-  staging origin remains a release gate.
+- A separate disposable application guest was booted on a private libvirt
+  NAT network from a prior staging acceptance disk. The existing Controller
+  stayed online at `192.168.122.244`. Separate guests isolate the test from
+  Controller state, Docker and network configuration. The typed application
+  lifecycle itself can run on any prepared managed Docker host.
+- A temporary Cloudflare Quick Tunnel reached the application guest's
+  loopback webhook proxy over HTTPS. The public probe verified `401` for a
+  missing or incorrect secret and `404` for other methods and paths. The proxy
+  forwards accepted `POST /webhook` requests only to Bedolaga's
+  `127.0.0.1:8080` listener. The pinned Bot had previously passed synthetic
+  receiver checks, including invalid payload rejection and update handoff.
+  The live Telegram delivery gate is tracked in the acceptance matrix.
+- On the separate guest, one typed Bot installation reached `HEALTHY` in
+  webhook mode with PostgreSQL migrations and Redis checks passing, but the
+  subsequent Telegram API read timed out. Typed removal preserved its data.
+  A fresh attempt reached healthy PostgreSQL and Redis but left the Bot
+  unhealthy and the operation in `UNKNOWN_OUTCOME`. It was not replayed.
+  The Quick Tunnels were stopped; registration and delivery are not verified.
 - The application SSH staging fixture passed a queued install with a fresh
   Worker and a crash after starting a stopped Panel. Reopening Authority,
   Broker and Worker journals left the job in `UNKNOWN_OUTCOME` until readback.
