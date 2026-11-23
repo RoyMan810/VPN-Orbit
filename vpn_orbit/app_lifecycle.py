@@ -315,15 +315,20 @@ class Lifecycle:
             with self.journal.write() as db:
                 db.execute("""INSERT INTO operations(id,action,binding,state,code)
                               VALUES(?,?,?,'DISPATCHING','APP_PENDING')""", (operation, action, binding))
+            unverified = "APP_EFFECT_UNVERIFIED"
             try:
                 if current is None:
+                    unverified = "APP_IMAGE_PULL_UNVERIFIED"
                     for image in sorted(set(spec["images"].values())):
                         self.docker("pull", "--platform", "linux/amd64", image, timeout=600)
+                    unverified = "APP_COMPOSE_CREATE_UNVERIFIED"
                     self.compose(document, "create", "--no-build", "--pull", "never")
+                    unverified = "APP_INVENTORY_UNVERIFIED"
                     current = self.inventory(document)
                     with self.journal.write() as db:
                         db.execute("UPDATE installation SET inventory=? WHERE id=1", (canonical(current).decode(),))
                     installation["inventory"] = canonical(current).decode()
+                    unverified = "APP_EFFECT_UNVERIFIED"
                 if action == "remove":
                     # Stop and remove only recorded full container IDs. Never execute
                     # compose down, delete volumes, or delete a shared network.
@@ -345,7 +350,7 @@ class Lifecycle:
                         refuse("APP_HEALTH_UNVERIFIED")
                 return self.finish(operation, "SUCCEEDED", "APP_REMOVED_DATA_PRESERVED" if action == "remove" else "APP_HEALTH_VERIFIED")
             except Exception:
-                return self.finish(operation, "UNKNOWN_OUTCOME", "APP_EFFECT_UNVERIFIED")
+                return self.finish(operation, "UNKNOWN_OUTCOME", unverified)
 
     def reconcile(self, operation):
         if not isinstance(operation, str) or re.fullmatch(ULID, operation) is None:
