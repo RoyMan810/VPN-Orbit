@@ -3,7 +3,8 @@
 ## Current state
 
 - Release-review baseline: `4c4f1bde222248da7c572572572a9a2718391395` (PR #156).
-- Last verified main before the application WebUI PR: `df9315c9c0886b8849bcc474136171a41f357149`.
+- Release-review checkpoint `f57cb55e3d00fe1034286dfadbe95d4e371064e8`
+  includes PRs #172 and #173.
 - P0 removal of excluded backup, rescue, activation, self-update, stage0, and recovery installation functionality is complete.
 - The dedicated disposable Ubuntu VM is the only server used for staging.
 - `v1.0.0` release acceptance is incomplete.
@@ -65,10 +66,22 @@
 - PR #171 passed CI run `45207718030`. The staging SSH run reached the helper
   and returned `UNKNOWN_OUTCOME / APP_EFFECT_UNVERIFIED`. Inspection found no
   containers or journaled inventory. The original VM disk was restored.
-- The application WebUI provides scoped Owner controls for draft review,
+- PR #172 added scoped Owner controls in the WebUI for draft review,
   re-authentication, approval, enqueue retry after reload, and reconciliation.
-  The next staging work is to identify the SSH failure phase and verify Bot
-  and Cabinet startup with real dependencies.
+  All 14 PR checks passed. The subsequent main workflows also passed.
+- A clean staging repeat stalled on the pinned PostgreSQL image pull for
+  roughly ten minutes. Inspection found no cached images, no containers and no
+  recorded inventory. An isolated pull of the same digest worked on a prior
+  overlay after reboot. The original VM disk and pinned SSH access were
+  verified after both scenarios.
+- PR #173 added separate safe codes for unverified image pull, Compose create
+  and inventory capture. All 14 PR checks passed. The operation remains
+  quarantined when effects cannot be verified.
+- Next staging gates are the forced-command lifecycle with stable registry
+  downloads and product-backed Bot/Cabinet acceptance. The staging VM reached
+  Docker Hub and GHCR over HTTPS, but subsequent digest-pinned downloads for
+  PostgreSQL, Bot and Cabinet timed out. The original disk and pinned SSH were
+  restored. Connecting to the Telegram API also timed out.
 
 ## Release review
 
