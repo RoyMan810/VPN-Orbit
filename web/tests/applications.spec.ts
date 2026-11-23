@@ -65,5 +65,7 @@ test('application controls require the actual resource permission', async ({ pag
     await route.fulfill({ response, json: value })
   })
   await login(page)
+  await expect(page.getByText('fixture / web', { exact: true })).toBeVisible()
   await expect(page.getByRole('region', { name: 'Applications', exact: true })).toHaveCount(0)
+  await page.unrouteAll({ behavior: 'wait' })
 })
