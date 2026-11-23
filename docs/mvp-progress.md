@@ -3,6 +3,7 @@
 ## Current state
 
 - Release-review baseline: `4c4f1bde222248da7c572572572a9a2718391395` (PR #156).
+- Last verified main before the application WebUI PR: `df9315c9c0886b8849bcc474136171a41f357149`.
 - P0 removal of excluded backup, rescue, activation, self-update, stage0, and recovery installation functionality is complete.
 - The dedicated disposable Ubuntu VM is the only server used for staging.
 - `v1.0.0` release acceptance is incomplete.
@@ -48,9 +49,9 @@
   allowlist, dedicated Vault key purpose and bounded forced SSH gateway.
   Authority/Broker tests check scope refusal, key separation, lost replies
   and receipt-bound reconciliation. Controller enqueue integration is next.
-- Full Telegram Bot E2E needs a valid test bot token and administrator Telegram
-  ID. No such credentials were supplied; generated fixture tokens cannot
-  establish a real Telegram session. Independent product work continues.
+- Test Telegram credentials are available. The test VM and host could not
+  reach the Telegram API during the `getMe` check, so token validity and live
+  Telegram acceptance are pending.
 - PR #169 passed all required checks. Controller application drafts now require
   Owner re-authentication, exact revision approval and durable enqueue. Worker
   binds the payload to Authority and Broker and preserves UNKNOWN_OUTCOME
@@ -61,6 +62,13 @@
   Panel through the Controller queue, Authority and Broker, including a lost
   SSH reply, readback and removal. TimeHealth is explicitly deterministic in
   this fixture; native daemon and clock-fault acceptance remain separate.
+- PR #171 passed CI run `45207718030`. The staging SSH run reached the helper
+  and returned `UNKNOWN_OUTCOME / APP_EFFECT_UNVERIFIED`. Inspection found no
+  containers or journaled inventory. The original VM disk was restored.
+- The application WebUI provides scoped Owner controls for draft review,
+  re-authentication, approval, enqueue retry after reload, and reconciliation.
+  The next staging work is to identify the SSH failure phase and verify Bot
+  and Cabinet startup with real dependencies.
 
 ## Release review
 
@@ -122,11 +130,8 @@
   survived a Compose restart. The teardown script used an incorrect XML path.
   Restoring the saved domain definition manually brought back the original
   staging disk, pinned SSH, and HTTPS health.
-- `v1.0.0` blockers include product-backed staging for all four Compose profiles,
-  ownership-verified removal with shared-resource preservation, and staging
-  end-to-end and fault acceptance. The [acceptance matrix](mvp-acceptance.md)
-  identifies the Node network and Bot dependency gaps. Closing these gates
-  requires a product-backed deployment path and ownership-verified removal.
+- The [acceptance matrix](mvp-acceptance.md) tracks the remaining `v1.0.0`
+  product staging and fault scenarios.
 
 ## Completed
 

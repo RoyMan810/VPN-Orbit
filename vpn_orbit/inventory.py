@@ -91,7 +91,8 @@ class Inventory:
         if not row['enabled']:
             status, reason = 'UNKNOWN', 'RESOURCE_DISABLED'
         permissions = {}
-        for name, permission in (('probe', 'vps:probe'), ('restart', 'vps:restart'), ('firewall', 'vps:firewall')):
+        for name, permission in (('probe', 'vps:probe'), ('restart', 'vps:restart'), ('firewall', 'vps:firewall'),
+                                 ('applications', 'vps:apps')):
             try:
                 AuthService.require(db, actor, permission, row['id'])
             except Denied:

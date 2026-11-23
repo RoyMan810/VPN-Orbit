@@ -12,6 +12,7 @@ import { Audit } from './audit'
 import { readRestartHash, restartHash, RestartTimeline } from './restart-timeline'
 import { TimeZone } from './time-zone'
 import { FirewallPlan } from './firewall-plan'
+import { ApplicationPlan } from './application-plan'
 import './style.css'
 
 type Theme = 'system' | 'light' | 'dark'
@@ -180,6 +181,8 @@ function Detail({ resource, t, lang, now, expired, session }: {
     </div>}
     {resource.permissions.firewall && session.user.role === 'Owner' &&
       <FirewallPlan key={resource.id} resourceId={resource.id} csrf={session.csrf_token} t={t} expired={expired}/>}
+    {resource.permissions.applications && session.user.role === 'Owner' &&
+      <ApplicationPlan key={`apps-${resource.id}`} resourceId={resource.id} session={session} expired={expired} russian={lang === 'ru'}/>}
   </>
 }
 

@@ -61,7 +61,11 @@ SSH credential; key rotation uses purpose `apps.lifecycle`.
 Controller uses schema 6 for application jobs and drafts. Existing development
 databases are not migrated automatically.
 
-The Owner API flow is:
+In WebUI, open the VPS and use **Applications** to review and approve a
+prepared installation. The browser remembers the approved revision and job
+ID across reloads, but does not store the re-authentication password.
+
+The equivalent Owner API flow is:
 
 1. `POST /api/v1/resources/{resource}/application-drafts` with `installation_id`,
    `spec_digest` and action `install`, `start` or `remove`.
@@ -69,7 +73,7 @@ The Owner API flow is:
    ID to `/api/v1/change-plans/{draft}/application-approval` with `If-Match`.
 3. POST its `approval_id` to the draft's `/application-execution-requests`.
    Repeating that request returns the same durable job.
-4. Read `/api/v1/jobs/{job}` and `/api/v1/jobs/{job}/timeline`.
+4. Read `/api/v1/jobs/{job}` and `/api/v1/jobs/{job}/application-timeline`.
 5. For an unknown result, POST an empty object to
    `/api/v1/jobs/{job}/application-reconciliations/{attempt}`. Up to three
    sequential readback attempts are allowed. The original job remains

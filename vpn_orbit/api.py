@@ -582,6 +582,11 @@ def create_app(settings: Settings, *, auth: AuthService | None = None, enrollmen
         with service.store.write() as db:
             return applications.reconcile(db, queue, service, token(request), csrf(request), job_id, attempt)
 
+    @app.get("/api/v1/jobs/{job_id}/application-timeline")
+    def application_timeline(job_id: str, request: Request, actor=Depends(principal)):
+        with service.store.read() as db:
+            return applications.timeline(db, queue, service, token(request), job_id)
+
     @app.get("/api/v1/jobs/{job_id}")
     def get_job(job_id: str, request: Request, response: Response, actor=Depends(principal)):
         value, current = queue.get(service, token(request), job_id)

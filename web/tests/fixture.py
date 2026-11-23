@@ -106,6 +106,11 @@ def fixture(directory):
         with store.write() as db:
             db.execute("DELETE FROM api_calls")
 
+    @app.post("/__fixture__/reset-reauth-budget", status_code=204)
+    def reset_reauth_budget():
+        with store.write() as db:
+            db.execute("DELETE FROM critical_attempts")
+
     @app.post("/__fixture__/restarts/{draft_id}/unknown", status_code=204)
     def report_unknown_restart(draft_id: str):
         with store.read() as db:

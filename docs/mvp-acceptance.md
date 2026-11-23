@@ -36,14 +36,15 @@ Status date: November 23, 2026
 | Resource-level permissions | API projection, browser controls, CI | PASS |
 | Typed firewall WebUI and reconciliation | Browser tests, runtime rollback/reconciliation tests | PASS |
 | Staging fault acceptance with a managed target | Loss before and after dispatch, reconciliation, idempotency replay, firewall rollback and typed Docker restart have disposable CI coverage. The staging Controller was installed with an empty target policy | PENDING |
-| Typed optional Compose profiles | Synthetic catalog, selection renderer and fragment diagnostics. Docker Compose v5.8.0 validated the generated `services` and `networks` on staging | FIXTURE PASS |
-| Existing Compose installations and protected removal | Runtime ownership, fresh Docker evidence and preservation of shared resources still require acceptance | BLOCKED |
-| Remnawave Panel/Node and Bedolaga Bot/Cabinet | Examples use placeholder images. The Node profile has no network, while [upstream Node deployment](https://github.com/remnawave/node/blob/c1f083cab84b05ae2bb01d854248402d6073952d/docker-compose-prod.yml) uses host networking. The Bot profile lacks the PostgreSQL and Redis services declared by the [upstream Bot deployment](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/blob/dcefef9704311f97016257890df45ec181d0840c/docker-compose.yml). Product-backed installation and health checks are pending | BLOCKED |
+| Remnawave Panel | Staging passed API health, idempotent replay, loss of the start reply, executor restart, reconciliation, shared network refusal, and exact-ID removal with volume and network retention | PASS |
+| Remnawave Node | CI and staging passed host networking, TLS 1.3, mutual TLS enforcement, health and exact-ID removal | PASS |
+| Application Controller-to-host SSH | Real Panel effects, lost SSH reply and reconciliation passed CI run `45207718030`. Staging returned `UNKNOWN_OUTCOME / APP_EFFECT_UNVERIFIED` before recording inventory | PENDING |
+| Bedolaga Bot and Cabinet | Typed profiles include PostgreSQL, Redis and Cabinet API proxy configuration. Product startup and live Telegram acceptance are pending. The staging VM could not reach the Telegram API during `getMe` | PENDING |
+| Existing Compose installations | Fragment comparison and labels support manual review. The managed removal executor requires a journal of Docker identities from a VPN-Orbit installation | MANUAL |
 
 ## Remaining Boundary
 
 The recorded checks cover the controller and the disposable test scenarios listed
-above. The `v1.0.0` gate also requires product-backed staging and ownership-verified
-Compose removal. Compose fragment comparison and matching labels support manual
-review. They provide no authorization to delete resources. Production readiness
-requires a separate decision.
+above. The `v1.0.0` gate requires the remaining product-backed staging,
+reconciliation and removal scenarios to pass. Production readiness requires
+a separate decision.
