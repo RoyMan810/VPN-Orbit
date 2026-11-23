@@ -27,6 +27,7 @@ class FixtureDocker:
         self.networks = {}
         self.calls = []
         self.lost_start_reply = False
+        self.images = {}
 
     def __call__(self, kind, verb, *rest, **options):
         self.calls.append((kind, verb, *rest))
@@ -51,7 +52,7 @@ class FixtureDocker:
         entries = {"container": self.containers, "volume": self.volumes, "network": self.networks}
         if verb == "inspect":
             if kind == "image":
-                return json.dumps([{"Id": "sha256:" + "5" * 64}])
+                return json.dumps([{"Id": "sha256:" + "5" * 64, **self.images.get(rest[0], {})}])
             return json.dumps([entries[kind][rest[0]]])
         if verb == "ls":
             if kind == "container" and "--filter" in rest:
@@ -156,3 +157,19 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.app.execute(INSTALL, "install", self.binding), receipt)
         self.assertEqual(self.app.reconcile(INSTALL)["code"], "APP_QUARANTINED")
         self.assertFalse(any(call[0] == "compose" for call in self.docker.calls))
+
+    def test_only_the_exact_pinned_platform_image_can_skip_pull(self):
+        reference = self.spec["images"]["postgres"]
+        short = reference.removeprefix("docker.io/library/")
+        cases = (
+            ({"Os": "linux", "Architecture": "amd64", "RepoDigests": [short]}, False),
+            ({"Os": "linux", "Architecture": "arm64", "RepoDigests": [short]}, True),
+            ({"Os": "linux", "Architecture": "amd64", "RepoDigests": [short[:-64] + "f" * 64]}, True),
+            ({"Os": "linux", "Architecture": "amd64"}, True),
+        )
+        for image, pull in cases:
+            with self.subTest(image=image):
+                self.docker.images[reference] = image
+                self.docker.calls.clear()
+                self.app.acquire_image(reference)
+                self.assertEqual(any(call[0] == "pull" for call in self.docker.calls), pull)

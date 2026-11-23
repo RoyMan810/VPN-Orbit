@@ -145,6 +145,26 @@ class Lifecycle:
             refuse("APP_INSPECT_INVALID")
         return values[0]
 
+    def acquire_image(self, reference):
+        repository, pin = reference.split("@", 1)
+        # Docker may omit the canonical Docker Hub prefix in RepoDigests.
+        aliases = {reference}
+        if repository.startswith("docker.io/"):
+            short = repository.removeprefix("docker.io/")
+            aliases.add(short + "@" + pin)
+            if short.startswith("library/"):
+                aliases.add(short.removeprefix("library/") + "@" + pin)
+        try:
+            image = self.inspect("image", reference)
+        except Denied as error:
+            if error.code != "APP_DOCKER_FAILED":
+                raise
+        else:
+            if (image.get("Os") == "linux" and image.get("Architecture") == "amd64"
+                    and aliases.intersection(image.get("RepoDigests") or ())):
+                return
+        self.docker("pull", "--platform", "linux/amd64", reference, timeout=600)
+
     @staticmethod
     def stable(container):
         # Runtime counters, PIDs and health transitions are intentionally excluded.
@@ -320,7 +340,7 @@ class Lifecycle:
                 if current is None:
                     unverified = "APP_IMAGE_PULL_UNVERIFIED"
                     for image in sorted(set(spec["images"].values())):
-                        self.docker("pull", "--platform", "linux/amd64", image, timeout=600)
+                        self.acquire_image(image)
                     unverified = "APP_COMPOSE_CREATE_UNVERIFIED"
                     self.compose(document, "create", "--no-build", "--pull", "never")
                     unverified = "APP_INVENTORY_UNVERIFIED"

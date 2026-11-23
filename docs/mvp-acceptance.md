@@ -38,8 +38,8 @@ Status date: November 23, 2026
 | Staging fault acceptance with a managed target | Loss before and after dispatch, reconciliation, idempotency replay, firewall rollback and typed Docker restart have disposable CI coverage. The staging Controller was installed with an empty target policy | PENDING |
 | Remnawave Panel | Staging passed API health, idempotent replay, loss of the start reply, executor restart, reconciliation, shared network refusal, and exact-ID removal with volume and network retention | PASS |
 | Remnawave Node | CI and staging passed host networking, TLS 1.3, mutual TLS enforcement, health and exact-ID removal | PASS |
-| Application Controller-to-host SSH | Real Panel effects, lost SSH reply and reconciliation passed CI runs `45207718030` and `45228644739`. A clean staging run timed out pulling the pinned PostgreSQL image before recording inventory | PENDING |
-| Bedolaga Bot and Cabinet | Typed profiles include PostgreSQL, Redis and Cabinet API proxy configuration. Pinned image downloads and Telegram API connections timed out on staging. Product startup and live Telegram acceptance are not verified | PENDING |
+| Application Controller-to-host SSH | CI runs `45207718030` and `45228644739`. The disposable staging fixture passed the real SSH install, lost start reply, readback and removal with exact digest images already present | PASS |
+| Bedolaga Bot and Cabinet | Both pinned images downloaded on staging. Telegram `getMe` confirmed the test token. Product lifecycle, live Telegram interactions and webhook delivery are pending | PENDING |
 | Existing Compose installations | Fragment comparison and labels support manual review. The managed removal executor requires a journal of Docker identities from a VPN-Orbit installation | MANUAL |
 
 ## Remaining Boundary

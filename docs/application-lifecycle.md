@@ -20,6 +20,10 @@ the approved managed host. It receives no Docker socket or general host bind.
 Other services publish their application ports only on loopback.
 
 Images must be SHA-256 pinned references from the allowed upstream repositories.
+The executor can reuse an image already present for the exact repository digest
+and `linux/amd64` platform. Administrators can pull those same digest references
+before approving an installation to separate registry access from application
+execution.
 Each installation has its own project, network and data volumes. Generated
 labels bind resources to its ID, specification digest and private ownership
 token. Labels alone do not authorize deletion. Live ownership and drift checks
