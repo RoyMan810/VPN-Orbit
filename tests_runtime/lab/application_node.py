@@ -8,9 +8,11 @@ import socket
 import ssl
 import subprocess
 import tempfile
+import traceback
 
 from vpn_orbit.app_lifecycle import Lifecycle, ROOT
 from vpn_orbit.app_profiles import digest
+from vpn_orbit.errors import Denied
 
 
 IDENTITY = "01JCYQZ4T9V8MNVYEH3D2M7Q1N"
@@ -76,8 +78,12 @@ def main():
         raise SystemExit("Requires a disposable GitHub-hosted VM")
     try:
         node_acceptance()
-    except Exception:
+    except Exception as error:
         subprocess.run(["docker", "ps", "--all", "--format", "{{.Names}} {{.Status}}"], check=False)
+        frames = traceback.extract_tb(error.__traceback__)
+        sites = ",".join(f"{Path(frame.filename).name}:{frame.lineno}" for frame in frames)
+        code = error.code if isinstance(error, Denied) else type(error).__name__
+        print(f"Node acceptance diagnostic {code} at {sites}", flush=True)
         raise SystemExit("Node product acceptance failed") from None
 
 
