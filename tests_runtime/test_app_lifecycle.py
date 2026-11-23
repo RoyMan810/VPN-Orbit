@@ -142,3 +142,17 @@ class LifecycleTests(unittest.TestCase):
             with self.assertRaisesRegex(Denied, "APP_CONFIG_DRIFT"):
                 self.app.execute(INSTALL, "install", self.binding)
         self.assertEqual(self.docker.calls, [])
+
+    def test_image_pull_failure_reports_phase_and_stays_quarantined(self):
+        def fail_pull(kind, *args, **options):
+            if kind == "pull":
+                raise Denied("APP_DOCKER_FAILED")
+            return self.docker(kind, *args, **options)
+
+        self.app.docker = fail_pull
+        receipt = self.app.execute(INSTALL, "install", self.binding)
+        self.assertEqual((receipt["outcome"], receipt["code"]), ("UNKNOWN_OUTCOME", "APP_IMAGE_PULL_UNVERIFIED"))
+        self.app.docker = self.docker
+        self.assertEqual(self.app.execute(INSTALL, "install", self.binding), receipt)
+        self.assertEqual(self.app.reconcile(INSTALL)["code"], "APP_QUARANTINED")
+        self.assertFalse(any(call[0] == "compose" for call in self.docker.calls))
