@@ -199,6 +199,18 @@ def report(installation, *, directory=Path('/var/backups/vpn-orbit')):
                          if (backup.DATA / 'restore.pending').exists() else
                          {'status': 'WARNING', 'code': 'RESTORE_QUARANTINE'}
                          if checks['admission']['code'] == 'READ_ONLY_RECOVERY' else {'status': 'NO_DATA', 'code': 'NO_RESTORE_REPORTED'})
+    if checks['restore']['status'] == 'NO_DATA':
+        try:
+            restored = json.loads(protected_bytes(backup.DATA / 'restored.json', owner=0, exact_mode=0o600))
+            if restored.get("v") != 1 or not backup.SHA256.fullmatch(restored["archive_sha256"]):
+                raise ValueError
+            checks['restore'] = ({'status': 'OK', 'code': 'RESTORE_ACTIVATED'}
+                                 if checks['admission']['code'] == 'OPEN' else
+                                 {'status': 'WARNING', 'code': 'RESTORE_APPLIED'})
+        except FileNotFoundError:
+            pass
+        except (OSError, Denied, ValueError, KeyError, TypeError):
+            checks['restore'] = {'status': 'UNAVAILABLE', 'code': 'RESTORE_STATE_UNAVAILABLE'}
     transaction = backup.APP / 'upgrade-1.1.0/transaction.json'
     try:
         update = json.loads(protected_bytes(transaction, owner=0, exact_mode=0o600))
@@ -207,7 +219,8 @@ def report(installation, *, directory=Path('/var/backups/vpn-orbit')):
                  'COMMITTING', 'ROLLING_BACK', 'FAILED_SAFE', 'ROLLED_BACK', 'COMPLETE'}
         if phase not in known:
             raise ValueError
-        checks['update'] = {'status': 'OK' if phase == 'COMPLETE' else 'WARNING', 'code': 'UPDATE_' + phase}
+        status = {'COMPLETE': 'OK', 'FAILED_SAFE': 'ERROR'}.get(phase, 'WARNING')
+        checks['update'] = {'status': status, 'code': 'UPDATE_' + phase}
     except FileNotFoundError:
         checks['update'] = {'status': 'NO_DATA', 'code': 'NO_UPDATE_REPORTED'}
     except (OSError, Denied, ValueError, KeyError, TypeError):
