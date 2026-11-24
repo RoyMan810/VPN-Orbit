@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from nacl.secret import Aead
+
 from vpn_orbit.admission import Admission
 from vpn_orbit.database import Store, identifier
 from vpn_orbit.errors import Denied
@@ -13,11 +15,41 @@ from vpn_orbit.queue import JobQueue
 from vpn_orbit.runtime.authority import Authority
 from vpn_orbit.runtime.broker import Broker
 from vpn_orbit.runtime.policy import Policy
-from vpn_orbit.runtime.recovery import quarantine_state, swap_entries
+from vpn_orbit.runtime.protocol import canonical, checksum
+from vpn_orbit.runtime.recovery import quarantine_state, remap_vault, swap_entries
+from vpn_orbit.runtime.vault import Vault
 from vpn_orbit.worker import Worker
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_portable_vault_rewraps_consumer_binding_for_destination_uid(self):
+        import hashlib
+        import json
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            key = bytes(range(32))
+            credential = root / "dek"
+            credential.write_bytes(key)
+            credential.chmod(0o600)
+            vault = Vault.initialize(root / "vault", credential)
+            consumer = 24001
+            info = {"allowed_consumers": [consumer], "allowed_consumers_digest": checksum([consumer])}
+            old = bytes(Aead(key).encrypt(b"fixture-content", canonical(info)))
+            digest = hashlib.sha256(old).hexdigest()
+            (vault.directory / "objects" / digest).write_bytes(old)
+            with vault.journal.write() as db:
+                db.execute("INSERT INTO secrets VALUES ('fixture', ?, ?, 'ACTIVE')", (canonical(info).decode(), digest))
+            remap_vault(vault.directory, key, {"worker_uid": consumer, "broker_uid": 24002},
+                        {"worker_uid": 23001, "broker_uid": 23002})
+            with vault.journal.connect() as db:
+                row = db.execute("SELECT metadata,object_digest FROM secrets").fetchone()
+            updated = json.loads(row["metadata"])
+            self.assertEqual(updated, {"allowed_consumers": [23001], "allowed_consumers_digest": checksum([23001])})
+            self.assertFalse((vault.directory / "objects" / digest).exists())
+            restored = (vault.directory / "objects" / row["object_digest"]).read_bytes()
+            self.assertEqual(Aead(key).decrypt(restored, canonical(updated)), b"fixture-content")
+
     def test_quarantine_preserves_incidents_and_audit_without_dispatch(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

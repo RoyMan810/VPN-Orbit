@@ -94,6 +94,58 @@ def owner_create():
         os.close(master)
 
 
+def portable_stage(root, archive, identity, digest, cfg):
+    isolated = root / "target"
+    isolated.mkdir(mode=0o700)
+    (isolated / "systemd").mkdir(mode=0o700)
+    (isolated / "recovery").mkdir(mode=0o700)
+    machine = isolated / "machine-id"
+    machine.write_text(secrets.token_hex(16) + "\n")
+    program = r"""
+from pathlib import Path
+import json, sqlite3, subprocess, sys
+from vpn_orbit.runtime.credentials import unseal_credential
+from vpn_orbit.errors import Denied
+root, archive, identity, digest, original = sys.argv[1:]
+root = Path(root)
+def mount(source, target):
+    subprocess.run(['/usr/bin/mount', '--bind', source, target], check=True)
+mount(root/'systemd', '/var/lib/systemd')
+mount(root/'machine-id', '/etc/machine-id')
+mount(root/'recovery', '/var/lib/vpn-orbit-recovery')
+subprocess.run(['/usr/bin/systemd-creds', 'setup'], check=True, capture_output=True)
+try:
+    unseal_credential(original)
+except Denied:
+    pass
+else:
+    raise AssertionError('original systemd credential works on the destination')
+admin = '/opt/vpn-orbit/admin'
+result = subprocess.run([admin, 'restore-stage', '--archive', archive, '--identity', identity, '--sha256', digest],
+                        check=True, capture_output=True)
+report = json.loads(result.stdout)
+assert report['status'] == 'STAGED_READ_ONLY'
+target = Path('/var/lib/vpn-orbit-recovery') / report['directory']
+key = unseal_credential(target/'credentials/broker-dek.cred')
+from nacl.secret import Aead
+from vpn_orbit.runtime.protocol import canonical
+with sqlite3.connect(target/'vault/vault.sqlite3') as db:
+    metadata, obj = db.execute("SELECT metadata, object_digest FROM secrets").fetchone()
+    value = Aead(key).decrypt((target/'vault/objects'/obj).read_bytes(), canonical(json.loads(metadata)))
+    assert value.startswith(b'-----BEGIN OPENSSH PRIVATE KEY-----')
+from vpn_orbit.runtime.credentials import unseal_credential
+from nacl.signing import SigningKey
+signer = SigningKey(unseal_credential(target/'credentials/authority.cred', name='restore-authority-key'))
+assert bytes(signer.verify_key) == (target/'config/gate.pub').read_bytes()
+print('PORTABLE_KEYS_VERIFIED_WITH_NEW_MACHINE_AND_HOST_KEY')
+"""
+    observed = run("/usr/bin/unshare", "--mount", "--propagation", "private",
+                   "/opt/vpn-orbit/venv/bin/python", "-c", program,
+                   isolated, archive, identity, digest, cfg["vault_credential"], timeout=30)
+    assert observed.stdout.strip() == b"PORTABLE_KEYS_VERIFIED_WITH_NEW_MACHINE_AND_HOST_KEY"
+    print("Restore staging resealed both keys in an isolated destination machine-ID and systemd-key domain.", flush=True)
+
+
 def controller_backup(age_keygen, cfg, docker_host):
     admin = "/opt/vpn-orbit/admin"
     age = "/opt/vpn-orbit/tools/age"
@@ -147,6 +199,7 @@ v.import_ssh('01JCYQZ4T9V8MNVYEH3D2M7Q1C',1,Path(sys.argv[1]).read_bytes(),owner
         print("Live controller backup preserved Owner and authenticated a provisioned Vault object; offline age verification passed.", flush=True)
         digest = result["sha256"]
         Path("/var/lib/vpn-orbit-recovery").mkdir(mode=0o700)
+        portable_stage(root, archive, identity, digest, cfg)
         staged = json.loads(run(admin, "restore-stage", "--archive", archive, "--identity", identity, "--sha256", digest).stdout)
         assert staged["status"] == "STAGED_READ_ONLY"
         assert not (Path("/var/lib/vpn-orbit-recovery") / staged["directory"] / "control-gate/signing.key").exists()
