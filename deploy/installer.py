@@ -551,6 +551,11 @@ def main(argv=None):
         restore.add_argument("--resume", action="store_true", help="Resume an interrupted restore of this exact archive")
         restore.add_argument("--confirm-replace", action="store_true", required=True,
                              help="Confirm local replacement and retain the previous state for review")
+        commands.add_parser("activation-review", help="Print the binding for independently verified fencing evidence")
+        activate = commands.add_parser("activate", help="Activate a recovered controller after fencing and Owner confirmation")
+        activate.add_argument("--report", type=Path, required=True)
+        activate.add_argument("--owner", required=True)
+        activate.add_argument("--confirm", action="store_true", required=True)
         schema = commands.add_parser("schema-check", help="Review all installed data contracts without modifying databases")
         schema.add_argument("--target-schema", type=int, help="Expected SQLite schema of the candidate release")
         commands.add_parser("release-check", help="Look up the latest stable public GitHub release without installing it")
@@ -582,6 +587,20 @@ def main(argv=None):
             from vpn_orbit.runtime.recovery import install as restore_install
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
             print(json.dumps(restore_install(args.sha256, docker_host=load_installation()["docker_host"], resume=args.resume)))
+        elif args.command in {"activation-review", "activate"}:
+            import resource
+            from vpn_orbit.runtime.activation import activate, review
+            from vpn_orbit.runtime.backup import secure_directory
+            from vpn_orbit.runtime.cli import configuration
+            from vpn_orbit.runtime.storage import protected_bytes
+            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+            cfg = configuration(CONFIG / "runtime.json")
+            if args.command == "activation-review":
+                print(json.dumps(review(cfg)))
+            else:
+                secure_directory(args.report.absolute().parent)
+                report = json.loads(protected_bytes(args.report, owner=0, exact_mode=0o600, maximum=65536))
+                print(json.dumps(activate(cfg, report, args.owner, getpass.getpass("Owner password: "))))
         elif args.command == "schema-check":
             from vpn_orbit.runtime.cli import configuration
             from vpn_orbit.runtime.data_contract import inspect
@@ -599,6 +618,7 @@ def main(argv=None):
         from_code = getattr(error, "code", None)
         category = {"backup": "BACKUP", "backup-verify": "BACKUP", "diagnose": "DIAGNOSTICS",
                     "release-check": "UPDATE", "update-check": "UPDATE",
+                    "activation-review": "ACTIVATION", "activate": "ACTIVATION",
                     "restore-stage": "RESTORE", "restore-apply": "RESTORE"}.get(args.command, "INSTALLATION")
         code = str(error) if isinstance(error, ArtifactError) else from_code or category + "_UNAVAILABLE"
         print("VPN-Orbit: " + code, file=sys.stderr)

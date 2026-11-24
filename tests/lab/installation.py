@@ -254,6 +254,22 @@ else:
         assert checks["restore"]["code"] == "RESTORE_QUARANTINE"
         assert checks["https"]["status"] == "NO_DATA"  # Lab proxy is not an installed web service.
         print("Restored the stopped controller on the disposable host; Owner login passed and dispatch stayed closed.", flush=True)
+        binding = json.loads(run(admin, "activation-review").stdout)
+        report = {"binding": binding, "source_fenced": True,
+                  "evidence": "Original isolated lab services and containers stopped before replacement",
+                  "confirmed_at": int(time.time()), "targets": {}}
+        # This lab installs no managed targets. Exercise activation of the
+        # restored host without claiming separate-VPS or remote-effect evidence.
+        result = json.loads(run("/opt/vpn-orbit/venv/bin/python", "-c",
+                                "import json,sys; from vpn_orbit.runtime.activation import activate;"
+                                "from vpn_orbit.runtime.cli import configuration;"
+                                "a=json.load(sys.stdin);print(json.dumps(activate(configuration('/etc/vpn-orbit/runtime.json'),"
+                                "a['report'],'roman',a['password'])))",
+                                input=json.dumps({"report": report, "password": PASSWORD}).encode()).stdout)
+        assert result["status"] == "ACTIVE"
+        with sqlite3.connect(cfg["database"]) as db:
+            assert db.execute("SELECT count(*) FROM audit WHERE event='recovery.activated'").fetchone() == (1,)
+        print("Local Owner fenced activation committed a new Authority identity without auto-replaying jobs.", flush=True)
 
 
 
