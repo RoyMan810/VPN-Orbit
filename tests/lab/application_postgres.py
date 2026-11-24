@@ -9,7 +9,7 @@ import tempfile
 import time
 
 from vpn_orbit.app_lifecycle import Lifecycle, ROOT
-from vpn_orbit.app_postgres import query, restore, settings, write_encrypted
+from vpn_orbit.app_postgres import promote, query, restore, settings, write_encrypted
 from vpn_orbit.app_profiles import canonical, digest
 from vpn_orbit.errors import Denied
 
@@ -72,7 +72,20 @@ def main():
             result = restore(app, service, binding, archive, key, checksum)
             assert query(cid, result["database"], "SELECT value FROM fixture") == "captured"
             assert query(cid, "orbit", "SELECT value FROM fixture") == "live"
-            print(f"Verified encrypted snapshot and isolated transactional restore for {service}.", flush=True)
+            redis = inventory["containers"][service.replace("-db", "-redis")]["Id"]
+            app.docker("container", "start", redis)
+            try:
+                promote(app, service, binding, checksum)
+            except Denied as error:
+                assert error.code == "APP_POSTGRES_STOP_APPLICATION_FIRST"
+            else:
+                raise AssertionError("Active product workload was allowed during promotion")
+            app.docker("container", "stop", redis)
+            promoted = promote(app, service, binding, checksum)
+            assert promoted == promote(app, service, binding, checksum)
+            assert query(cid, "orbit", "SELECT value FROM fixture") == "captured"
+            assert query(cid, promoted["previous_database"], "SELECT value FROM fixture") == "live"
+            print(f"Verified encrypted snapshot, transactional restore and safe promotion for {service}.", flush=True)
 
 
 if __name__ == "__main__":

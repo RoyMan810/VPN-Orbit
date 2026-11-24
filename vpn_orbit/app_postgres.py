@@ -14,7 +14,7 @@ import time
 from .app_lifecycle import Lifecycle, refuse
 from .app_profiles import canonical
 from .runtime import backup
-from .runtime.storage import directory_sync
+from .runtime.storage import directory_sync, new_private_file, protected_bytes
 
 
 SERVICES = {"panel-db", "bot-db"}
@@ -144,6 +144,21 @@ def query(container, database, sql):
                   "--dbname=" + database, "--set=ON_ERROR_STOP=1", "--command", sql, timeout=20).strip().decode()
 
 
+def database_oid(container, name):
+    value = query(container, "postgres", f"SELECT oid FROM pg_database WHERE datname='{name}'")
+    if not value:
+        return None
+    if not value.isascii() or not value.isdecimal():
+        refuse("APP_POSTGRES_VERIFICATION_FAILED")
+    return int(value)
+
+
+def assessment(app, service, checksum):
+    if not backup.SHA256.fullmatch(checksum):
+        refuse("APP_POSTGRES_DIGEST_MISMATCH")
+    return app.directory / f"postgres-{service}-{checksum}.json"
+
+
 def restore(app, service, binding, path, identity, expected):
     with app.locked():
         container, scope, inventory = settings(app, service, binding)
@@ -179,18 +194,54 @@ def restore(app, service, binding, path, identity, expected):
         _, document, saved = app.configuration()
         if app.verify_inventory(document, saved) != inventory:
             refuse("APP_RESOURCE_DRIFT")
+        evidence = {"v": 1, "scope": scope, "archive_sha256": expected, "restored_oid": database_oid(container, name),
+                    "original_oid": database_oid(container, "orbit")}
+        if None in (evidence["restored_oid"], evidence["original_oid"]):
+            refuse("APP_POSTGRES_VERIFICATION_FAILED")
+        new_private_file(assessment(app, service, expected), canonical(evidence))
         return {"status": "RESTORED_ISOLATED_DATABASE", "database": name, "service": service, "sha256": expected}
+
+
+def promote(app, service, binding, expected):
+    with app.locked():
+        container, scope, inventory = settings(app, service, binding)
+        path = assessment(app, service, expected)
+        evidence = json.loads(protected_bytes(path, owner=0, exact_mode=0o600, maximum=8192))
+        if evidence.get("v") != 1 or evidence.get("scope") != scope or evidence.get("archive_sha256") != expected:
+            refuse("APP_POSTGRES_SCOPE_MISMATCH")
+        for service_name, entry in inventory["containers"].items():
+            if service_name not in SERVICES and app.inspect("container", entry["Id"])["State"]["Running"]:
+                refuse("APP_POSTGRES_STOP_APPLICATION_FIRST")
+        staged = "orbit_recovery_" + expected[:16]
+        prior = "orbit_previous_" + expected[:16]
+        before = (evidence["original_oid"], evidence["restored_oid"], None)
+        after = (evidence["restored_oid"], None, evidence["original_oid"])
+
+        def state():
+            return tuple(database_oid(container, name) for name in ("orbit", staged, prior))
+
+        actual = state()
+        if actual == before:
+            # Renames fail if any connection is still using either database;
+            # PostgreSQL rolls back the entire publication in that case.
+            query(container, "postgres", f'BEGIN; ALTER DATABASE "orbit" RENAME TO "{prior}"; '
+                  f'ALTER DATABASE "{staged}" RENAME TO "orbit"; COMMIT;')
+        elif actual != after:
+            refuse("APP_POSTGRES_DATABASE_DRIFT")
+        if state() != after or query(container, "orbit", "SELECT current_database()") != "orbit":
+            refuse("APP_POSTGRES_VERIFICATION_FAILED")
+        return {"status": "PROMOTED", "service": service, "sha256": expected, "previous_database": prior}
 
 
 def main(argv=None):
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("capture", "restore"))
+    parser.add_argument("action", choices=("capture", "restore", "promote"))
     parser.add_argument("--id", required=True)
     parser.add_argument("--service", choices=sorted(SERVICES), required=True)
     parser.add_argument("--spec-sha256", required=True)
-    parser.add_argument("--archive", type=Path, required=True)
+    parser.add_argument("--archive", type=Path)
     parser.add_argument("--recipient")
     parser.add_argument("--identity", type=Path)
     parser.add_argument("--sha256")
@@ -204,16 +255,20 @@ def main(argv=None):
         backup.secure_directory(backup.AGE.parent)
         app = Lifecycle(args.id)
         if args.action == "capture":
-            if not args.recipient:
+            if not (args.recipient and args.archive):
                 refuse("BACKUP_RECIPIENT_UNSUPPORTED")
             with app.locked():
                 container, header, _ = settings(app, args.service, args.spec_sha256)
                 sha256 = write_encrypted(args.archive, header, container, args.recipient)
             result = {"status": "CAPTURED", "service": args.service, "sha256": sha256}
-        else:
-            if not args.identity or not args.sha256:
+        elif args.action == "restore":
+            if not (args.identity and args.sha256 and args.archive):
                 refuse("APP_POSTGRES_DIGEST_REQUIRED")
             result = restore(app, args.service, args.spec_sha256, args.archive, args.identity, args.sha256)
+        else:
+            if not args.sha256:
+                refuse("APP_POSTGRES_DIGEST_REQUIRED")
+            result = promote(app, args.service, args.spec_sha256, args.sha256)
         print(json.dumps(result))
     except Exception as error:
         from .errors import Denied
