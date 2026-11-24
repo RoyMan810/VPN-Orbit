@@ -9,7 +9,7 @@
 [![Выпуск v1.0.0](https://img.shields.io/badge/выпуск-v1.0.0-2563eb)](https://github.com/RoyMan810/VPN-Orbit/releases/tag/v1.0.0)
 [![VPN-Orbit CI](https://github.com/RoyMan810/VPN-Orbit/actions/workflows/checks.yml/badge.svg?branch=main)](https://github.com/RoyMan810/VPN-Orbit/actions/workflows/checks.yml)
 
-[Установка](docs/installation.md) · [Управление VPS](docs/vps.md) · [Документация](docs/README.md)
+[Установка](docs/installation.md) · [Управление VPS](docs/vps.md) · [Документация](docs/README.md) · [Roadmap](docs/roadmap.md)
 
 </div>
 
