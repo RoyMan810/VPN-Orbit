@@ -37,6 +37,8 @@ jobs:
             module: application_ssh
           - name: Bedolaga Bot / webhook receiver and header authentication
             module: application_webhook
+          - name: Remnawave and Bedolaga / actual PostgreSQL backup and restore
+            module: application_postgres
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -49,6 +51,8 @@ jobs:
           version: v29.9.3
           set-host: true
       - name: Exercise actual product startup and ownership protection
+        env:
+          MODULE: ${{ matrix.module }}
         run: |
           test "$RUNNER_ENVIRONMENT" = github-hosted
           python -m pip install -r requirements-app.txt
@@ -58,6 +62,14 @@ jobs:
           # Keep the action's private daemon and expose exactly that socket.
           sudo systemctl stop docker.service docker.socket || true
           sudo ln -sfn "${DOCKER_HOST#unix://}" /run/docker.sock
+          if [ "$MODULE" = application_postgres ]; then
+            python tools/fetch_age.py --output "$RUNNER_TEMP/pg-age.tar.gz"
+            tar --no-same-owner -xzf "$RUNNER_TEMP/pg-age.tar.gz" -C "$RUNNER_TEMP" -- age/age age/age-keygen
+            sudo chmod 0755 /opt
+            sudo install -d -m 0755 /opt/vpn-orbit/tools
+            sudo install -o root -g root -m 0755 "$RUNNER_TEMP/age/age" /opt/vpn-orbit/tools/age
+          fi
           sudo -n env PYTHONPATH="$PWD" GITHUB_ACTIONS=true \
             "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" \
+            "VPN_ORBIT_PG_AGE_KEYGEN=$RUNNER_TEMP/age/age-keygen" \
             "$(command -v python)" -m tests.lab.${{ matrix.module }}

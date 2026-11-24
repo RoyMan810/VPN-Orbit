@@ -14,6 +14,7 @@ vpn-orbit = "vpn_orbit.cli:main"
 vpn-orbit-runtime = "vpn_orbit.runtime.cli:main"
 vpn-orbit-app = "vpn_orbit.app_lifecycle:main"
 vpn-orbit-app-helper = "vpn_orbit.app_helper:main"
+vpn-orbit-app-postgres = "vpn_orbit.app_postgres:main"
 
 [tool.setuptools.packages.find]
 include = ["vpn_orbit*"]
