@@ -199,6 +199,19 @@ def report(installation, *, directory=Path('/var/backups/vpn-orbit')):
                          if (backup.DATA / 'restore.pending').exists() else
                          {'status': 'WARNING', 'code': 'RESTORE_QUARANTINE'}
                          if checks['admission']['code'] == 'READ_ONLY_RECOVERY' else {'status': 'NO_DATA', 'code': 'NO_RESTORE_REPORTED'})
+    transaction = backup.APP / 'upgrade-1.1.0/transaction.json'
+    try:
+        update = json.loads(protected_bytes(transaction, owner=0, exact_mode=0o600))
+        phase = update['phase']
+        known = {'PREPARED', 'DRAINING', 'QUIESCENT', 'BACKED_UP', 'SWITCHING', 'TESTING',
+                 'COMMITTING', 'ROLLING_BACK', 'FAILED_SAFE', 'ROLLED_BACK', 'COMPLETE'}
+        if phase not in known:
+            raise ValueError
+        checks['update'] = {'status': 'OK' if phase == 'COMPLETE' else 'WARNING', 'code': 'UPDATE_' + phase}
+    except FileNotFoundError:
+        checks['update'] = {'status': 'NO_DATA', 'code': 'NO_UPDATE_REPORTED'}
+    except (OSError, Denied, ValueError, KeyError, TypeError):
+        checks['update'] = {'status': 'UNAVAILABLE', 'code': 'UPDATE_STATE_UNAVAILABLE'}
     return {'v': 1, 'checked_at': datetime.now(UTC).isoformat(timespec='seconds'),
             'controller_version': installation['version'], 'checks': checks}
 

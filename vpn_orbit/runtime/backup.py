@@ -148,14 +148,14 @@ def pin_database(name, version, cfg, stack):
     return db
 
 
-def snapshot_databases(root, cfg):
+def snapshot_databases(root, cfg, *, phase="OPEN"):
     admission = Admission(cfg['writer_directory'])
     with ExitStack() as reads:
         # No on-disk state transition: SIGKILL releases the flock and cannot
         # leave admission closed. Publication only occurs after all validation.
         with admission.exclusive(timeout=5):
             state = admission.state()
-            if state['phase'] != 'OPEN':
+            if state['phase'] != phase:
                 raise Denied('BACKUP_ADMISSION_NOT_OPEN')
             files, install = installation_files(cfg)
             files['vault/broker-dek'] = unseal_credential(cfg['vault_credential'])
@@ -349,7 +349,7 @@ def read_archive(stream, *, start=None, sink=None):
     return value
 
 
-def create(directory, recipient, *, age, retain=None):
+def create(directory, recipient, *, age, retain=None, maintenance=False):
     from .cli import configuration
 
     if retain is not None and not 1 <= retain <= 365:
@@ -363,10 +363,11 @@ def create(directory, recipient, *, age, retain=None):
         raise Denied('BACKUP_TMPFS_REQUIRED')
     if sqlite3.sqlite_version_info < (3, 45):
         raise Denied('SQLITE_VERSION_UNSUPPORTED')
-    with process_lock(RUN / 'maintenance.lock'), tempfile.TemporaryDirectory(prefix='backup-', dir=RUN) as work:
+    lock = nullcontext() if maintenance else process_lock(RUN / 'maintenance.lock')
+    with lock, tempfile.TemporaryDirectory(prefix='backup-', dir=RUN) as work:
         cfg = configuration(CONFIG / 'runtime.json')
         bound_layout(cfg)
-        captured, files, install, staged = snapshot_databases(Path(work), cfg)
+        captured, files, install, staged = snapshot_databases(Path(work), cfg, phase="RECOVERY_HOLD" if maintenance else "OPEN")
         checked_snapshot(files, staged, cfg)
         all_files = files | staged
         index = archive_index(captured, all_files, install)
