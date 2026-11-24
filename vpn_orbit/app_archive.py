@@ -193,13 +193,19 @@ def restore(archive, identity, expected, requested_id=None):
                     refuse("APP_FOREIGN_RESOURCE")
             for image in sorted(set(spec["images"].values())):
                 app.acquire_image(image)
-            app.compose(document, "create", "--no-build", "--pull", "never")
-            inventory = app.inventory(document)
-            with app.journal.write() as db:
-                db.execute("UPDATE installation SET inventory=? WHERE id=1", (canonical(inventory).decode(),))
-            _, _, binding = app.configuration()
+            # Populate the new volume before any application container can
+            # seed it from its image. Compose will adopt these exact labels.
             for name, volume in document["volumes"].items():
-                app.verify_inventory(document, binding)
+                label = {**volume["labels"], "com.docker.compose.project": document["name"],
+                         "com.docker.compose.volume": name}
+                arguments = [item for key, value in sorted(label.items()) for item in ("--label", f"{key}={value}")]
+                if app.docker("volume", "create", "--driver", "local", *arguments, volume["name"]).strip() != volume["name"]:
+                    refuse("APP_BACKUP_VOLUME_INVALID")
+                info = app.inspect("volume", volume["name"])
+                if (info.get("Driver") != "local" or info.get("Options") not in (None, {})
+                        or any((info.get("Labels") or {}).get(key) != value for key, value in label.items())
+                        or app.docker("container", "ls", "--all", "--quiet", "--filter", "volume=" + volume["name"]).strip()):
+                    refuse("APP_RESTORE_VOLUME_NOT_EMPTY")
                 empty = root / "empty.tar"
                 with empty.open("wb") as stream:
                     transfer(app, spec, volume, data=stream)
@@ -207,6 +213,11 @@ def restore(archive, identity, expected, requested_id=None):
                     refuse("APP_RESTORE_VOLUME_NOT_EMPTY")
                 with (root / f"vol-{name}.tar").open("rb") as stream:
                     transfer(app, spec, volume, writing=True, data=stream)
+            app.compose(document, "create", "--no-build", "--pull", "never")
+            inventory = app.inventory(document)
+            with app.journal.write() as db:
+                db.execute("UPDATE installation SET inventory=? WHERE id=1", (canonical(inventory).decode(),))
+            _, _, binding = app.configuration()
             app.verify_inventory(document, binding)
             new_private_file(app.directory / "restore-evidence.json", canonical({"v": 1, "archive_sha256": expected,
                                                                                 "spec_sha256": digest(spec)}))
