@@ -1,6 +1,7 @@
 """Source and destination roles for two distinct disposable hosted VMs."""
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 from http.cookiejar import CookieJar
 import json
@@ -38,12 +39,9 @@ def boot():
     return hashlib.sha256(Path("/proc/sys/kernel/random/boot_id").read_bytes().strip()).hexdigest()
 
 
-def fixture(directory):
-    with tempfile.TemporaryDirectory() as temp:
-        key = Path(temp) / "host"
-        run("/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", key)
-        public = " ".join(key.with_suffix(".pub").read_text().split()[:2])
-    data = [{"id": target, "ip": f"198.18.0.{number + 2}", "port": 22, "allowed_cidrs": ["198.18.0.0/24"],
+def fixture(directory, key):
+    public = " ".join(key.read_text().split()[:2])
+    data = [{"id": target, "ip": f"198.18.0.{number + 2}", "port": 22283, "allowed_cidrs": ["198.18.0.0/24"],
              "host_key": public, "secret_ref": REFS[number] + ":v1", "dependencies": [],
              "capabilities": ["host.probe"], "policy_revision": 1} for number, target in enumerate(TARGETS)]
     (directory / "targets.json").write_text(json.dumps({"v": 1, "targets": data}))
@@ -82,6 +80,8 @@ def source(output, recipient):
             directory = Path(temp)
             key = directory / "observation"
             run("/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", key)
+            if target == TARGETS[0]:
+                shutil.copyfile(key.with_suffix(".pub"), output / "observation.pub")
             os.chown(directory, cfg["broker_uid"], cfg["broker_gid"])
             os.chown(key, cfg["broker_uid"], cfg["broker_gid"])
             imported = run("/usr/bin/systemd-run", "--quiet", "--wait", "--pipe", "--collect",
@@ -122,6 +122,46 @@ backup.create(Path(sys.argv[1]),sys.argv[2],age=backup.AGE)
         assert run("/usr/bin/systemctl", "show", "--property=ActiveState", "--value", unit).stdout.strip() == b"inactive"
     (output / "fixture.json").write_text(json.dumps(review))
     print("Source VM captured encrypted synthetic state and stopped all controller units.", flush=True)
+
+
+@contextmanager
+def observation_target(transfer):
+    """Use a real SSH transport with a bounded synthetic observation command."""
+    code = """import asyncio,asyncssh,json,sys,time
+from pathlib import Path
+key=asyncssh.read_public_key(sys.argv[2])
+class Peer(asyncssh.SSHServer):
+    def public_key_auth_supported(self):
+        return True
+    def validate_public_key(self, username, candidate):
+        return username=='vpn-orbit-svc' and candidate.public_data == key.public_data
+async def probe(process):
+    payload=await process.stdin.read()
+    if process.command != 'vpn-orbit.v1.probe' or payload != b'{"operation":"probe","version":1}\\n':
+        process.exit(65)
+        return
+    result={'v':1,'uid':0,'observed_at':int(time.time()),
+            'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip()}
+    process.stdout.write(json.dumps(result,sort_keys=True,separators=(',',':')).encode()+b'\\n')
+    process.exit(0)
+async def main():
+    await asyncssh.listen('198.18.0.2',22283,server_factory=Peer,
+                          server_host_keys=[sys.argv[1]],process_factory=probe,encoding=None)
+    Path(sys.argv[3]).touch()
+    await asyncio.Event().wait()
+asyncio.run(main())
+"""
+    run("/usr/sbin/ip", "address", "add", "198.18.0.2/32", "dev", "lo")
+    try:
+        with subprocess.Popen([PYTHON, "-c", code, transfer / "fixture-host", transfer / "observation.pub",
+                               transfer / "target.ready"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as server:
+            try:
+                installation.wait_for(lambda: (transfer / "target.ready").exists(), "SSH fixture did not start", seconds=10)
+                yield
+            finally:
+                server.terminate()
+    finally:
+        run("/usr/sbin/ip", "address", "del", "198.18.0.2/32", "dev", "lo")
 
 
 def destination(transfer, identity):
@@ -213,7 +253,20 @@ print(json.dumps(activate(configuration('/etc/vpn-orbit/runtime.json'),value['re
     assert json.loads(run(PYTHON, "-c", code, input=json.dumps({"report": report, "password": installation.PASSWORD}).encode()).stdout)["status"] == "ACTIVE"
     with call(client, "/api/v1/controller/status") as reply:
         assert json.load(reply)["admission"] == "OPEN"
-    print("Fresh independent VM restored Owner, grants, target policies and keys, then activated after source shutdown.", flush=True)
+    with observation_target(transfer):
+        with call(client, f"/api/v1/resources/{TARGETS[0]}/observations", {},
+                  **{"X-CSRF-Token": owner["csrf_token"], "Idempotency-Key": "recovered-controller-observation"}) as reply:
+            job = json.load(reply)["id"]
+
+        def completed():
+            with call(client, "/api/v1/jobs/" + job) as reply:
+                state = json.load(reply)["status"]
+            if state in ("FAILED", "CANCELLED_SAFE", "UNKNOWN_OUTCOME"):
+                raise AssertionError("Restored controller did not authenticate to fixture SSH target: " + state)
+            return state == "SUCCEEDED"
+
+        installation.wait_for(completed, "Restored controller probe did not complete", seconds=20)
+    print("Fresh independent VM restored Owner, grants and keys, activated after source shutdown, and authenticated a real SSH probe.", flush=True)
 
 
 def main():
@@ -225,7 +278,7 @@ def main():
     if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted":
         raise SystemExit("Disposable GitHub-hosted VM required")
     if args.role == "fixture":
-        fixture(args.transfer)
+        fixture(args.transfer, args.key)
     else:
         if os.geteuid() != 0 or args.key is None:
             raise SystemExit("Root in disposable VM required")
