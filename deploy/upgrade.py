@@ -294,7 +294,12 @@ def stop(state):
     for unit in ("vpn-orbit-api.service", "vpn-orbit-worker.service"):
         if base.command(SYSTEMCTL, "show", "--property=ActiveState", "--value", unit) != "inactive":
             raise ArtifactError("UPDATE_SYSTEMD_CONTRACT_UNSUPPORTED")
-    if base.docker(state["docker_host"], "ps", "--quiet", "--filter=label=com.docker.compose.project=vpn-orbit"):
+    selector = "label=com.docker.compose.project=vpn-orbit"
+    if base.docker(state["docker_host"], "ps", "--quiet", "--filter=" + selector):
+        # A failed oneshot ExecStart can leave partially started containers
+        # without running ExecStop. Stop this exact Compose project directly.
+        compose(state, "stop", "--timeout", "60", timeout=90)
+    if base.docker(state["docker_host"], "ps", "--quiet", "--filter=" + selector):
         raise ArtifactError("UPDATE_CONTAINERS_STILL_RUNNING")
 
 
@@ -445,10 +450,14 @@ def smoke(state, version):
 def rollback(state):
     if state["phase"] in ("COMMITTING", "COMPLETE"):
         raise ArtifactError("UPDATE_ALREADY_COMMITTED")
-    save(state, "ROLLING_BACK")
+    needs_drain = state.get("rollback_needs_drain", state["phase"] in ("PREPARED", "DRAINING"))
+    save(state, "ROLLING_BACK", rollback_needs_drain=needs_drain)
     runtime("close")
-    drain()
+    if needs_drain:
+        drain()
+        save(state, "ROLLING_BACK", rollback_needs_drain=False)
     block()
+    stop(state)
     # Only the explicitly compatible 1.0.0 contract may be reopened. Never
     # restore an older database over a potentially newer live database.
     info = runtime("inspect")
@@ -541,6 +550,6 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (ArtifactError, OSError, RuntimeError, ValueError, KeyError) as error:
+    except (ArtifactError, OSError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError) as error:
         print("VPN-Orbit: " + (str(error) if isinstance(error, ArtifactError) else "UPDATE_UNAVAILABLE"), file=sys.stderr)
         raise SystemExit(1) from None

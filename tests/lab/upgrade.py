@@ -64,6 +64,23 @@ upgrade.main()
     return (python, "-c", code, str(script.parent), checkpoint, *args)
 
 
+def alter_layout_flags(python, script, args):
+    code = """import sqlite3,sys
+sys.path.insert(0,sys.argv[1])
+import upgrade
+sys.argv=[sys.argv[0],*sys.argv[2:]]
+write=upgrade.save
+def apply_then_invalidate(state,phase,**extra):
+    write(state,phase,**extra)
+    if phase=='TESTING':
+        with sqlite3.connect('/var/lib/vpn-orbit/app/controller.sqlite3',autocommit=True) as db:
+            db.execute('PRAGMA user_version=99')
+upgrade.save=apply_then_invalidate
+upgrade.main()
+"""
+    return (python, "-c", code, str(script.parent), *args)
+
+
 def registry_unavailable(python, script, options):
     run = installation.run
     folder = Path("/etc/systemd/system/docker.service.d")
@@ -144,7 +161,7 @@ def main():
     parser.add_argument("--bundle", type=Path)
     parser.add_argument("--public", type=Path)
     parser.add_argument("--age-keygen", type=Path)
-    parser.add_argument("--scenario", choices=("resume", "rollback"))
+    parser.add_argument("--scenario", choices=("resume", "rollback", "migration-failure", "incompatible-data"))
     args = parser.parse_args()
     if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted":
         raise RuntimeError("Disposable GitHub-hosted VM required")
@@ -214,6 +231,19 @@ def main():
             expected = "1.1.0"
             assert (WEB / "web/index.html").read_bytes() != old_web
             assert run(python, script, "--rollback", "--confirm", check=False).returncode != 0
+        elif args.scenario == "incompatible-data":
+            result = run(*alter_layout_flags(python, script, options), check=False, timeout=650)
+            assert result.returncode != 0
+            saved = read_state()
+            assert saved["phase"] == "FAILED_SAFE", result.stderr.decode()
+            assert MARKER.is_file()
+            assert saved["backup_sha256"] == hashlib.sha256((folder / saved["backup_file"]).read_bytes()).hexdigest()
+            assert not run("/usr/bin/docker", "--host", "unix:///run/docker.sock", "ps", "--quiet",
+                           "--filter", "label=com.docker.compose.project=vpn-orbit").stdout.strip()
+            with sqlite3.connect("/var/lib/vpn-orbit/app/controller.sqlite3") as db:
+                assert db.execute("PRAGMA user_version").fetchone() == (99,)
+            print("Unsupported changed data prevented executable rollback and retained the verified pre-update backup.", flush=True)
+            return
         else:
             result = run(python, script, *options, check=False, timeout=600)
             assert result.returncode != 0
@@ -236,10 +266,16 @@ def main():
             assert db.execute("SELECT status FROM jobs WHERE id=?", (unresolved,)).fetchone() == ("UNKNOWN_OUTCOME",)
         with sqlite3.connect(Path(cfg["vault_directory"]) / "vault.sqlite3") as db:
             assert db.execute("SELECT ref,state FROM secrets").fetchone() == (REFS[0] + ":v1", "ACTIVE")
+            if args.scenario == "migration-failure":
+                assert not db.execute("SELECT name FROM sqlite_schema WHERE name IN "
+                                      "('secret_lifecycle','orbit_migration_history')").fetchall()
         with request(client, "/api/v1/audit/integrity") as reply:
             assert json.load(reply)["status"] == "verified"
         record = read_state()
-        assert record["migrations"] == ["vault-lifecycle-audit"]
+        if args.scenario == "migration-failure":
+            assert "migrations" not in record
+        else:
+            assert record["migrations"] == ["vault-lifecycle-audit"]
         assert record["backup_sha256"] == hashlib.sha256((folder / record["backup_file"]).read_bytes()).hexdigest()
         assert {name: hashlib.sha256(Path(name).read_bytes()).digest() for name in objects} == hashes
         if expected == "1.1.0":
