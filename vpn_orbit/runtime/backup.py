@@ -1,6 +1,6 @@
 """Local-root, encrypted controller snapshots. No SSH, RPC, or restore side effects."""
 
-from contextlib import ExitStack, closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager, nullcontext
 from datetime import UTC, datetime
 import hashlib
 import io
@@ -188,7 +188,11 @@ def snapshot_databases(root, cfg):
     return captured, files, install, staged
 
 
-def checked_snapshot(files, staged, cfg):
+def checked_snapshot(files, staged, cfg, *, vault_directory=None, owner=None):
+    if vault_directory is None:
+        vault_directory = DATA / "vault"
+    if owner is None:
+        owner = cfg["broker_uid"]
     key = SigningKey(files['control-gate/signing.key'])
     if bytes(key.verify_key) != files['control-gate/verify.key'] or bytes(key.verify_key) != files['config/gate.pub']:
         raise Denied('BACKUP_AUTHORITY_KEYS_MISMATCH')
@@ -202,16 +206,16 @@ def checked_snapshot(files, staged, cfg):
                 Store.verify_audit_connection(db)
             if name == 'vault/vault.sqlite3':
                 box = Aead(files['vault/broker-dek'])
-                objects = DATA / 'vault/objects'
+                objects = vault_directory / "objects"
                 info = objects.lstat()
-                if not stat.S_ISDIR(info.st_mode) or info.st_uid != cfg['broker_uid'] or stat.S_IMODE(info.st_mode) != 0o700:
+                if not stat.S_ISDIR(info.st_mode) or info.st_uid != owner or stat.S_IMODE(info.st_mode) != 0o700:
                     raise Denied('BACKUP_VAULT_DIRECTORY_INVALID')
                 for metadata, digest in db.execute('SELECT metadata,object_digest FROM secrets'):
                     if not SHA256.fullmatch(digest):
                         raise Denied('BACKUP_VAULT_OBJECT_INVALID')
                     if len(files) + len(staged) >= MAX_MEMBERS:
                         raise Denied("BACKUP_LIMIT_EXCEEDED")
-                    data = protected_bytes(objects / digest, owner=cfg['broker_uid'], maximum=9000, exact_mode=0o600)
+                    data = protected_bytes(objects / digest, owner=owner, maximum=9000, exact_mode=0o600)
                     if hashlib.sha256(data).hexdigest() != digest:
                         raise Denied('BACKUP_VAULT_OBJECT_INVALID')
                     try:
@@ -293,7 +297,7 @@ def write_archive(stream, index, files):
                 tar.addfile(header, content)
 
 
-def read_archive(stream):
+def read_archive(stream, *, start=None, sink=None):
     """No extract or PAX/GNU extensions; untrusted paths never reach the FS."""
     def exact(size):
         data = stream.read(size)
@@ -319,16 +323,21 @@ def read_archive(stream):
         raise Denied('BACKUP_MANIFEST_INVALID')
     value = validate_manifest(exact(first.size))
     padding(first.size)
+    if start is not None:
+        start(value)
     for name, entry in sorted(value['files'].items()):
         header = member()
         if (header.name, header.size) != (name, entry['size']):
             raise Denied('BACKUP_ARCHIVE_INVALID')
         checksum = hashlib.sha256()
         remaining = header.size
-        while remaining:
-            data = exact(min(remaining, 1024**2))
-            checksum.update(data)
-            remaining -= len(data)
+        with (nullcontext() if sink is None else sink(name)) as destination:
+            while remaining:
+                data = exact(min(remaining, 1024**2))
+                checksum.update(data)
+                if destination is not None:
+                    destination.write(data)
+                remaining -= len(data)
         if checksum.hexdigest() != entry['sha256']:
             raise Denied('BACKUP_DIGEST_MISMATCH')
         padding(header.size)
@@ -397,7 +406,7 @@ def create(directory, recipient, *, age, retain=None):
     return {'status': 'CREATED', 'archive': name, 'sha256': digest, 'captured_at': captured, 'decryption_verified': False}
 
 
-def verify(archive, identity, *, age, expected_sha256=None):
+def decrypt_archive(archive, identity, *, age, expected_sha256=None, start=None, sink=None):
     secure_directory(archive.absolute().parent)
     secure_directory(identity.absolute().parent)
     with open_private(archive) as ciphertext, open_private(identity) as private:
@@ -414,7 +423,7 @@ def verify(archive, identity, *, age, expected_sha256=None):
                               stdin=ciphertext, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                               pass_fds=(private.fileno(),)) as cipher:
             try:
-                value = read_archive(cipher.stdout)
+                value = read_archive(cipher.stdout, start=start, sink=sink)
             except Denied as error:
                 if error.code == "BACKUP_ARCHIVE_TRUNCATED" and cipher.wait(timeout=10):
                     raise Denied("BACKUP_DECRYPTION_FAILED") from None
@@ -425,6 +434,11 @@ def verify(archive, identity, *, age, expected_sha256=None):
                 raise
             if cipher.wait(timeout=10):
                 raise Denied('BACKUP_DECRYPTION_FAILED')
+    return value
+
+
+def verify(archive, identity, *, age, expected_sha256=None):
+    value = decrypt_archive(archive, identity, age=age, expected_sha256=expected_sha256)
     return {'status': 'VERIFIED', 'format': value['v'], 'captured_at': value['captured_at'],
             'controller_version': value['installation']['version']}
 
@@ -438,11 +452,19 @@ def add_commands(commands):
     check.add_argument("--archive", type=Path, required=True)
     check.add_argument("--identity", type=Path, required=True)
     check.add_argument("--sha256", help="Expected ciphertext digest from the trusted capture record")
+    stage = commands.add_parser("restore-stage", help="Rewrap and quarantine a recovery snapshot; do not replace installed data")
+    stage.add_argument("--archive", type=Path, required=True)
+    stage.add_argument("--identity", type=Path, required=True)
+    stage.add_argument("--sha256", required=True, help="Expected ciphertext digest from the trusted capture record")
 
 
 def administer(args):
+    os.umask(0o077)
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     secure_directory(AGE.parent)
     if args.command == "backup":
         return create(args.directory, args.recipient, age=AGE, retain=args.retain)
+    if args.command == "restore-stage":
+        from .recovery import stage
+        return stage(args.archive, args.identity, args.sha256, age=AGE)
     return verify(args.archive, args.identity, age=AGE, expected_sha256=args.sha256)

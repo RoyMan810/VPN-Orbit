@@ -94,7 +94,7 @@ def owner_create():
         os.close(master)
 
 
-def controller_backup(age_keygen, cfg):
+def controller_backup(age_keygen, cfg, docker_host):
     admin = "/opt/vpn-orbit/admin"
     age = "/opt/vpn-orbit/tools/age"
     with tempfile.TemporaryDirectory(dir="/run/vpn-orbit") as temp:
@@ -145,6 +145,48 @@ v.import_ssh('01JCYQZ4T9V8MNVYEH3D2M7Q1C',1,Path(sys.argv[1]).read_bytes(),owner
             manifest = json.load(saved.extractfile("manifest.json"))
             assert len([f for f in manifest["files"] if f.startswith("vault/objects/")]) == 1
         print("Live controller backup preserved Owner and authenticated a provisioned Vault object; offline age verification passed.", flush=True)
+        digest = result["sha256"]
+        Path("/var/lib/vpn-orbit-recovery").mkdir(mode=0o700)
+        staged = json.loads(run(admin, "restore-stage", "--archive", archive, "--identity", identity, "--sha256", digest).stdout)
+        assert staged["status"] == "STAGED_READ_ONLY"
+        assert not (Path("/var/lib/vpn-orbit-recovery") / staged["directory"] / "control-gate/signing.key").exists()
+        apply = (admin, "restore-apply", "--sha256", digest, "--confirm-replace")
+        active = run(*apply, check=False)
+        assert active.returncode and b"RESTORE_STOP_CONTROLLER_FIRST" in active.stderr
+        run("/usr/bin/systemctl", "stop", "vpn-orbit-compose.service", "vpn-orbit-broker.socket",
+            "vpn-orbit-supervisor.socket", "vpn-orbit-broker.service", "vpn-orbit-supervisor.service", timeout=100)
+        docker(docker_host, "compose", "--project-name", "vpn-orbit", "--file", "/etc/vpn-orbit/compose.json", "rm", "--force")
+        applied = json.loads(run(*apply).stdout)
+        assert applied["status"] == "RESTORED_READ_ONLY" and not applied["services_started"]
+        assert Path(applied["previous_data"]).is_dir()
+        assert Path(applied["previous_config"]).is_dir()
+        run("/usr/bin/systemctl", "start", "vpn-orbit-broker.socket", "vpn-orbit-supervisor.socket",
+            "vpn-orbit-broker.service", "vpn-orbit-supervisor.service")
+        run("/usr/bin/systemctl", "start", "vpn-orbit-compose.service", timeout=150)
+        request = Request(ORIGIN + "/api/v1/auth/login",
+                          data=json.dumps({"username": "roman", "password": PASSWORD}).encode(),
+                          headers={"Content-Type": "application/json", "Origin": ORIGIN})
+        # API trust proxy/Host checks and secure cookies must remain intact.
+        with tls_proxy(root) as context:
+            with urlopen(request, context=context, timeout=10) as reply:
+                assert json.load(reply)["user"]["id"] == owner
+        with sqlite3.connect(cfg["database"]) as db:
+            assert db.execute("SELECT count(*) FROM audit WHERE event='recovery.imported' AND outcome='READ_ONLY_RECOVERY'").fetchone() == (1,)
+        probe = """import json,sys
+from vpn_orbit.admission import Admission
+from vpn_orbit.errors import Denied
+c=json.load(open('/etc/vpn-orbit/runtime.json'))
+a=Admission(c['writer_directory'])
+assert a.state()['phase']=='READ_ONLY_RECOVERY'
+try:
+ with a.writer('dispatch'): pass
+except Denied as e:
+ assert e.code=='WRITER_ADMISSION_CLOSED'
+else:
+ sys.exit('restored controller can dispatch')
+"""
+        run("/opt/vpn-orbit/venv/bin/python", "-c", probe)
+        print("Restored the stopped controller on the disposable host; Owner login passed and dispatch stayed closed.", flush=True)
 
 
 
@@ -557,7 +599,9 @@ print('VERIFIED_HOST_TIME')
                 login.close()
             print("First web visitor had no bootstrap authority; hidden-input local Owner setup and HTTPS login passed.", flush=True)
             if args.age_keygen is not None:
-                controller_backup(args.age_keygen, cfg)
+                controller_backup(args.age_keygen, cfg, args.docker_host)
+                ids = {name: docker(args.docker_host, "compose", "--project-name", "vpn-orbit", "--file",
+                                   "/etc/vpn-orbit/compose.json", "ps", "--quiet", name) for name in ("api", "worker")}
             before = {name: hashlib.sha256(Path(path).read_bytes()).hexdigest() for name, path in (
                 ("credential", "/etc/vpn-orbit/credentials/broker-dek.cred"),
                 ("gate", "/var/lib/vpn-orbit/control-gate/signing.key"))}
