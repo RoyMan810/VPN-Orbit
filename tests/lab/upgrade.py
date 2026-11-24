@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shutil
 import signal
 import ssl
 import tempfile
@@ -165,12 +166,21 @@ def main():
         python = WEB / "python/bin/python3.15"
         script = REPO / "deploy/upgrade.py"
         if args.scenario == "resume":
+            bad_signature = root / "unauthenticated"
+            shutil.copytree(args.bundle, bad_signature)
+            (bad_signature / "manifest.sig").write_bytes(bytes(64))
+            invalid = run(python, script, "--bundle", bad_signature, "--trust-key", public, "--confirm", check=False)
+            assert invalid.returncode and b"ARTIFACT_SIGNATURE_INVALID" in invalid.stderr
+            assert not STATE.exists()
+            wait_https()
+        if args.scenario == "resume":
             result = run(*interrupt_flags(python, script, options), check=False, timeout=600)
             if result.returncode != -signal.SIGKILL:
                 raise RuntimeError("Expected interruption after verified backup, before switch: " + result.stderr.decode())
             assert read_state()["phase"] == "SWITCHING" and MARKER.is_file()
             outcome = json.loads(run(python, script, "--resume", "--confirm", timeout=240).stdout)
             assert outcome["phase"] == "COMPLETE"
+            assert json.loads(run(python, script, "--resume", "--confirm", timeout=30).stdout) == outcome
             expected = "1.1.0"
             assert (WEB / "web/index.html").read_bytes() != old_web
             assert run(python, script, "--rollback", "--confirm", check=False).returncode != 0
@@ -208,6 +218,8 @@ def main():
                                       "--identity", identity, "--sha256", record["backup_sha256"]).stdout)
             assert evidence["status"] == "STAGED_READ_ONLY" and evidence["archive_version"] == "1.0.0"
             assert evidence["controller_version"] == "1.1.0"
+            offline = run("/usr/bin/unshare", "--net", APP / "admin", "release-check", check=False, timeout=15)
+            assert offline.returncode and b"UPDATE_RELEASE_DISCOVERY_UNAVAILABLE" in offline.stderr
         print(f"Released v1.0.0 installation, verified backup and preserved login/audit: {args.scenario} passed.", flush=True)
 
 
