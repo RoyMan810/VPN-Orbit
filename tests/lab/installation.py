@@ -599,6 +599,10 @@ print('VERIFIED_HOST_TIME')
                 login.close()
             print("First web visitor had no bootstrap authority; hidden-input local Owner setup and HTTPS login passed.", flush=True)
             if args.age_keygen is not None:
+                contract = json.loads(run("/opt/vpn-orbit/admin", "schema-check", "--target-schema", "6").stdout)
+                assert contract["migration"] == "NOT_REQUIRED" and len(contract["databases"]) == 5
+                refusal = run("/opt/vpn-orbit/admin", "schema-check", "--target-schema", "7", check=False)
+                assert refusal.returncode and b"SCHEMA_TRANSITION_UNSUPPORTED" in refusal.stderr
                 controller_backup(args.age_keygen, cfg, args.docker_host)
                 ids = {name: docker(args.docker_host, "compose", "--project-name", "vpn-orbit", "--file",
                                    "/etc/vpn-orbit/compose.json", "ps", "--quiet", name) for name in ("api", "worker")}
