@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import secrets
 import shutil
+import signal
 import ssl
 import subprocess
 import tempfile
@@ -91,9 +92,30 @@ def source(output, recipient):
             assert imported.stdout.strip() == (ref + ":v1").encode()
     with tempfile.TemporaryDirectory(dir="/run/vpn-orbit") as temp:
         private = Path(temp)
-        result = json.loads(run(ADMIN, "backup", "--directory", private, "--recipient", recipient.read_text().strip()).stdout)
+        address = recipient.read_text().strip()
+        code = """import os,signal,sys
+from pathlib import Path
+from vpn_orbit.runtime import backup
+def interrupt(*a,**k):
+    os.kill(os.getpid(),signal.SIGKILL)
+backup.checked_snapshot=interrupt
+backup.create(Path(sys.argv[1]),sys.argv[2],age=backup.AGE)
+"""
+        interrupted = run(PYTHON, "-c", code, private, address, check=False, timeout=60)
+        assert interrupted.returncode == -signal.SIGKILL and not list(private.iterdir())
+        with call(client, "/api/v1/controller/status") as reply:
+            assert json.load(reply)["admission"] == "OPEN"
+        cmd = """/usr/bin/mount -t tmpfs -o size=1m,mode=0700 tmpfs "$1" &&
+            /opt/vpn-orbit/admin backup --directory "$1" --recipient "$2"
+        """
+        small = run("/usr/bin/unshare", "--mount", "--propagation", "private", "/bin/sh", "-c", cmd,
+                    "small-backup-disk", private, address, timeout=60, check=False)
+        assert small.returncode and b"BACKUP_DESTINATION_SPACE_INSUFFICIENT" in small.stderr
+        assert not list(private.iterdir())
+        result = json.loads(run(ADMIN, "backup", "--directory", private, "--recipient", address).stdout)
         shutil.copyfile(private / result["archive"], output / "fixture.age")
     review = {"source_boot": boot(), "digest": result["sha256"], "owner": owner["user"]["id"], "operator": operator,
+              "recipient": address,
               "old_credential_sha256": hashlib.sha256(Path(cfg["vault_credential"]).read_bytes()).hexdigest()}
     run("/usr/bin/systemctl", "stop", *UNITS, timeout=100)
     for unit in UNITS:
@@ -109,11 +131,52 @@ def destination(transfer, identity):
     assert boot() != evidence["source_boot"]
     local = json.loads(Path(CONFIG).read_bytes())
     Path("/var/lib/vpn-orbit-recovery").mkdir(mode=0o700)
+    missing = run(ADMIN, "restore-stage", "--archive", transfer / "fixture.age", "--identity", transfer / "missing",
+                  "--sha256", evidence["digest"], check=False)
+    assert missing.returncode != 0
+    corrupted = transfer / "corrupted.age"
+    corrupted.write_bytes((transfer / "fixture.age").read_bytes()[:-5])
+    corrupted.chmod(0o600)
+    result = run(ADMIN, "restore-stage", "--archive", corrupted, "--identity", identity,
+                 "--sha256", hashlib.sha256(corrupted.read_bytes()).hexdigest(), check=False)
+    assert result.returncode and b"BACKUP_DECRYPTION_FAILED" in result.stderr
+    incompatible = transfer / "incompatible.age"
+    code = """import io,subprocess,sys
+from vpn_orbit.runtime import backup
+from vpn_orbit.runtime.protocol import canonical
+payload=io.BytesIO()
+backup.write_archive(payload,canonical({'v':2,'kind':'vpn-orbit-controller','databases':backup.DBS}),{})
+with open(sys.argv[1],'xb') as out:
+    subprocess.run([backup.AGE,'-e','-r',sys.argv[2]],input=payload.getvalue(),stdout=out,check=True)
+"""
+    run(PYTHON, "-c", code, incompatible, evidence["recipient"])
+    incompatible.chmod(0o600)
+    result = run(ADMIN, "restore-stage", "--archive", incompatible, "--identity", identity,
+                 "--sha256", hashlib.sha256(incompatible.read_bytes()).hexdigest(), check=False)
+    assert result.returncode and b"BACKUP_FORMAT_UNSUPPORTED" in result.stderr
+    assert not list(Path("/var/lib/vpn-orbit-recovery").glob("restore-*"))
     run(ADMIN, "restore-stage", "--archive", transfer / "fixture.age", "--identity", identity, "--sha256", evidence["digest"])
     run("/usr/bin/systemctl", "stop", *UNITS, timeout=100)
     run("/usr/bin/docker", "--host", "unix:///run/docker.sock", "compose", "--project-name", "vpn-orbit",
         "--file", "/etc/vpn-orbit/compose.json", "rm", "--force")
-    run(ADMIN, "restore-apply", "--sha256", evidence["digest"], "--confirm-replace")
+    code = """import os,signal,sys
+from vpn_orbit.runtime import recovery,backup
+apply=recovery.swap_entries
+def stop_after_data(live,work,names):
+    apply(live,work,names)
+    if live==backup.DATA:
+        os.kill(os.getpid(),signal.SIGKILL)
+recovery.swap_entries=stop_after_data
+recovery.install(sys.argv[1],docker_host='unix:///run/docker.sock')
+"""
+    failed = run(PYTHON, "-c", code, evidence["digest"], check=False, timeout=100)
+    assert failed.returncode == -signal.SIGKILL
+    assert Path("/var/lib/vpn-orbit/restore.pending").is_file()
+    run("/usr/bin/systemctl", "start", "vpn-orbit-compose.service", check=False)
+    state = run("/usr/bin/systemctl", "show", "--property=ActiveState", "--value", "vpn-orbit-compose.service")
+    assert state.stdout.strip() == b"inactive"
+    run("/usr/bin/systemctl", "stop", *UNITS, timeout=100)
+    run(ADMIN, "restore-apply", "--sha256", evidence["digest"], "--confirm-replace", "--resume")
     assert hashlib.sha256(Path(local["vault_credential"]).read_bytes()).hexdigest() != evidence["old_credential_sha256"]
     run("/usr/bin/systemctl", "start", *UNITS, timeout=150)
     client, owner = login()
