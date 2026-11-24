@@ -313,6 +313,8 @@ class Lifecycle:
 
     def status(self):
         with self.locked():
+            if os.path.lexists(self.directory / "restore.pending"):
+                return {"state": "UNKNOWN_OUTCOME", "code": "APP_RESTORE_INCOMPLETE"}
             _, document, installation = self.configuration()
             with self.journal.connect() as db:
                 unknown = db.execute("""SELECT id FROM operations WHERE resolution IS NULL
@@ -331,6 +333,8 @@ class Lifecycle:
         if action not in ("install", "start", "remove"):
             refuse("APP_ACTION_INVALID")
         with self.locked():
+            if os.path.lexists(self.directory / "restore.pending"):
+                refuse("APP_RESTORE_INCOMPLETE")
             spec, document, installation = self.configuration()
             if binding != digest(spec):
                 refuse("APP_CONFIG_DRIFT")

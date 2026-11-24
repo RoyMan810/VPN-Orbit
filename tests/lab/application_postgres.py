@@ -9,6 +9,7 @@ import tempfile
 import time
 
 from vpn_orbit.app_lifecycle import Lifecycle, ROOT
+from vpn_orbit.app_archive import capture as capture_app, restore as restore_app
 from vpn_orbit.app_postgres import promote, query, restore, settings, write_encrypted
 from vpn_orbit.app_profiles import canonical, digest
 from vpn_orbit.errors import Denied
@@ -86,6 +87,27 @@ def main():
             assert query(cid, "orbit", "SELECT value FROM fixture") == "captured"
             assert query(cid, promoted["previous_database"], "SELECT value FROM fixture") == "live"
             print(f"Verified encrypted snapshot, transactional restore and safe promotion for {service}.", flush=True)
+        for service in ("panel-db", "bot-db"):
+            app.docker("container", "stop", "--time", "30", inventory["containers"][service]["Id"])
+        full = root / "full.age"
+        capture = capture_app(app.identity, digest(spec), recipient, full)
+        duplicate = app.identity[:-1] + "B"
+        copied = restore_app(full, key, capture["sha256"], duplicate)
+        assert copied["status"] == "RESTORED_STOPPED"
+        target = Lifecycle(duplicate)
+        restored_spec, document, result = target.configuration()
+        assert {**restored_spec, "id": identity} == spec
+        owned = target.verify_inventory(document, result)
+        for service in ("panel-db", "bot-db"):
+            cid = owned["containers"][service]["Id"]
+            target.docker("container", "start", cid)
+            deadline = time.monotonic() + 100
+            while not target.healthy({"containers": {service: {"Id": cid}}}):
+                assert time.monotonic() < deadline
+                time.sleep(1)
+            assert query(cid, "orbit", "SELECT value FROM fixture") == "captured"
+        assert app.verify_inventory(*app.configuration()[1:]) == inventory
+        print("Verified full stopped installation archive, fresh labeled volumes, and boot of both restored databases.", flush=True)
 
 
 if __name__ == "__main__":
