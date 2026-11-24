@@ -303,7 +303,7 @@ def write_archive(stream, index, files):
                 tar.addfile(header, content)
 
 
-def read_archive(stream, *, start=None, sink=None):
+def read_archive(stream, *, start=None, sink=None, validator=validate_manifest):
     """No extract or PAX/GNU extensions; untrusted paths never reach the FS."""
     def exact(size):
         data = stream.read(size)
@@ -327,7 +327,7 @@ def read_archive(stream, *, start=None, sink=None):
     first = member()
     if first.name != MANIFEST or not 0 < first.size <= MANIFEST_LIMIT:
         raise Denied('BACKUP_MANIFEST_INVALID')
-    value = validate_manifest(exact(first.size))
+    value = validator(exact(first.size))
     padding(first.size)
     if start is not None:
         start(value)
@@ -413,7 +413,7 @@ def create(directory, recipient, *, age, retain=None, maintenance=False):
     return {'status': 'CREATED', 'archive': name, 'sha256': digest, 'captured_at': captured, 'decryption_verified': False}
 
 
-def decrypt_archive(archive, identity, *, age, expected_sha256=None, start=None, sink=None):
+def decrypt_archive(archive, identity, *, age, expected_sha256=None, start=None, sink=None, validator=validate_manifest):
     secure_directory(archive.absolute().parent)
     secure_directory(identity.absolute().parent)
     with open_private(archive) as ciphertext, open_private(identity) as private:
@@ -430,7 +430,7 @@ def decrypt_archive(archive, identity, *, age, expected_sha256=None, start=None,
                               stdin=ciphertext, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                               pass_fds=(private.fileno(),)) as cipher:
             try:
-                value = read_archive(cipher.stdout, start=start, sink=sink)
+                value = read_archive(cipher.stdout, start=start, sink=sink, validator=validator)
             except Denied as error:
                 if error.code == "BACKUP_ARCHIVE_TRUNCATED" and cipher.wait(timeout=10):
                     raise Denied("BACKUP_DECRYPTION_FAILED") from None
