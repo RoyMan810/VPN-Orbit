@@ -1,5 +1,7 @@
 """Host-bound OS wrapping; no plaintext credential file, argv or environment."""
 
+import base64
+import binascii
 import os
 from pathlib import Path
 import stat
@@ -9,14 +11,25 @@ from ..errors import Denied
 from .storage import new_private_file, protected_bytes
 
 
+# systemd's CRED_AES256_GCM_BY_HOST. Allow only what seal_credential
+# produces, including on systemd 255, which does not have --refuse-null.
+_HOST_CREDENTIAL = bytes.fromhex("5a1c6a86df9d4096b1d5a65e0862f19a")
+
+
 def unseal_credential(source):
     """Local root only. Return the DEK to the caller, not to a path or log."""
     if os.geteuid() != 0:
         raise Denied("LOCAL_ROOT_REQUIRED")
     sealed = protected_bytes(source, owner=0, exact_mode=0o600)
     try:
+        envelope = base64.b64decode(b"".join(sealed.split()), validate=True)
+    except binascii.Error:
+        raise Denied("OS_CREDENTIAL_UNSEAL_FAILED") from None
+    if not envelope.startswith(_HOST_CREDENTIAL):
+        raise Denied("OS_CREDENTIAL_UNSEAL_FAILED")
+    try:
         result = subprocess.run(
-            ["/usr/bin/systemd-creds", "decrypt", "--name=broker-dek", "--refuse-null", "-", "-"],
+            ["/usr/bin/systemd-creds", "decrypt", "--name=broker-dek", "-", "-"],
             input=sealed, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5,
             env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": "/nonexistent"},
         )

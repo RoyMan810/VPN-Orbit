@@ -12,6 +12,7 @@ from unittest.mock import patch
 from vpn_orbit.admission import Admission
 from vpn_orbit.errors import Denied
 from vpn_orbit.runtime import backup
+from vpn_orbit.runtime import credentials
 from vpn_orbit.runtime.protocol import canonical
 
 
@@ -101,3 +102,16 @@ class SnapshotTests(unittest.TestCase):
                 self.assertEqual(copy.execute('SELECT n FROM state').fetchall(), [(1,)])
             self.assertEqual(writer.execute('SELECT n FROM state').fetchall(), [(1,), (2,)])
             self.assertEqual(a.state()['phase'], 'OPEN')
+
+    def test_unseal_accepts_only_the_host_bound_systemd_envelope(self):
+        import base64
+        key = bytes(32)
+        host_envelope = base64.b64encode(credentials._HOST_CREDENTIAL + b'fixture')
+        with patch.object(credentials.os, 'geteuid', return_value=0), patch.object(
+                credentials, 'protected_bytes', side_effect=[b'wrong', host_envelope]), patch.object(
+                credentials.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, key)) as run:
+            with self.assertRaisesRegex(Denied, 'OS_CREDENTIAL_UNSEAL_FAILED'):
+                credentials.unseal_credential(Path('/unused'))
+            run.assert_not_called()
+            self.assertEqual(credentials.unseal_credential(Path('/unused')), key)
+            self.assertEqual(run.call_args.kwargs['input'], host_envelope)
