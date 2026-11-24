@@ -4,11 +4,13 @@ import json
 import io
 import os
 from pathlib import Path
+import re
 import secrets
 import subprocess
 import tempfile
 import tarfile
 import time
+from urllib.request import Request, urlopen
 
 from vpn_orbit.app_lifecycle import Lifecycle, ROOT
 from vpn_orbit.app_archive import capture as capture_app, restore as restore_app, transfer
@@ -21,7 +23,12 @@ def ready(app, service, cid):
     deadline = time.monotonic() + 100
     while not app.healthy({"containers": {service: {"Id": cid}}}):
         if time.monotonic() >= deadline:
-            raise RuntimeError("Product database or cache did not become healthy")
+            state = app.inspect("container", cid)["State"]
+            markers = re.findall(r"\bP[0-9]{4}\b|permission denied|no space left|ECONNREFUSED|ENOTFOUND|EACCES|"
+                                 r"migration failed|does not exist|already exists|password authentication failed",
+                                 app.docker("logs", "--tail", "80", cid), re.IGNORECASE)
+            raise RuntimeError(f"{service} not healthy: running={state['Running']} exit={state['ExitCode']} "
+                               f"health={state.get('Health', {}).get('Status')} markers={sorted(set(markers))}")
         time.sleep(1)
 
 
@@ -52,6 +59,15 @@ def main():
     inventory = app.inventory(document)
     with app.journal.write() as db:
         db.execute("UPDATE installation SET inventory=? WHERE id=1", (canonical(inventory).decode(),))
+    # Let the real application establish its own migration baseline before
+    # adding our test rows. An empty Pg cluster with a sentinel table isn't
+    # a backup of a configured Remnawave installation.
+    for service in ("panel-db", "panel-redis", "remnawave-panel"):
+        cid = inventory["containers"][service]["Id"]
+        app.docker("container", "start", cid)
+        ready(app, service, cid)
+    for service in ("remnawave-panel", "panel-redis"):
+        app.docker("container", "stop", inventory["containers"][service]["Id"])
     os.umask(0o077)
     with tempfile.TemporaryDirectory(dir="/run") as temp:
         root = Path(temp)
@@ -133,8 +149,16 @@ def main():
             payload.seek(0)
             with tarfile.open(fileobj=payload, mode="r:") as archive:
                 assert archive.extractfile("./fixture.dat").read() == b"synthetic Bedolaga upload"
+        for service in ("panel-redis", "remnawave-panel"):
+            cid = owned["containers"][service]["Id"]
+            target.docker("container", "start", cid)
+            ready(target, service, cid)
+        request = Request("http://127.0.0.1:3000/api/auth/status", headers={
+            "Host": "panel.fixture.invalid", "X-Forwarded-Proto": "https", "X-Forwarded-For": "127.0.0.1"})
+        with urlopen(request, timeout=8) as response:
+            assert response.status == 200 and isinstance(json.load(response), dict)
         assert app.verify_inventory(*app.configuration()[1:]) == inventory
-        print("Verified full stopped installation archive, fresh labeled volumes, and boot of both restored databases.", flush=True)
+        print("Verified restored volumes, both PostgreSQL services, Bedolaga data, and actual restored Panel HTTP.", flush=True)
 
 
 if __name__ == "__main__":
