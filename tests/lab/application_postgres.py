@@ -4,6 +4,7 @@ import json
 import io
 import os
 from pathlib import Path
+import re
 import secrets
 import subprocess
 import tempfile
@@ -22,7 +23,12 @@ def ready(app, service, cid):
     deadline = time.monotonic() + 100
     while not app.healthy({"containers": {service: {"Id": cid}}}):
         if time.monotonic() >= deadline:
-            raise RuntimeError("Product database or cache did not become healthy")
+            state = app.inspect("container", cid)["State"]
+            markers = re.findall(r"\bP[0-9]{4}\b|permission denied|no space left|ECONNREFUSED|ENOTFOUND|EACCES|"
+                                 r"migration failed|does not exist|already exists|password authentication failed",
+                                 app.docker("logs", "--tail", "80", cid), re.IGNORECASE)
+            raise RuntimeError(f"{service} not healthy: running={state['Running']} exit={state['ExitCode']} "
+                               f"health={state.get('Health', {}).get('Status')} markers={sorted(set(markers))}")
         time.sleep(1)
 
 
