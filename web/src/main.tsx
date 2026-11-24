@@ -39,6 +39,47 @@ function message(error: unknown, t: Copy) {
   return details ? `${base} (${details})` : base
 }
 
+interface ControllerStatus {
+  version: string
+  api: 'OK'
+  checked_at: string
+  admission: string
+  unresolved_jobs: number
+}
+
+function ControllerHealth({ lang, expired }: { lang: Language; expired: () => void }) {
+  const [status, setStatus] = useState<ControllerStatus | null>(null)
+  const [failed, setFailed] = useState(false)
+  const [refresh, setRefresh] = useState(0)
+  const ru = lang === 'ru'
+  useEffect(() => {
+    const abort = new AbortController()
+    setFailed(false)
+    setStatus(null)
+    request<ControllerStatus>('/controller/status', { signal: abort.signal })
+      .then(value => { if (!abort.signal.aborted) setStatus(value) })
+      .catch(error => {
+        if (abort.signal.aborted) return
+        if (hasApiStatus(error, 401)) expired()
+        else setFailed(true)
+      })
+    return () => abort.abort()
+  }, [expired, refresh])
+  return <>
+    <h2>{ru ? 'Состояние контроллера' : 'Controller status'}</h2>
+    <button type="button" onClick={() => setRefresh(n => n + 1)}>{ru ? 'Проверить' : 'Check now'}</button>
+    {failed ? <p role="status">{ru ? 'Состояние недоступно' : 'Status unavailable'}</p> : status ?
+      <dl>
+        <dt>{ru ? 'Версия' : 'Version'}</dt><dd>{status.version}</dd>
+        <dt>API</dt><dd>{status.api}</dd>
+        <dt>{ru ? 'Допуск к операциям' : 'Operation admission'}</dt><dd>{status.admission}</dd>
+        <dt>{ru ? 'Неразрешённые инциденты' : 'Unresolved incidents'}</dt><dd>{status.unresolved_jobs}</dd>
+        <dt>{ru ? 'Время проверки' : 'Checked at'}</dt><dd><time dateTime={status.checked_at}>{status.checked_at}</time></dd>
+      </dl> : <p role="status">{ru ? 'Проверка…' : 'Checking…'}</p>}
+    <p>{ru ? 'Полный отчёт доступен на хосте:' : 'Run the full report on the controller host:'} <code>sudo /opt/vpn-orbit/admin diagnose</code></p>
+  </>
+}
+
 function Login({ t, onLogin }: { t: Copy; onLogin: (session: Session) => void }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
@@ -421,6 +462,7 @@ function App() {
           </section>}
           {!restart && view === 'help' && <section className="workspace" aria-labelledby="help-heading">
             <h1 id="help-heading">{t.help}</h1>
+            {session.user.role === 'Owner' && <ControllerHealth lang={lang} expired={expired}/>}
             <h2>{t.helpConnect}</h2><p>{t.helpConnectText}</p>
             <h2>{t.helpHealth}</h2><p>{t.helpHealthText}</p>
             <h2>{t.helpDiagnostics}</h2>
