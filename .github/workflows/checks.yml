@@ -34,7 +34,7 @@ jobs:
       - run: python -m pip install -r requirements-quality.txt
       - run: ruff check .
       - run: python tools/check_repository.py
-      - run: python -m unittest discover -s tests_tools -v
+      - run: python -m unittest discover -s tests/tools -t . -v
 
   time-health:
     name: Stage 1 host TimeHealth / ${{ matrix.source }}
@@ -64,7 +64,7 @@ jobs:
         run: |
           sudo -n /usr/bin/env "PYTHONPATH=$PWD" PYTHONDONTWRITEBYTECODE=1 \
             GITHUB_ACTIONS=true "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" \
-            "$(command -v python)" tests_runtime/lab/time_health.py --isolated-vm --source "$TIME_SOURCE"
+            "$(command -v python)" tests/lab/time_health.py --isolated-vm --source "$TIME_SOURCE"
 
   installation:
     name: ${{ matrix.name }}
@@ -139,7 +139,7 @@ jobs:
       - name: Install and verify the actual host services and container namespaces
         run: |
           sudo -n /usr/bin/env GITHUB_ACTIONS=true "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" \
-            PYTHONDONTWRITEBYTECODE=1 "$(command -v python)" tests_runtime/lab/installation.py --isolated-vm \
+            PYTHONDONTWRITEBYTECODE=1 "$(command -v python)" tests/lab/installation.py --isolated-vm \
             --bundle "$RUNNER_TEMP/vpn-orbit-install-bundle" --trust-key "$RUNNER_TEMP/vpn-orbit-lab-signer.pub" \
             --docker-host "$DOCKER_HOST"
 
@@ -170,8 +170,8 @@ jobs:
           python "$GITHUB_WORKSPACE/tools/fetch_age.py" --output "$age_dir/age.tar.gz"
           tar --no-same-owner -xzf "$age_dir/age.tar.gz" -C "$age_dir" -- age/age age/age-keygen
           export VPN_ORBIT_TEST_AGE_DIR="$age_dir/age"
-          python -m unittest discover -s tests_app -v
-          python -m unittest discover -s tests_runtime -v
+          python -m unittest discover -s tests/app -t . -v
+          python -m unittest discover -s tests/runtime -t . -v
       - name: Exercise synthetic capacity workload
         run: python -m tools.capacity_soak --warmup 0 --seconds 4
 
@@ -191,7 +191,7 @@ jobs:
         run: |
           sudo -n /usr/bin/env "PATH=$PATH" "PYTHONPATH=$PWD" PYTHONDONTWRITEBYTECODE=1 \
             GITHUB_ACTIONS=true "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" \
-            "$(command -v python)" tests_runtime/lab/runtime_boundary.py --isolated-vm
+            "$(command -v python)" tests/lab/runtime_boundary.py --isolated-vm
 
   provisioning-faults:
     name: Provisioning fault injection / disposable SSH namespace
@@ -209,7 +209,7 @@ jobs:
         run: |
           sudo -n /usr/bin/env "PATH=$PATH" "PYTHONPATH=$PWD" PYTHONDONTWRITEBYTECODE=1 \
             GITHUB_ACTIONS=true "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" \
-            "$(command -v python)" tests_tools/lab/provisioning_faults.py --isolated-vm
+            "$(command -v python)" tests/lab/provisioning_faults.py --isolated-vm
 
   firewall-faults:
     name: Firewall faults / disposable nftables and SSH namespace
@@ -226,4 +226,4 @@ jobs:
         run: |
           sudo -n /usr/bin/env "PATH=$PATH" "PYTHONPATH=$PWD" PYTHONDONTWRITEBYTECODE=1 \
             GITHUB_ACTIONS=true "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" \
-            "$(command -v python)" tests_runtime/lab/firewall_namespace.py --isolated-vm
+            "$(command -v python)" tests/lab/firewall_namespace.py --isolated-vm

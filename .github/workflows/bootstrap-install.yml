@@ -8,6 +8,7 @@ on:
       - 'vpn_orbit/**'
       - 'web/**'
       - 'tools/fetch_age.py'
+      - 'tests/lab/installation.py'
       - 'requirements-app.txt'
       - 'pyproject.toml'
       - '.github/workflows/bootstrap-install.yml'
@@ -21,7 +22,7 @@ permissions:
 
 jobs:
   bootstrap:
-    name: Fresh Ubuntu 24.04 / signed install and HTTPS
+    name: Fresh Ubuntu 24.04 / bootstrap install and HTTPS
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -43,7 +44,7 @@ jobs:
           fi
           sudo rm -f /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker.sources
           test ! -e /usr/bin/docker
-      - name: Provision Docker, Python, signed Controller and HTTPS WebUI
+      - name: Provision Docker, Python, verified Controller and HTTPS WebUI
         run: sudo ./install
       - name: Verify installed services and log in through HTTPS
         run: |
@@ -60,7 +61,7 @@ jobs:
           import subprocess
           from urllib.request import HTTPSHandler, HTTPCookieProcessor, Request, build_opener
 
-          fixture_path = Path("tests_runtime/lab/installation.py")
+          fixture_path = Path("tests/lab/installation.py")
           spec = importlib.util.spec_from_file_location("installation_fixture", fixture_path)
           fixture = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(fixture)

@@ -11,5 +11,4 @@ dist/
 .ruff_cache/
 .coverage
 htmlcov/
-.claude/*
-.claude/settings.json
+.claude/

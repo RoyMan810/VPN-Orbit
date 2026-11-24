@@ -423,7 +423,8 @@ function App() {
             <h1 id="help-heading">{t.help}</h1>
             <h2>{t.helpConnect}</h2><p>{t.helpConnectText}</p>
             <h2>{t.helpHealth}</h2><p>{t.helpHealthText}</p>
-            <h2>{t.helpRecovery}</h2><p>{t.helpRecoveryText}</p>
+            <h2>{t.helpDiagnostics}</h2>
+            <p><a href="https://github.com/RoyMan810/VPN-Orbit/blob/main/docs/operations.md">{t.helpDiagnosticsLink}</a></p>
           </section>}
         </> : sessionError != null ? <div className="workspace">
           <p role="alert" className="error">{message(sessionError, t)}</p>
