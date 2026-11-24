@@ -472,6 +472,8 @@ def main(argv=None):
         restore.add_argument("--resume", action="store_true", help="Resume an interrupted restore of this exact archive")
         restore.add_argument("--confirm-replace", action="store_true", required=True,
                              help="Confirm local replacement and retain the previous state for review")
+        schema = commands.add_parser("schema-check", help="Review all installed data contracts without modifying databases")
+        schema.add_argument("--target-schema", type=int, help="Expected SQLite schema of the candidate release")
     args = parser.parse_args(argv)
     try:
         if os.geteuid() != 0:
@@ -490,6 +492,11 @@ def main(argv=None):
             from vpn_orbit.runtime.recovery import install as restore_install
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
             print(json.dumps(restore_install(args.sha256, docker_host=load_installation()["docker_host"], resume=args.resume)))
+        elif args.command == "schema-check":
+            from vpn_orbit.runtime.cli import configuration
+            from vpn_orbit.runtime.data_contract import inspect
+            options = {} if args.target_schema is None else {"target_schema": args.target_schema}
+            print(json.dumps(inspect(configuration(CONFIG / "runtime.json"), **options)))
         else:
             from vpn_orbit.runtime.backup import administer
             print(json.dumps(administer(args)))
