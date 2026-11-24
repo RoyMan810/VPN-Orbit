@@ -2,11 +2,14 @@ name: VPN-Orbit typed Docker restart
 
 on:
   pull_request:
-    paths:
+    paths: &restart_paths
       - .github/workflows/docker-restart.yml
       - remote/**
-      - tests_runtime/lab/docker_restart.py
-      - tests_runtime/test_typed_docker_restart.py
+      - tests/lab/docker_restart.py
+      - tests/runtime/test_typed_docker_restart.py
+  push:
+    branches: [main]
+    paths: *restart_paths
   workflow_dispatch:
 
 permissions:
@@ -29,4 +32,4 @@ jobs:
       - name: Verify the effect and replay on the same pinned Docker daemon
         run: |
           sudo -n /usr/bin/env "DOCKER_HOST=$DOCKER_HOST" GITHUB_ACTIONS=true \
-            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" python3 tests_runtime/lab/docker_restart.py "$VPN_ORBIT_LAB_PYTHON_IMAGE"
+            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" python3 tests/lab/docker_restart.py "$VPN_ORBIT_LAB_PYTHON_IMAGE"

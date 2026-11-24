@@ -1,42 +1,45 @@
 # Разработка VPN-Orbit
 
-## Среда
+## Где что находится
 
-Для локальной проверки используйте Linux и Python 3.15.2 с SQLite ≥3.45. Создайте `.venv` и установите `requirements-dev.txt` вместе с `requirements-quality.txt`. Для crypto tests нужны `age` и `age-keygen` v1.3.2. CI сверяет SHA-256 официального архива до запуска. `age` должен быть в `PATH`. Для runtime tests задайте `VPN_ORBIT_TEST_AGE_DIR` с обоими executables.
+| Путь | Назначение |
+| --- | --- |
+| [`vpn_orbit/`](vpn_orbit/) | Python-пакет: API, база, очередь, Worker и runtime. |
+| [`web/`](web/) | React/TypeScript WebUI, сборка и браузерные тесты. |
+| [`deploy/`](deploy/) и [`install`](install) | Публичная точка установки, сборка комплекта, Dockerfile и host-профили. Compose и Nginx генерируются установщиком. |
+| [`remote/`](remote/) | Ограниченные SSH-gateways и helper-команды для управляемых VPS. |
+| [`tests/`](tests/) | Python-тесты `app/`, `runtime/`, `tools/` и изолированные системные сценарии `lab/`. |
+| [`tools/`](tools/) | Подготовка VPS, локальная диагностика и инструменты сопровождения репозитория. |
+| [`docs/`](docs/) | Руководства для пользователей и администраторов. |
+
+Рабочие пути `install`, `deploy/`, `remote/`, `tools/prepare_vps.py` и установленный CLI не меняются при переносе внутренних тестов. Runtime pins — в `requirements-app.txt`, тестовые — в `requirements-dev.txt`, линтер — в `requirements-quality.txt`. Согласуйте версии в этих файлах, `pyproject.toml` и [lock-файлах комплекта](deploy/).
+
+## Локальные проверки
+
+На Linux используйте Python 3.15.2 с SQLite ≥3.45. Из корня репозитория:
 
 ```sh
 python3.15 -m venv .venv
-.venv/bin/python -m pip install -r requirements-dev.txt -r requirements-quality.txt
-.venv/bin/python -m pip install --no-deps -e .
+. .venv/bin/activate
+python -m pip install -r requirements-dev.txt -r requirements-quality.txt
+python -m pip install --no-deps -e .
+ruff check .
+python tools/check_repository.py
 ```
 
-Runtime dependencies закреплены в `requirements-app.txt`, лабораторные — в `requirements-lab.txt`, инструменты качества — в `requirements-quality.txt`. Согласуйте версии пересекающихся packages и direct dependencies в `pyproject.toml`. Dependabot открывает сгруппированные PR; обновление проходит те же проверки и приёмку, что и код.
-
-## Проверки
-
-Из корня репозитория:
+Для crypto/runtime-тестов подготовьте `age` и `age-keygen` v1.3.2. Команда загрузки сверяет закреплённый SHA-256 до распаковки:
 
 ```sh
-.venv/bin/ruff check .
-.venv/bin/python tools/check_repository.py
-.venv/bin/python -m unittest discover -s tests_tools -v
-.venv/bin/python -m unittest discover -s tests -v
-.venv/bin/python -m unittest discover -s tests_app -v
-.venv/bin/python -m unittest discover -s tests_runtime -v
+age_dir=$(mktemp -d)
+python tools/fetch_age.py --output "$age_dir/age.tar.gz" &&
+  tar --no-same-owner -xzf "$age_dir/age.tar.gz" -C "$age_dir" -- age/age age/age-keygen &&
+  VPN_ORBIT_TEST_AGE_DIR="$age_dir/age" python -m unittest discover -s tests -t . -v
 ```
 
-Ruff проверяет синтаксис, неопределённые имена и выбранные ошибки корректности; массовое автоформатирование принятого кода не применяется. Repository checker проверяет локальные Markdown links и согласованность dependency pins. Регрессионный тест добавляется для изменения поведения или найденного дефекта; косметические правки не требуют отдельного теста.
-
-Проверки первой версии находятся в `tests_app/`, `tests_runtime/` и `tests_tools/`. При удалении теста проверьте, что его сценарий покрыт другой исполняемой проверкой.
-
-CI дополнительно запускает настоящие Linux UID, SSH, Docker, systemd/Compose и TimeHealth стенды. Отдельный workflow проверяет потерю исходной VM и перенос Vault. Native fixtures меняют окружение и запускаются только на disposable GitHub-hosted VM; `--isolated-vm` не предназначен для рабочей системы.
+Для отдельного набора используйте `python -m unittest discover -s tests/app -t . -v` (или `tests/runtime`, `tests/tools`). [Инструкция WebUI](web/README.md) описывает `npm ci`, сборку и Playwright. Регрессионные тесты нужны для изменения поведения, а не для косметических правок. Не выполняйте системные сценарии из `tests/lab/` на рабочей машине или пользовательской VPS: они меняют окружение и запускаются в одноразовых GitHub-hosted VM.
 
 ## Ветки и PR
 
-Основная ветка — `main`. Используйте короткоживущие `feat/…`, `fix/…`, `chore/…`, `docs/…` или `test/…`; один PR решает одну связанную задачу. В описании укажите итоговое поведение, проверки и их ограничения. Перед слиянием приложите результаты локальных проверок.
+Создавайте короткоживущую ветку от `main`. В PR укажите изменения, выполненные проверки и ограничения. Дождитесь CI перед слиянием. Полный CI проверяет пакет и тесты, реальную установку с systemd/Compose, SSH и изоляцию процессов; отдельные workflows запускают WebUI и продуктовые сценарии. Branch maintenance удаляет только проверенные временные ветки со слитыми PR, используя lease на точную вершину.
 
-После изменения `main` workflow Branch maintenance удаляет только временные ветки с влитым PR: вершина должна совпадать с принятой вершиной PR, merge commit должен входить в текущую историю `main`, открытых PR быть не должно. Default/protected branches исключены. Git push использует точный `--force-with-lease` для каждой удаляемой ссылки; изменение ветки после проверки прерывает весь atomic push. Новые credentials не требуются: token выдаётся только job обслуживания. Workflow исполняет код из `main` и не делает checkout головной ветки PR.
-
-## Документация
-
-Обновляйте существующую инструкцию вместе с изменением поведения. Текущие инструкции и план находятся в [docs](docs/README.md). Промежуточные планы и черновые отчёты после завершения работы остаются в истории Git. Новые ключи, БД, сборки и локальные результаты тестов в коммит не включаются.
+Обновляйте существующее руководство вместе с изменением поведения. Планы и промежуточные отчёты остаются в истории Git. Не коммитьте ключи, базы, локальные сборки и артефакты тестов.

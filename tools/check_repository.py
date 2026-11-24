@@ -18,7 +18,8 @@ def normalized(name):
 def documentation_errors(root):
     root = root.resolve()
     files = set(root.glob("*.md"))
-    for folder in ("docs", "evidence", ".github"):
+    files.update((root / "web").glob("*.md"))
+    for folder in ("docs", ".github"):
         files.update((root / folder).rglob("*.md"))
     errors = []
     for path in sorted(files):

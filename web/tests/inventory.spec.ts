@@ -382,17 +382,17 @@ test('distinguishes current SSH reachability, historical data and an unchecked V
   await expect(detail.getByText('Not checked', { exact: true })).toBeVisible()
 })
 
-test('shows Firewall, SSH and Caddy changes as unsupported in English and Russian', async ({ page }) => {
+test('shows direct firewall and SSH edits and Caddy management as unsupported in both languages', async ({ page }) => {
   await signIn(page)
   const detail = page.getByRole('region', { name: 'VPS details' })
   await page.getByRole('button', { name: new RegExp(never) }).click()
-  for (const action of ['Firewall and SSH changes', 'Caddy management']) {
+  for (const action of ['Direct firewall and SSH edits', 'Caddy management']) {
     const fact = detail.getByText(action, { exact: true }).locator('..')
     await expect(fact.getByText('Unsupported', { exact: true })).toBeVisible()
   }
   await page.getByLabel('Language').selectOption('ru')
   const russianDetail = page.getByRole('region', { name: 'Карточка VPS' })
-  for (const action of ['Изменения Firewall и SSH', 'Операции управления Caddy']) {
+  for (const action of ['Прямое редактирование Firewall и SSH', 'Операции управления Caddy']) {
     const fact = russianDetail.getByText(action, { exact: true }).locator('..')
     await expect(fact.getByText('Не поддерживаются', { exact: true })).toBeVisible()
   }
@@ -935,6 +935,8 @@ test('first-run help and device time settings are keyboard accessible', async ({
   await help.focus()
   await page.keyboard.press('Enter')
   await expect(page.getByRole('heading', { name: 'Connect your first VPS' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Open the troubleshooting guide (Russian)' })).toHaveAttribute(
+    'href', 'https://github.com/RoyMan810/VPN-Orbit/blob/main/docs/operations.md')
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await page.getByLabel('Time zone').selectOption('UTC')
   await page.reload()

@@ -1,12 +1,13 @@
 # Документация VPN-Orbit
 
-- [План первой версии](first-release.md)
-- [Установка контроллера, HTTPS и вход](stage1-installation.md)
-- [Инвентарь VPS, диагностика и стендовый restart](stage2-inventory.md)
-- [Веб-интерфейс](../web/README.md)
-- [Локальные проверки для разработки](../CONTRIBUTING.md)
+Руководства описывают выпущенный MVP `v1.0.0`.
 
-## Справка по действующему коду
+| Задача | Руководство |
+| --- | --- |
+| Установить контроллер, создать владельца, настроить HTTPS | [Установка](installation.md) |
+| Подготовить и подключить VPS, проверить SSH, настроить firewall или тестовый перезапуск | [Управление VPS](vps.md) |
+| Настроить Remnawave Panel/Node или Bedolaga Bot/Cabinet | [Приложения](applications.md) |
+| Найти причину отказа, проверить аудит, время или состояние операции | [Обслуживание и диагностика](operations.md) |
+| Собрать проект, запустить тесты, открыть PR | [Разработка](../CONTRIBUTING.md) |
 
-- [Вход и аудит](stage1-foundation.md) · [Worker, Broker и SSH](stage1-runtime.md)
-- [Проверка времени](stage1-time-health.md)
+[Обзор проекта](../README.md) · [Релиз v1.0.0](https://github.com/RoyMan810/VPN-Orbit/releases/tag/v1.0.0)
