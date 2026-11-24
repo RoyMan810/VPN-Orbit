@@ -47,10 +47,20 @@ interface ControllerStatus {
   unresolved_jobs: number
 }
 
+interface ReleaseStatus {
+  status: 'UPDATE_AVAILABLE' | 'NO_NEWER_RELEASE' | 'UNAVAILABLE'
+  github_release_version: string | null
+  checked_at: string
+}
+
 function ControllerHealth({ lang, expired }: { lang: Language; expired: () => void }) {
   const [status, setStatus] = useState<ControllerStatus | null>(null)
   const [failed, setFailed] = useState(false)
   const [refresh, setRefresh] = useState(0)
+  const [release, setRelease] = useState<ReleaseStatus | null>(null)
+  const [releaseFailure, setReleaseFailure] = useState(false)
+  const [releaseCheck, setReleaseCheck] = useState(0)
+  const [checkingRelease, setCheckingRelease] = useState(false)
   const ru = lang === 'ru'
   useEffect(() => {
     const abort = new AbortController()
@@ -65,6 +75,23 @@ function ControllerHealth({ lang, expired }: { lang: Language; expired: () => vo
       })
     return () => abort.abort()
   }, [expired, refresh])
+  useEffect(() => {
+    if (releaseCheck === 0) return
+    const abort = new AbortController()
+    setCheckingRelease(true)
+    setReleaseFailure(false)
+    request<ReleaseStatus>('/controller/release', { signal: abort.signal })
+      .then(value => { if (!abort.signal.aborted) setRelease(value) })
+      .catch(error => {
+        if (abort.signal.aborted) return
+        if (hasApiStatus(error, 401)) expired()
+        else {
+          setRelease(null)
+          setReleaseFailure(true)
+        }
+      }).finally(() => { if (!abort.signal.aborted) setCheckingRelease(false) })
+    return () => abort.abort()
+  }, [expired, releaseCheck])
   return <>
     <h2>{ru ? 'Состояние контроллера' : 'Controller status'}</h2>
     <button type="button" onClick={() => setRefresh(n => n + 1)}>{ru ? 'Проверить' : 'Check now'}</button>
@@ -77,6 +104,22 @@ function ControllerHealth({ lang, expired }: { lang: Language; expired: () => vo
         <dt>{ru ? 'Время проверки' : 'Checked at'}</dt><dd><time dateTime={status.checked_at}>{status.checked_at}</time></dd>
       </dl> : <p role="status">{ru ? 'Проверка…' : 'Checking…'}</p>}
     <p>{ru ? 'Полный отчёт доступен на хосте:' : 'Run the full report on the controller host:'} <code>sudo /opt/vpn-orbit/admin diagnose</code></p>
+    <h2>{ru ? 'Обновление' : 'Software update'}</h2>
+    <button type="button" disabled={checkingRelease} onClick={() => setReleaseCheck(n => n + 1)}>
+      {ru ? 'Проверить версии' : 'Check for updates'}
+    </button>
+    {checkingRelease ? <p role="status">{ru ? 'Проверка…' : 'Checking…'}</p> :
+      (releaseFailure || release?.status === 'UNAVAILABLE') ?
+        <p role="status">{ru ? 'Сведения о выпусках недоступны' : 'Release information unavailable'}</p> :
+        release && <p role="status">
+          {release.status === 'UPDATE_AVAILABLE'
+            ? `${ru ? 'Доступен релиз' : 'Release available'}: ${release.github_release_version}`
+            : ru ? 'Более нового стабильного выпуска нет' : 'No newer stable release'}
+          {' · '}<time dateTime={release.checked_at}>{release.checked_at}</time>
+        </p>}
+    <p><a href="https://github.com/RoyMan810/VPN-Orbit/blob/main/docs/operations.md#переход-с-v100">
+      {ru ? 'Инструкция безопасного обновления' : 'Safe update instructions'}
+    </a></p>
   </>
 }
 

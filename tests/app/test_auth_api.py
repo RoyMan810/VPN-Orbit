@@ -66,6 +66,19 @@ class ControllerStatusTests(Fixture):
         self.assertEqual(denied.status_code, 403)
         self.assertNotIn("unresolved_jobs", denied.json())
 
+    def test_release_check_is_owner_only_cached_and_does_not_verify_packages(self):
+        url = "/api/v1/controller/release"
+        self.create_user(role="Admin")
+        with patch("vpn_orbit.release_info.discover", return_value={"status": "UPDATE_AVAILABLE",
+                   "installed_version": "1.0.0", "github_release_version": "1.1.0", "artifact_verified": False}) as discover:
+            self.assertEqual(self.other_client("operator").get(url).status_code, 403)
+            discover.assert_not_called()
+            result = self.client.get(url)
+            self.assertEqual(result.status_code, 200)
+            self.assertFalse(result.json()["artifact_verified"])
+            self.assertEqual(result.json(), self.client.get(url).json())
+            discover.assert_called_once()
+
 
 class BootstrapTests(unittest.TestCase):
     def setUp(self):

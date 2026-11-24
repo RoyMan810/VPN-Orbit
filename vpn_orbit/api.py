@@ -28,6 +28,7 @@ from .firewall_requests import (check_firewall_draft, firewall_timeline, record_
                                 request_firewall_apply, request_firewall_reconciliation, save_firewall_draft)
 from .inventory import Inventory
 from .queue import JobQueue
+from .release_info import ReleaseLookup
 from .restart_requests import request_reconciliation, request_restart, restart_timeline
 from .runtime.protocol import ULID
 from .runtime.ssh_enrollment import verify_credentials
@@ -232,6 +233,7 @@ def create_app(settings: Settings, *, auth: AuthService | None = None, enrollmen
     queue = JobQueue(service.store, clock=service.clock)
     inventory = Inventory(service.store, clock=service.clock)
     audit_scan = Lock()
+    releases = ReleaseLookup(__version__)
     ssh_enrollment = Lock()
     app = FastAPI(title="VPN-Orbit API", version=__version__, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.auth = service
@@ -300,6 +302,12 @@ def create_app(settings: Settings, *, auth: AuthService | None = None, enrollmen
         writers = service.store.writers
         return {"version": __version__, "api": "OK", "checked_at": datetime.now(UTC).isoformat(timespec="seconds"),
                 "admission": writers.state()["phase"] if writers else "NO_DATA", "unresolved_jobs": unresolved}
+
+    @app.get("/api/v1/controller/release")
+    def controller_release(actor=Depends(principal)):
+        if actor.role != Role.OWNER:
+            raise Denied("FORBIDDEN")
+        return releases.check()
 
     @app.post("/api/v1/auth/login")
     def login(body: Login, request: Request, response: Response):

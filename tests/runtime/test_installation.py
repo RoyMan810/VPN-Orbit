@@ -29,7 +29,7 @@ from installer import (check_buildx, advise_capacity, check_update_bundle, compo
 class InstallationTests(unittest.TestCase):
     def test_discovery_returns_only_a_stable_version_and_does_not_verify_artifacts(self):
         from io import BytesIO
-        with patch("installer.build_opener") as build:
+        with patch("vpn_orbit.release_info.build_opener") as build:
             def github(tag, **overrides):
                 build.return_value.open.return_value = BytesIO(canonical(
                     {"tag_name": tag, "draft": False, "prerelease": False, **overrides}))

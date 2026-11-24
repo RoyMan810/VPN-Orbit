@@ -21,7 +21,7 @@ import sys
 import tempfile
 import traceback
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener, urlopen
+from urllib.request import HTTPRedirectHandler, urlopen
 
 from artifact import AGE_FILE, ArtifactError, bundle_channel, canonical, snapshot, trusted_key
 
@@ -35,7 +35,6 @@ HOST_UNITS = ("vpn-orbit-supervisor.socket", "vpn-orbit-supervisor.service",
               "vpn-orbit-broker.socket", "vpn-orbit-broker.service")
 COMPOSE_UNIT = "vpn-orbit-compose.service"
 DOCKER = "/usr/bin/docker"
-GITHUB_RELEASES = "https://api.github.com/repos/RoyMan810/VPN-Orbit/releases/latest"
 
 
 def command(*args, timeout=60, env=None):
@@ -287,23 +286,12 @@ def stable_version(version):
 
 
 def discover_release(installed):
-    current = stable_version(installed)
-    request = Request(GITHUB_RELEASES, headers={"Accept": "application/vnd.github+json", "User-Agent": "VPN-Orbit-maintenance"})
+    from vpn_orbit.errors import Denied
+    from vpn_orbit.release_info import discover
     try:
-        with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=10) as response:
-            data = response.read(1024**2 + 1)
-        if len(data) > 1024**2:
-            raise ValueError
-        release = json.loads(data)
-        tag = release["tag_name"]
-        if release["draft"] is not False or release["prerelease"] is not False or not tag.startswith("v"):
-            raise ValueError
-        latest = stable_version(tag[1:])
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, ArtifactError):
-        raise ArtifactError("UPDATE_RELEASE_DISCOVERY_UNAVAILABLE") from None
-    return {"installed_version": installed, "github_release_version": tag[1:],
-            "status": "UPDATE_AVAILABLE" if latest > current else "NO_NEWER_RELEASE",
-            "artifact_verified": False}
+        return discover(installed)
+    except Denied as error:
+        raise ArtifactError(error.code) from None
 
 
 def check_update_bundle(args, installed):
