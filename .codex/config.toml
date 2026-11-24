@@ -1,0 +1,8 @@
+# Model IDs must be supported by the configured provider/client.
+model = "gpt-6.2-sol"
+model_reasoning_effort = "high"
+
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 2
+default_subagent_model = "gpt-6.2-sol"
