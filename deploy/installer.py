@@ -467,6 +467,9 @@ def main(argv=None):
     if Path(sys.prefix) == APP / "venv":
         from vpn_orbit.runtime.backup import add_commands
         add_commands(commands)
+        diagnostic = commands.add_parser("diagnose", help="Collect a local diagnostic report without secrets")
+        diagnostic.add_argument("--output", type=Path, help="Write a new 0600 JSON report in a protected directory")
+        diagnostic.add_argument("--backup-directory", default=Path("/var/backups/vpn-orbit"), type=Path)
         restore = commands.add_parser("restore-apply", help="Install staged state on this stopped controller in read-only recovery")
         restore.add_argument("--sha256", required=True)
         restore.add_argument("--resume", action="store_true", help="Resume an interrupted restore of this exact archive")
@@ -486,6 +489,12 @@ def main(argv=None):
             if (DATA / "restore.pending").exists():
                 raise ArtifactError("RESTORE_RESUME_REQUIRED")
             create_owner(args.username)
+        elif args.command == "diagnose":
+            from vpn_orbit.runtime.diagnostics import report, write_report
+            info = report(load_installation(), directory=args.backup_directory)
+            if args.output:
+                write_report(args.output, info)
+            print(json.dumps(info))
         elif args.command == "restore-apply":
             os.umask(0o077)
             import resource
@@ -503,7 +512,7 @@ def main(argv=None):
     except Exception as error:
         # Keep arbitrary subprocess, filesystem, validation and secret values out of output.
         from_code = getattr(error, "code", None)
-        category = {"backup": "BACKUP", "backup-verify": "BACKUP",
+        category = {"backup": "BACKUP", "backup-verify": "BACKUP", "diagnose": "DIAGNOSTICS",
                     "restore-stage": "RESTORE", "restore-apply": "RESTORE"}.get(args.command, "INSTALLATION")
         code = str(error) if isinstance(error, ArtifactError) else from_code or category + "_UNAVAILABLE"
         print("VPN-Orbit: " + code, file=sys.stderr)

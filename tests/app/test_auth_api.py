@@ -53,6 +53,20 @@ class Fixture(unittest.TestCase):
         return client
 
 
+class ControllerStatusTests(Fixture):
+    def test_status_reports_only_allowlisted_fields_to_owner(self):
+        url = "/api/v1/controller/status"
+        result = self.client.get(url)
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.headers["cache-control"], "no-store")
+        self.assertEqual(set(result.json()), {"version", "api", "checked_at", "admission", "unresolved_jobs"})
+        self.assertEqual(result.json()["admission"], "NO_DATA")
+        self.create_user(role="Admin")
+        denied = self.other_client("operator").get(url)
+        self.assertEqual(denied.status_code, 403)
+        self.assertNotIn("unresolved_jobs", denied.json())
+
+
 class BootstrapTests(unittest.TestCase):
     def setUp(self):
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))

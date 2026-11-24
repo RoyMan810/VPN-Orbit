@@ -31,6 +31,17 @@ test('distinguishes missing dependency data on earlier SSH observations', async 
   await expect(details.getByText('Unavailable in this observation', { exact: true })).toHaveCount(3)
 })
 
+test('shows the Owner basic controller status and retries an unavailable check', async ({ page }) => {
+  await page.route('**/api/v1/controller/status', route => route.fulfill({ status: 503, json: {} }), { times: 1 })
+  await signIn(page)
+  await page.getByRole('button', { name: 'Help', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Controller status' })).toBeVisible()
+  await expect(page.getByText('Status unavailable', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Check now' }).click()
+  await expect(page.getByText('Operation admission', { exact: true })).toBeVisible()
+  await expect(page.getByText('sudo /opt/vpn-orbit/admin diagnose', { exact: true })).toBeVisible()
+})
+
 test('checks audit integrity on demand and displays the latest result', async ({ page }) => {
   let checks = 0
   page.on('request', req => {

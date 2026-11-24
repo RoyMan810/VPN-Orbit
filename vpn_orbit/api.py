@@ -1,5 +1,6 @@
 """Versioned authentication, audit and scoped observation-job API."""
 
+from datetime import UTC, datetime
 import ipaddress
 import sqlite3
 from threading import Lock
@@ -289,6 +290,16 @@ def create_app(settings: Settings, *, auth: AuthService | None = None, enrollmen
     def health():
         # Liveness only; does not assert remote health or recovery readiness.
         return {"status": "alive", "version": __version__}
+
+    @app.get("/api/v1/controller/status")
+    def controller_status(actor=Depends(principal)):
+        if actor.role != Role.OWNER:
+            raise Denied("FORBIDDEN")
+        with service.store.read() as db:
+            unresolved = db.execute("SELECT count(*) FROM job_incidents").fetchone()[0]
+        writers = service.store.writers
+        return {"version": __version__, "api": "OK", "checked_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                "admission": writers.state()["phase"] if writers else "NO_DATA", "unresolved_jobs": unresolved}
 
     @app.post("/api/v1/auth/login")
     def login(body: Login, request: Request, response: Response):

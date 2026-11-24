@@ -186,6 +186,13 @@ else:
  sys.exit('restored controller can dispatch')
 """
         run("/opt/vpn-orbit/venv/bin/python", "-c", probe)
+        report = json.loads(run(admin, "diagnose", "--backup-directory", repo).stdout)
+        checks = report["checks"]
+        for name in ("api", "worker", "compose", "broker", "supervisor", "sqlite", "vault", "audit_outbox"):
+            assert checks[name]["status"] == "OK", (name, checks[name])
+        assert checks["backup"]["code"] == "BACKUP_PRESENT_NOT_VERIFIED"
+        assert checks["restore"]["code"] == "RESTORE_QUARANTINE"
+        assert checks["https"]["status"] == "NO_DATA"  # Lab proxy is not an installed web service.
         print("Restored the stopped controller on the disposable host; Owner login passed and dispatch stayed closed.", flush=True)
 
 
