@@ -87,4 +87,6 @@ jobs:
             --age-keygen "$RUNNER_TEMP/age/age-keygen" --scenario "$SCENARIO"
       - name: Inspect only the controller units on failure
         if: failure()
-        run: sudo journalctl --no-pager -n 30 -u vpn-orbit-compose -u vpn-orbit-web -u vpn-orbit-broker -u vpn-orbit-supervisor
+        run: |
+          sudo stat -c '%a %u %g %s %F %n' /opt/vpn-orbit-bootstrap/{nginx.conf,web.key,web.pem,web-ca.pem}
+          sudo journalctl --no-pager -n 30 -u vpn-orbit-compose -u vpn-orbit-web -u vpn-orbit-broker -u vpn-orbit-supervisor
