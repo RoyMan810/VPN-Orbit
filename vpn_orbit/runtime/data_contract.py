@@ -23,16 +23,18 @@ REQUIRED_TABLES = {
 def inspect(config, *, target_schema=SCHEMA_VERSION):
     """Read one protected view of the current database and policy contracts.
 
-    There are no schema-changing transitions in this release. Only an exact
-    recognized on-disk state is compatible; this tool never rewrites a DB.
+    A layout with a known forward route is compatible but requires explicit
+    migration in staging. This check never rewrites a database.
     """
     from . import backup
     from .authority import host_binding
+    from .migrations import plan
 
     if type(target_schema) is not int or target_schema != SCHEMA_VERSION:
         raise Denied("SCHEMA_TRANSITION_UNSUPPORTED")
     backup.bound_layout(config)
     writers = Admission(config["writer_directory"])
+    migrations = []
     with writers.exclusive(timeout=5), ExitStack() as reads:
         phase = writers.state()["phase"]
         policy = Policy.load(config["targets"])
@@ -43,11 +45,9 @@ def inspect(config, *, target_schema=SCHEMA_VERSION):
                 if error.code == "BACKUP_SCHEMA_UNSUPPORTED":
                     raise Denied("SCHEMA_CURRENT_UNSUPPORTED") from None
                 raise
-            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_schema WHERE type='table'")}
-            if not REQUIRED_TABLES[name] <= tables:
-                raise Denied("SCHEMA_CURRENT_UNSUPPORTED")
+            migrations.extend(step.name for step in plan(db, name))
             if name == "control-gate/gate.sqlite3":
                 if db.execute("SELECT policy_digest, host_binding FROM gate WHERE id=1").fetchone() != (policy.digest, host_binding()):
                     raise Denied("SCHEMA_AUTHORITY_BINDING_MISMATCH")
-        return {"status": "COMPATIBLE", "migration": "NOT_REQUIRED", "databases": DATABASES,
-                "formats": FORMATS, "writer_phase": phase}
+        return {"status": "COMPATIBLE", "migration": "REQUIRED" if migrations else "NOT_REQUIRED",
+                "migration_steps": migrations, "databases": DATABASES, "formats": FORMATS, "writer_phase": phase}

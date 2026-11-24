@@ -22,6 +22,7 @@ from nacl.secret import Aead
 from . import backup
 from .authority import host_binding
 from .credentials import seal_credential, unseal_credential
+from .migrations import migrate_staged
 from .policy import Policy
 from .protocol import canonical, checksum
 from .ssh import verify_known_hosts
@@ -165,11 +166,12 @@ def stage(archive, identity, digest, *, age):
             manifest = backup.decrypt_archive(archive, identity, age=age, expected_sha256=digest,
                                               start=lambda value: check_compatibility(value, work), sink=sink)
             policy, source_id = check_contract(work, manifest, dek.getvalue(), signing_key.getvalue())
+            migrations = migrate_staged(work)
             quarantine_state(work, policy, source_id, digest)
             (work / 'credentials').mkdir(mode=0o700)
             seal_credential(dek.getvalue(), work / 'credentials/broker-dek.cred')
             seal_credential(signing_key.getvalue(), work / 'credentials/authority.cred', name='restore-authority-key')
-        value = {'status': 'STAGED_READ_ONLY', 'archive_sha256': digest, 'directory': final.name,
+        value = {'status': 'STAGED_READ_ONLY', 'archive_sha256': digest, 'directory': final.name, 'migrations': migrations,
                  'controller_version': manifest['installation']['version'], 'services_started': False}
         new_private_file(work / 'recovery.json', canonical(value))
         for path in work.rglob('*'):
