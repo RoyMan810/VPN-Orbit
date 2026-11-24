@@ -94,10 +94,17 @@ def installation_files(cfg):
     secure_directory(CONFIG / 'credentials', private=True)
     secure_directory(DATA)
     files = {}
+
+    def read(name, path, **kwargs):
+        try:
+            files[name] = protected_bytes(path, owner=0, **kwargs)
+        except Denied:
+            raise Denied("BACKUP_PROTECTED_" + name.upper().replace("/", "_").replace(".", "_").replace("-", "_")) from None
+
     for name in ('runtime.json', 'targets.json', 'compose.json', 'gate.pub'):
-        files['config/' + name] = protected_bytes(CONFIG / name, owner=0, maximum=1024**2)
+        read('config/' + name, CONFIG / name, maximum=1024**2)
     for name in ('installation.json', 'install-state.json'):
-        files[name] = protected_bytes(APP / name, owner=0, exact_mode=0o600)
+        read(name, APP / name, exact_mode=0o600)
     install = json.loads(files['installation.json'])
     status = json.loads(files['install-state.json'])
     if (install.get('v') != 1 or install.get('project') != 'vpn-orbit' or status.get('v') != 1
@@ -108,14 +115,14 @@ def installation_files(cfg):
     trust = {'signature': 'release-trust.pub', 'sha256': 'release-authentication.json'}.get(install.get('authentication'))
     if trust is None:
         raise Denied('BACKUP_INSTALLATION_INVALID')
-    files['config/' + trust] = protected_bytes(CONFIG / trust, owner=0)
+    read('config/' + trust, CONFIG / trust)
     if os.path.lexists(UNITS / 'vpn-orbit-web.service'):
         secure_directory(WEB)
-        files['web/unit'] = protected_bytes(UNITS / 'vpn-orbit-web.service', owner=0)
-        files['web/nginx.conf'] = protected_bytes(WEB / 'nginx.conf', owner=0)
+        read('web/unit', UNITS / 'vpn-orbit-web.service')
+        read('web/nginx.conf', WEB / 'nginx.conf')
         if cfg['public_origin'] == 'https://127.0.0.1:18443':
             for name in ('web.key', 'web.pem', 'web-ca.pem'):
-                files['web/' + name] = protected_bytes(WEB / name, owner=0, maximum=65536, private=name == 'web.key')
+                read('web/' + name, WEB / name, maximum=65536, private=name == 'web.key')
     return files, install
 
 
