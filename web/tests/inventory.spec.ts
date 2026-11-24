@@ -403,9 +403,10 @@ test('distinguishes current SSH reachability, historical data and an unchecked V
   await expect(detail.getByText('Unknown', { exact: true })).toBeVisible()
   await expect(detail.getByText('Observation expired', { exact: true })).toBeVisible()
   await expect(detail.getByText('Last successful observation', { exact: true })).toBeVisible()
-  await expect(detail.getByText('Docker', { exact: true })).toHaveCount(0)
+  await expect(detail.getByText('These project observations are historical.', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: new RegExp(never) }).click()
   await expect(detail.getByText('Not checked', { exact: true })).toBeVisible()
+  await expect(detail.getByText('Docker', { exact: true })).toHaveCount(0)
 })
 
 test('shows direct firewall and SSH edits and Caddy management as unsupported in both languages', async ({ page }) => {
