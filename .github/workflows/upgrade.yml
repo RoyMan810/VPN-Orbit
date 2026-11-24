@@ -2,10 +2,10 @@ name: VPN-Orbit in-place upgrade
 
 on:
   pull_request:
-    paths: [".github/workflows/upgrade.yml", "deploy/**", "vpn_orbit/**", "tests/lab/upgrade.py", "web/**"]
+    paths: [".github/workflows/upgrade.yml", "deploy/**", "vpn_orbit/**", "tests/lab/upgrade.py", "web/**", "pyproject.toml", "requirements-*.txt"]
   push:
     branches: [main]
-    paths: [".github/workflows/upgrade.yml", "deploy/**", "vpn_orbit/**", "tests/lab/upgrade.py", "web/**"]
+    paths: [".github/workflows/upgrade.yml", "deploy/**", "vpn_orbit/**", "tests/lab/upgrade.py", "web/**", "pyproject.toml", "requirements-*.txt"]
   workflow_dispatch:
 
 permissions:
@@ -43,7 +43,7 @@ jobs:
           git worktree add --detach "$RUNNER_TEMP/new"
           cd "$RUNNER_TEMP/new"
           python - <<'PY'
-          import json, os, re
+          import json, os, re, tomllib
           from pathlib import Path
           from nacl.signing import SigningKey
           root = Path(os.environ["RUNNER_TEMP"])
@@ -52,9 +52,13 @@ jobs:
           key.touch(mode=0o600, exist_ok=False)
           key.write_bytes(bytes(signer))
           (root / "fixture-signing.pub").write_bytes(bytes(signer.verify_key))
-          for name in ("pyproject.toml", "vpn_orbit/__init__.py", "vpn_orbit/release-manifest.json"):
-              path = Path(name)
-              path.write_text(path.read_text().replace('"1.0.0"', '"1.1.0"', 1))
+          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          assert version in {"1.0.0", "1.1.0"}, version
+          if version == "1.0.0":
+              for name in ("pyproject.toml", "vpn_orbit/__init__.py", "vpn_orbit/release-manifest.json"):
+                  path = Path(name)
+                  path.write_text(path.read_text().replace('"1.0.0"', '"1.1.0"', 1))
+          assert json.loads(Path("vpn_orbit/release-manifest.json").read_text())["version"] == "1.1.0"
           if os.environ["SCENARIO"] == "rollback":
               unit = Path("deploy/systemd/vpn-orbit-broker.service")
               unit.write_text(re.sub(r"(?m)^ExecStart=.*$", "ExecStart=/usr/bin/false", unit.read_text()))
@@ -65,7 +69,9 @@ jobs:
               assert source.count(marker) == 1
               path.write_text(source.replace(marker, '(_AUDIT_SCHEMA, "INSERT INTO absent_fixture_table VALUES (1)")'))
           PY
-          git -c user.name=CI -c user.email=ci@example.invalid commit -am 'Prepare lab-only upgrade candidate'
+          if ! git diff --quiet; then
+            git -c user.name=CI -c user.email=ci@example.invalid commit -am 'Prepare lab-only upgrade candidate'
+          fi
           python deploy/build_bundle.py --output "$RUNNER_TEMP/candidate" --include-web \
             --signing-key "$RUNNER_TEMP/fixture-signing.seed" --age-tool "$RUNNER_TEMP/age/age" \
             --python-image docker.io/library/python@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928

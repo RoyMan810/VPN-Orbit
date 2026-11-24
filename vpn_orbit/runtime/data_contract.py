@@ -20,6 +20,13 @@ REQUIRED_TABLES = {
 }
 
 
+def require_authority_binding(db, policy):
+    from .authority import host_binding
+
+    if db.execute("SELECT policy_digest, host_binding FROM gate WHERE id=1").fetchone() != (policy.digest, host_binding()):
+        raise Denied("SCHEMA_AUTHORITY_BINDING_MISMATCH")
+
+
 def inspect(config, *, target_schema=SCHEMA_VERSION):
     """Read one protected view of the current database and policy contracts.
 
@@ -27,7 +34,6 @@ def inspect(config, *, target_schema=SCHEMA_VERSION):
     migration in staging. This check never rewrites a database.
     """
     from . import backup
-    from .authority import host_binding
     from .migrations import plan
 
     if type(target_schema) is not int or target_schema != SCHEMA_VERSION:
@@ -47,7 +53,6 @@ def inspect(config, *, target_schema=SCHEMA_VERSION):
                 raise
             migrations.extend(step.name for step in plan(db, name))
             if name == "control-gate/gate.sqlite3":
-                if db.execute("SELECT policy_digest, host_binding FROM gate WHERE id=1").fetchone() != (policy.digest, host_binding()):
-                    raise Denied("SCHEMA_AUTHORITY_BINDING_MISMATCH")
+                require_authority_binding(db, policy)
         return {"status": "COMPATIBLE", "migration": "REQUIRED" if migrations else "NOT_REQUIRED",
                 "migration_steps": migrations, "databases": DATABASES, "formats": FORMATS, "writer_phase": phase}
