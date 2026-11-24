@@ -171,6 +171,8 @@ v=Vault(c['vault_directory'],Path(os.environ['CREDENTIALS_DIRECTORY'])/'broker-d
         systemd_credential=True,writers=Admission(c['writer_directory']))
 v.import_ssh('01JCYQZ4T9V8MNVYEH3D2M7Q1C',1,Path(sys.argv[1]).read_bytes(),owner_id=sys.argv[2],
              worker_uid=c['worker_uid'],target='01JCYQZ4T9V8MNVYEH3D2M7Q1A')
+with v.journal.write(kind='business') as db:
+    db.execute('DROP TABLE secret_lifecycle')
 """
             with sqlite3.connect(cfg["database"]) as db:
                 owner, = db.execute("SELECT id FROM users WHERE role='Owner'").fetchone()
@@ -202,6 +204,7 @@ v.import_ssh('01JCYQZ4T9V8MNVYEH3D2M7Q1C',1,Path(sys.argv[1]).read_bytes(),owner
         portable_stage(root, archive, identity, digest, cfg)
         staged = json.loads(run(admin, "restore-stage", "--archive", archive, "--identity", identity, "--sha256", digest).stdout)
         assert staged["status"] == "STAGED_READ_ONLY"
+        assert staged["migrations"] == ["vault-lifecycle-audit"]
         assert not (Path("/var/lib/vpn-orbit-recovery") / staged["directory"] / "control-gate/signing.key").exists()
         apply = (admin, "restore-apply", "--sha256", digest, "--confirm-replace")
         active = run(*apply, check=False)
@@ -213,6 +216,10 @@ v.import_ssh('01JCYQZ4T9V8MNVYEH3D2M7Q1C',1,Path(sys.argv[1]).read_bytes(),owner
         assert applied["status"] == "RESTORED_READ_ONLY" and not applied["services_started"]
         assert Path(applied["previous_data"]).is_dir()
         assert Path(applied["previous_config"]).is_dir()
+        with sqlite3.connect(Path(cfg["vault_directory"]) / "vault.sqlite3") as db:
+            assert db.execute("SELECT name FROM orbit_migration_history").fetchall() == [("vault-lifecycle-audit",)]
+        with sqlite3.connect(Path(applied["previous_data"]) / "vault/vault.sqlite3") as old:
+            assert old.execute("SELECT name FROM sqlite_schema WHERE name='secret_lifecycle'").fetchone() is None
         run("/usr/bin/systemctl", "start", "vpn-orbit-broker.socket", "vpn-orbit-supervisor.socket",
             "vpn-orbit-broker.service", "vpn-orbit-supervisor.service")
         run("/usr/bin/systemctl", "start", "vpn-orbit-compose.service", timeout=150)
