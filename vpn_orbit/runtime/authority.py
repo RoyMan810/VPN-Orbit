@@ -215,7 +215,8 @@ class Authority:
                 raise Denied("GATE_CLOSED")
             if self.recovery_authorization and (claims["mutating"] or claims["target"] not in self.recovery_authorization["allowed_targets"]):
                 raise Denied("TARGET_QUARANTINED")
-            if claims["epoch"] != gate["epoch"] or (claims["mutating"] and gate["state"] != "NORMAL"):
+            if (claims["authority_id"] != gate["instance_id"] or claims["epoch"] != gate["epoch"]
+                    or (claims["mutating"] and gate["state"] != "NORMAL")):
                 raise Denied("STALE_GATE_EPOCH")
             if claims["mutating"]:
                 self._time_anchor(claims["time_anchor"], claims["plan_id"], claims["revision"], gate["instance_id"])

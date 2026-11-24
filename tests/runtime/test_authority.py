@@ -75,6 +75,15 @@ class AuthorityTests(unittest.TestCase):
         with self.assertRaisesRegex(Denied, "BINDING_INVALID"):
             self.authority.recover()
 
+    def test_restored_signing_key_does_not_make_permits_portable_between_instances(self):
+        permit = self.authority.admit(self.request())
+        with self.authority.journal.write() as db:
+            db.execute("UPDATE gate SET instance_id=?", (identifier(),))
+        with self.assertRaisesRegex(Denied, "STALE_GATE_EPOCH"):
+            self.authority.consume(permit)
+        new_permit = self.authority.admit(self.request())
+        self.authority.consume(new_permit)
+
     def mutating(self):
         self.enterContext(patch.dict(CAPABILITIES, {"lab.mutation": Capability(True, "vps:restart")}))
         self.policy = policy(capabilities=["lab.mutation"])
