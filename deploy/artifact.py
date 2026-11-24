@@ -20,6 +20,8 @@ FIXED_FILES = {
 }
 IMAGE = r"docker\.io/library/python@sha256:[0-9a-f]{64}"
 MAX_FILE = 64 * 1024 * 1024
+WEB_INDEX = "web/index.html"
+WEB_ASSET = re.compile(r"web/assets/[A-Za-z0-9_-]{1,120}\.(?:css|js|png|svg|woff2)")
 # Official v1.3.2 linux/amd64 binary from the independently checksum-pinned
 # release archive (cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10).
 AGE_FILE = "tools/age"
@@ -181,7 +183,8 @@ def manifest(bundle, key=None, *, expected_sha256=None, allow_development=False)
             raise ArtifactError("MANIFEST_FILES_INVALID")
         path = item["path"]
         if (not isinstance(path, str) or path in paths or (path not in FIXED_FILES and path != AGE_FILE and
-                re.fullmatch(r"wheelhouse/[A-Za-z0-9_.+-]+\.whl", path) is None)
+                re.fullmatch(r"wheelhouse/[A-Za-z0-9_.+-]+\.whl", path) is None
+                and not (key is not None and (path == WEB_INDEX or WEB_ASSET.fullmatch(path))))
                 or type(item["size"]) is not int or not 0 < item["size"] <= MAX_FILE
                 or not isinstance(item["sha256"], str) or re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) is None):
             raise ArtifactError("MANIFEST_FILES_INVALID")
@@ -191,6 +194,9 @@ def manifest(bundle, key=None, *, expected_sha256=None, allow_development=False)
         total += item["size"]
     if not FIXED_FILES.issubset(paths) or total > 384 * 1024 * 1024:
         raise ArtifactError("MANIFEST_FILES_INVALID")
+    web = {path for path in paths if path.startswith("web/")}
+    if web and (WEB_INDEX not in web or not any(path.endswith(".js") for path in web)):
+        raise ArtifactError("WEB_ASSETS_INCOMPLETE")
     app = [p for p in paths if p.startswith("wheelhouse/vpn_orbit-")]
     if len(app) != 1 or app[0] != f"wheelhouse/vpn_orbit-{value['version']}-py3-none-any.whl":
         raise ArtifactError("APPLICATION_WHEEL_INVALID")
