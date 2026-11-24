@@ -255,6 +255,7 @@ print(json.dumps(activate(configuration('/etc/vpn-orbit/runtime.json'),value['re
         assert json.load(reply)["admission"] == "OPEN"
     diagnostics = json.loads(run(ADMIN, "diagnose").stdout)
     assert diagnostics["checks"]["restore"]["code"] == "RESTORE_ACTIVATED"
+    assert diagnostics["checks"]["authority"] == {"status": "OK", "code": "AUTHORITY_POLICY_AND_HOST_BOUND"}
     with observation_target(transfer):
         with call(client, f"/api/v1/resources/{TARGETS[0]}/observations", {},
                   **{"X-CSRF-Token": owner["csrf_token"], "Idempotency-Key": "recovered-controller-observation"}) as reply:
