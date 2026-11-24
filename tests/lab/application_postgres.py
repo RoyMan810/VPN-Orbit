@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import tarfile
 import time
+from urllib.request import Request, urlopen
 
 from vpn_orbit.app_lifecycle import Lifecycle, ROOT
 from vpn_orbit.app_archive import capture as capture_app, restore as restore_app, transfer
@@ -133,8 +134,16 @@ def main():
             payload.seek(0)
             with tarfile.open(fileobj=payload, mode="r:") as archive:
                 assert archive.extractfile("./fixture.dat").read() == b"synthetic Bedolaga upload"
+        for service in ("panel-redis", "remnawave-panel"):
+            cid = owned["containers"][service]["Id"]
+            target.docker("container", "start", cid)
+            ready(target, service, cid)
+        request = Request("http://127.0.0.1:3000/api/auth/status", headers={
+            "Host": "panel.fixture.invalid", "X-Forwarded-Proto": "https", "X-Forwarded-For": "127.0.0.1"})
+        with urlopen(request, timeout=8) as response:
+            assert response.status == 200 and isinstance(json.load(response), dict)
         assert app.verify_inventory(*app.configuration()[1:]) == inventory
-        print("Verified full stopped installation archive, fresh labeled volumes, and boot of both restored databases.", flush=True)
+        print("Verified restored volumes, both PostgreSQL services, Bedolaga data, and actual restored Panel HTTP.", flush=True)
 
 
 if __name__ == "__main__":
