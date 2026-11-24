@@ -7,7 +7,7 @@ import time
 from .auth import AuthService, Role, etag
 from .errors import Denied
 from .queue import JobQueue
-from .runtime.protocol import SHA256, ULID, checksum, docker_summary, software_summary
+from .runtime.protocol import SHA256, ULID, checksum, compose_summary, docker_summary, software_summary
 
 
 _SELECT = """
@@ -60,6 +60,10 @@ def _sample(raw):
             if 'software' not in sample:
                 return None
             sample['docker'] = docker_summary(value['docker'])
+        if 'compose' in value:
+            if 'docker' not in sample:
+                return None
+            sample['compose'] = compose_summary(value['compose'])
         return sample
     except (ValueError, TypeError, Denied):
         return None

@@ -8,11 +8,12 @@ import time
 import asyncssh
 
 from ..errors import Denied
-from .protocol import SHA256, ULID, application_payload, canonical, decode, docker_summary, fields, firewall_payload, integer, restart_payload, software_summary, text
+from .protocol import SHA256, ULID, application_payload, canonical, compose_summary, decode, docker_summary, fields, firewall_payload, integer, restart_payload, software_summary, text
 from .storage import new_private_file, protected_bytes
 
 
 PROBES = (
+    (9, "vpn-orbit.v9.probe", b'{"operation":"probe","version":9}\n'),
     (8, "vpn-orbit.v8.probe", b'{"operation":"probe","version":8}\n'),
     (7, "vpn-orbit.v7.probe", b'{"operation":"probe","version":7}\n'),
     (6, "vpn-orbit.v6.probe", b'{"operation":"probe","version":6}\n'),
@@ -62,8 +63,9 @@ async def exchange(target, key, known_hosts):
     try:
         for version, command, request in PROBES:
             process = await connection.create_process(command, input=request, encoding=None, request_pty=False)
+            limit = {9: 15360, 3: 4096, 2: 2048, 1: 2048}.get(version, 12288)
             output, error, _ = await asyncio.gather(
-                bounded_read(process.stdout, 12288 if version >= 4 else (4096 if version == 3 else 2048)),
+                bounded_read(process.stdout, limit),
                 bounded_read(process.stderr), process.wait_closed())
             if process.exit_status == 0:
                 return version, output
@@ -314,9 +316,13 @@ def parse_probe(output, version, *, now):
     except Denied:
         raise Denied("SSH_UNSUPPORTED_OUTPUT") from None
     names = ("v", "uid", "boot_id", "observed_at")
-    if version not in (1, 2, 3, 4, 5, 6, 7, 8):
+    if version not in (1, 2, 3, 4, 5, 6, 7, 8, 9):
         raise Denied("SSH_PROBE_INVALID")
-    fields(value, names + ("software", "docker")[:min(version - 1, 2)])
+    if version >= 9:
+        names += ("software", "docker", "compose")
+    else:
+        names += ("software", "docker")[:version - 1]
+    fields(value, names)
     if type(value["v"]) is not int or value["v"] != version or type(value["uid"]) is not int or value["uid"] != 0:
         raise Denied("SSH_PROBE_INVALID")
     text(value["boot_id"], r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}")
@@ -327,6 +333,8 @@ def parse_probe(output, version, *, now):
     if version >= 3:
         result["docker"] = docker_summary(value["docker"], include_ports=version >= 4, include_mounts=version >= 5,
                                          include_network=version >= 6, include_dependencies=version >= 7, include_started_at=version >= 8)
+    if version >= 9:
+        result["compose"] = compose_summary(value["compose"])
     return result
 
 

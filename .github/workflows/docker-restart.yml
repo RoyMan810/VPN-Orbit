@@ -5,6 +5,7 @@ on:
     paths: &restart_paths
       - .github/workflows/docker-restart.yml
       - remote/**
+      - tests/lab/docker_discovery.py
       - tests/lab/docker_restart.py
       - tests/runtime/test_typed_docker_restart.py
   push:
@@ -29,6 +30,11 @@ jobs:
         with:
           version: v29.9.3
           set-host: true
+      - name: Verify opt-in Compose discovery and scoped observation on Docker
+        run: |
+          sudo -n /usr/bin/env "DOCKER_HOST=$DOCKER_HOST" GITHUB_ACTIONS=true \
+            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" python3 tests/lab/docker_discovery.py \
+            --isolated-vm --image "$VPN_ORBIT_LAB_PYTHON_IMAGE"
       - name: Verify the effect and replay on the same pinned Docker daemon
         run: |
           sudo -n /usr/bin/env "DOCKER_HOST=$DOCKER_HOST" GITHUB_ACTIONS=true \

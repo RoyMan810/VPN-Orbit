@@ -26,7 +26,7 @@ class InventoryTests(Fixture):
         self.assertEqual(response.status_code, 200, response.text)
         return response
 
-    def complete(self, outcome="SUCCEEDED", reason="PROBE_COMPLETE", *, docker=None):
+    def complete(self, outcome="SUCCEEDED", reason="PROBE_COMPLETE", *, docker=None, compose=None):
         self.now += 1
         response = self.client.post(f"/api/v1/resources/{SCOPE}/observations", json={},
                                     headers=self.headers(**{"Idempotency-Key": identifier()}))
@@ -39,6 +39,8 @@ class InventoryTests(Fixture):
                  "boot_id": "11111111-1111-1111-1111-111111111111"}
         if docker is not None:
             value.update(software={"docker": "PRESENT", "nginx": "UNKNOWN"}, docker=docker)
+        if compose is not None:
+            value["compose"] = compose
         self.queue.finish(claim, outcome, reason, result=value if outcome == "SUCCEEDED" else None)
         return response.json()["id"]
 
@@ -75,6 +77,17 @@ class InventoryTests(Fixture):
         value = self.detail().json()["observation"]
         self.assertEqual(value["last_success"]["docker"], docker)
         self.assertEqual(self.restart_preview().json()["target"], {"resource_id": SCOPE, **container})
+
+    def test_discovery_is_read_only_and_does_not_expand_the_restart_scope(self):
+        external = "f" * 64
+        compose = {"status": "OBSERVED", "containers": [
+            {"id": external, "image_id": "sha256:" + external, "project": "external", "service": "web", "state": "RUNNING"},
+        ]}
+        self.complete(docker=RUNNING_DOCKER, compose=compose)
+        self.assertEqual(self.detail().json()["observation"]["last_success"]["compose"], compose)
+        self.assertEqual(self.restart_preview(container=external).status_code, 404)
+        self.assertEqual(self.restart_preview().status_code, 200)
+        self.assertIsNone(self.detail(resource=OTHER).json()["observation"]["last_success"])
 
     def test_restart_preview_requires_read_and_restart_in_the_same_scope(self):
         self.complete(docker=RUNNING_DOCKER)

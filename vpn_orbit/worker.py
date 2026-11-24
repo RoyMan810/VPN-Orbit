@@ -8,7 +8,7 @@ from .errors import Denied
 from .firewall_requests import FirewallOperations
 from .queue import JobQueue
 from .restart_requests import RestartOperations
-from .runtime.protocol import checksum, docker_summary, fields, firewall_rules, integer, software_summary, text
+from .runtime.protocol import checksum, compose_summary, docker_summary, fields, firewall_rules, integer, software_summary, text
 from .runtime.storage import process_lock
 
 
@@ -110,7 +110,11 @@ class Worker:
                 value = response["observation"]
                 names = ("status", "source", "observed_at", "boot_id")
                 if isinstance(value, dict) and "docker" in value:
-                    fields(value, names + ("software", "docker"))
+                    names += ("software", "docker")
+                    if "compose" in value:
+                        names += ("compose",)
+                        compose_summary(value["compose"])
+                    fields(value, names)
                     software_summary(value["software"])
                     docker_summary(value["docker"])
                 elif isinstance(value, dict) and "software" in value:

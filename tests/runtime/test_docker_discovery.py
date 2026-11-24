@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
 from vpn_orbit.errors import Denied
-from vpn_orbit.runtime.protocol import canonical
+from vpn_orbit.runtime.protocol import MAX_FRAME, canonical, compose_summary
 from vpn_orbit.runtime.ssh import parse_probe
 
 
@@ -48,6 +48,39 @@ class DockerPayloadTests(unittest.TestCase):
                 self.parse({"status": "OBSERVED", "containers": [{**row, "started_at": bad}]}, version=8)
         with self.assertRaises(Denied):
             self.parse({"status": "OBSERVED", "containers": [row]}, version=7)
+
+    def test_v9_keeps_compose_discovery_separate_from_approved_scope(self):
+        scoped = {"status": "NOT_CONFIGURED", "containers": []}
+        compose = {"status": "OBSERVED", "containers": [{**ROW, "image_id": "sha256:" + FOREIGN}]}
+        value = {"v": 9, "uid": 0, "boot_id": "12345678-1234-1234-1234-123456789abc",
+                 "observed_at": 1000, "software": {"docker": "PRESENT", "nginx": "NOT_DETECTED"},
+                 "docker": scoped, "compose": compose}
+        result = parse_probe(canonical(value), 9, now=1000)
+        self.assertEqual(result["docker"], scoped)
+        self.assertEqual(result["compose"], compose)
+        for bad in ({"status": "LIMIT_EXCEEDED", "containers": compose["containers"]},
+                    {"status": "OBSERVED", "containers": compose["containers"] * 2},
+                    {"status": "OBSERVED", "containers": [{**compose["containers"][0], "env": "secret"}]},
+                    {"status": "OBSERVED", "containers": [{**compose["containers"][0], "image_id": "/local/path"}]}):
+            with self.subTest(bad=bad), self.assertRaises(Denied):
+                compose_summary(bad)
+
+    def test_largest_supported_compose_and_scoped_inventory_fit_the_frame(self):
+        row = {"project": "p" * 63, "service": "s" * 63, "state": "RESTARTING"}
+        address = "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
+        ports = [{"address": address, "host_port": p, "container_port": p, "protocol": "sctp"}
+                 for p in range(65528, 65536)]
+        scoped = [{**row, "id": f"{i:064x}", "state": "RUNNING", "published_ports": ports,
+                   "mount_status": "PRESENT", "network_status": "OTHER", "dependency_status": "UNKNOWN",
+                   "started_at": "2026-11-18T01:02:03.123456789Z"} for i in range(8)]
+        compose = [{**row, "id": f"{i:064x}", "image_id": "sha256:" + FOREIGN} for i in range(12)]
+        value = {"v": 9, "uid": 0, "boot_id": "12345678-1234-1234-1234-123456789abc", "observed_at": 1000,
+                 "software": {"docker": "PRESENT", "nginx": "NOT_DETECTED"},
+                 "docker": {"status": "OBSERVED", "containers": scoped},
+                 "compose": {"status": "OBSERVED", "containers": compose}}
+        result = parse_probe(canonical(value), 9, now=1000)
+        self.assertLess(len(canonical(value)) + 1, 15360)
+        self.assertLess(len(canonical(result)) + 1024, MAX_FRAME)
 
     def test_v3_accepts_only_the_bounded_typed_summary(self):
         self.assertEqual(self.parse(SUMMARY)["docker"], SUMMARY)
@@ -184,6 +217,31 @@ class DockerTransportTests(unittest.TestCase):
 
     def observe(self, **options):
         return HELPER["list_docker"](Path("/unused.sock"), SCOPE, **options)
+
+    def test_compose_discovery_is_opt_in_and_returns_only_an_allowlist(self):
+        observe = HELPER["observe_compose"]
+        with patch.dict(observe.__globals__, {"require_docker_socket": lambda _: None}):
+            self.assertEqual(observe(switch=Path("/nonexistent/switch")),
+                             {"status": "NOT_CONFIGURED", "containers": []})
+            self.assertEqual(self.requests, [])
+            self.response[0]["ImageID"] = "sha256:" + FOREIGN
+            with patch.dict(observe.__globals__, {"read_root_config": lambda *_: b"enabled\n"}):
+                self.assertEqual(observe(), {"status": "OBSERVED", "containers": [{**ROW, "image_id": "sha256:" + FOREIGN}]})
+                self.assertEqual(len(self.requests), 1)
+                route = urlsplit(self.requests[0])
+                query = parse_qs(route.query)
+                self.assertEqual(route.path, "/v1.44/containers/json")
+                self.assertEqual(query["all"], ["1"])
+                self.assertEqual(query["limit"], ["13"])
+                self.assertEqual(json.loads(query["filters"][0]), {"label": ["com.docker.compose.project"]})
+                self.response *= 2
+                self.assertEqual(observe(), {"status": "UNAVAILABLE", "containers": []})
+                self.response *= 7
+                self.assertEqual(observe(), {"status": "LIMIT_EXCEEDED", "containers": []})
+                self.response = []
+                self.assertEqual(observe(), {"status": "OBSERVED", "containers": []})
+            with patch.dict(observe.__globals__, {"read_root_config": lambda *_: b"invalid"}):
+                self.assertEqual(observe(), {"status": "POLICY_INVALID", "containers": []})
 
     def test_reads_only_approved_ids_and_projects_fixed_fields(self):
         self.assertEqual(self.observe(), [ROW])

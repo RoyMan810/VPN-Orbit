@@ -30,6 +30,10 @@ export interface DockerObservation {
   status: 'OBSERVED' | 'NOT_CONFIGURED' | 'POLICY_INVALID' | 'UNAVAILABLE'
   containers: (DockerContainer & { published_ports?: DockerPortBinding[] | null })[]
 }
+export interface ComposeObservation {
+  status: 'OBSERVED' | 'NOT_CONFIGURED' | 'POLICY_INVALID' | 'UNAVAILABLE' | 'LIMIT_EXCEEDED'
+  containers: (DockerContainer & { image_id: string })[]
+}
 export interface DockerRestartPreview {
   version: 1
   action: 'docker.restart'
@@ -50,6 +54,7 @@ export interface Observation {
     boot_id: string
     software?: Record<'docker' | 'nginx', Presence>
     docker?: DockerObservation
+    compose?: ComposeObservation
   } | null
 }
 export interface Resource {
