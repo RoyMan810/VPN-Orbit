@@ -213,6 +213,25 @@ class InstallationTests(unittest.TestCase):
         self.assertFalse((dest / "unexpected.py").exists())
         self.assertFalse(any(p.read_bytes() == bytes(self.signer) for p in dest.rglob("*") if p.is_file()))
 
+    def test_signed_webui_must_be_complete_and_hash_checked(self):
+        for name, raw in {"web/index.html": b'<script src=\"/assets/app-x.js\"></script>',
+                          "web/assets/app-x.js": b"void 0;"}.items():
+            target = self.bundle / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(raw)
+            self.value["files"].append({"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+        self.sign()
+        dest = self.directory / "web-bundle"
+        snapshot(self.bundle, dest, self.key, allow_development=True)
+        self.assertEqual((dest / "web/assets/app-x.js").read_bytes(), b"void 0;")
+        (self.bundle / "web/assets/app-x.js").write_bytes(b"void 1;")
+        with self.assertRaisesRegex(ArtifactError, "ARTIFACT_DIGEST_MISMATCH"):
+            snapshot(self.bundle, self.directory / "tampered", self.key, allow_development=True)
+        self.value["files"].pop()
+        self.sign()
+        with self.assertRaisesRegex(ArtifactError, "WEB_ASSETS_INCOMPLETE"):
+            manifest(self.bundle, self.key, allow_development=True)
+
     def test_bundle_accepts_supported_python_versions_only(self):
         for version in ("3.13", "3.15"):
             self.value["python"] = version
