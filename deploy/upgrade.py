@@ -3,6 +3,7 @@
 
 import argparse
 from contextlib import contextmanager
+import errno
 import fcntl
 import hashlib
 import json
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import time
 from urllib.request import HTTPSHandler, ProxyHandler, build_opener
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 
 import bootstrap
@@ -285,6 +287,8 @@ def stop(state):
     services = [base.COMPOSE_UNIT, *base.HOST_UNITS] + ([PROXY] if state["web"] else [])
     base.command(SYSTEMCTL, "stop", *services, timeout=150)
     for unit in services:
+        if base.command(SYSTEMCTL, "show", "--property=ActiveState", "--value", unit) == "failed":
+            base.command(SYSTEMCTL, "reset-failed", unit)
         if base.command(SYSTEMCTL, "show", "--property=ActiveState", "--value", unit) != "inactive":
             raise ArtifactError("UPDATE_SERVICES_STILL_RUNNING")
     for unit in ("vpn-orbit-api.service", "vpn-orbit-worker.service"):
@@ -363,6 +367,43 @@ def check_staging(state):
         raise ArtifactError("UPDATE_STAGE_INVALID")
 
 
+def wait_http(http, address):
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            return http.open(address, timeout=4)
+        except HTTPError as error:
+            transient = error.code in (502, 503, 504)
+            error.close()
+            if not transient:
+                raise ArtifactError("UPDATE_HEALTH_PROBE_FAILED") from None
+        except URLError as error:
+            if not isinstance(error.reason, (TimeoutError, OSError)) or (
+                    not isinstance(error.reason, TimeoutError) and error.reason.errno not in (errno.ECONNREFUSED, errno.ETIMEDOUT)):
+                raise ArtifactError("UPDATE_HEALTH_PROBE_FAILED") from None
+        if time.monotonic() >= deadline:
+            raise ArtifactError("UPDATE_HEALTH_PROBE_TIMED_OUT")
+        time.sleep(1)
+
+
+def verify_ipc(host, worker):
+    code = """import json
+from vpn_orbit.runtime.ipc import Client
+from vpn_orbit.errors import Denied
+c=json.load(open('/etc/vpn-orbit/runtime.json'))
+for key, uid, op, expected in (('gate_socket',0,'attempt.status','ATTEMPT_NOT_FOUND'),
+                              ('broker_socket',c['broker_uid'],'receipt.get','RECEIPT_NOT_TERMINAL')):
+    try:
+        Client(c[key],server_uids={0,uid},timeout=4).call(op,{'job_id':'00000000000000000000000000'})
+    except Denied as error:
+        if error.code != expected:
+            raise SystemExit(1)
+    else:
+        raise SystemExit(1)
+"""
+    base.docker(host, "exec", worker, "python", "-c", code, timeout=12)
+
+
 def smoke(state, version):
     base.verify_image()
     base.command(SYSTEMCTL, "start", *base.HOST_UNITS, timeout=90)
@@ -382,11 +423,11 @@ def smoke(state, version):
         addresses.append(origin)
     http = build_opener(*handlers)
     for address in addresses:
-        with http.open(address + "/healthz", timeout=7) as response:
+        with wait_http(http, address + "/healthz") as response:
             if json.load(response) != {"status": "alive", "version": version}:
                 raise ArtifactError("UPDATE_HEALTH_PROBE_FAILED")
     if state["web"]:
-        with http.open(addresses[-1] + "/", timeout=7) as response:
+        with wait_http(http, addresses[-1] + "/") as response:
             if response.read(2 * 1024**2) != read_file(WEB / "web/index.html" if version == SOURCE else SLOT / "web/index.html"):
                 raise ArtifactError("UPDATE_WEB_PROBE_FAILED")
     image_id = base.load_installation()["image_id"]
@@ -397,6 +438,8 @@ def smoke(state, version):
         info = base.docker(state["docker_host"], "inspect", "--format", "{{.State.Running}} {{.Image}}", cid)
         if info != "true " + image_id:
             raise ArtifactError("UPDATE_CONTAINER_NOT_RUNNING")
+        if service == "worker":
+            verify_ipc(state["docker_host"], cid)
 
 
 def rollback(state):

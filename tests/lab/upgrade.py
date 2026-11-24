@@ -31,6 +31,12 @@ def request(client, path, body=None, **headers):
                                headers=headers), timeout=15)
 
 
+def wait_https():
+    installation.run("/usr/bin/curl", "--disable", "--silent", "--show-error", "--fail", "--noproxy", "*",
+                     "--retry", "8", "--retry-connrefused", "--retry-max-time", "30", "--max-time", "4",
+                     "--cacert", WEB / "web-ca.pem", "--output", "/dev/null", ORIGIN + "/healthz", timeout=40)
+
+
 def read_state():
     return json.loads(STATE.read_bytes())
 
@@ -69,6 +75,7 @@ def main():
     hashes = {name: hashlib.sha256(Path(name).read_bytes()).digest() for name in objects}
     installation.PASSWORD = secrets.token_urlsafe(32)
     installation.owner_create()
+    wait_https()
     tls = ssl.create_default_context(cafile=WEB / "web-ca.pem")
     client = build_opener(HTTPSHandler(context=tls), HTTPCookieProcessor(CookieJar()))
     with request(client, "/api/v1/auth/login", {"username": "roman", "password": installation.PASSWORD}) as reply:
@@ -122,6 +129,12 @@ def main():
         record = read_state()
         assert record["backup_sha256"] == hashlib.sha256((folder / record["backup_file"]).read_bytes()).hexdigest()
         assert {name: hashlib.sha256(Path(name).read_bytes()).digest() for name in objects} == hashes
+        if expected == "1.1.0":
+            Path("/var/lib/vpn-orbit-recovery").mkdir(mode=0o700)
+            evidence = json.loads(run(APP / "admin", "restore-stage", "--archive", folder / record["backup_file"],
+                                      "--identity", identity, "--sha256", record["backup_sha256"]).stdout)
+            assert evidence["status"] == "STAGED_READ_ONLY" and evidence["archive_version"] == "1.0.0"
+            assert evidence["controller_version"] == "1.1.0"
         print(f"Released v1.0.0 installation, verified backup and preserved login/audit: {args.scenario} passed.", flush=True)
 
 
