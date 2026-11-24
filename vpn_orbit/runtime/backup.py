@@ -94,10 +94,17 @@ def installation_files(cfg):
     secure_directory(CONFIG / 'credentials', private=True)
     secure_directory(DATA)
     files = {}
+
+    def read(name, path, **kwargs):
+        try:
+            files[name] = protected_bytes(path, owner=0, **kwargs)
+        except Denied:
+            raise Denied("BACKUP_PROTECTED_" + name.upper().replace("/", "_").replace(".", "_").replace("-", "_")) from None
+
     for name in ('runtime.json', 'targets.json', 'compose.json', 'gate.pub'):
-        files['config/' + name] = protected_bytes(CONFIG / name, owner=0, maximum=1024**2)
+        read('config/' + name, CONFIG / name, maximum=1024**2)
     for name in ('installation.json', 'install-state.json'):
-        files[name] = protected_bytes(APP / name, owner=0, exact_mode=0o600)
+        read(name, APP / name, exact_mode=0o600)
     install = json.loads(files['installation.json'])
     status = json.loads(files['install-state.json'])
     if (install.get('v') != 1 or install.get('project') != 'vpn-orbit' or status.get('v') != 1
@@ -108,14 +115,14 @@ def installation_files(cfg):
     trust = {'signature': 'release-trust.pub', 'sha256': 'release-authentication.json'}.get(install.get('authentication'))
     if trust is None:
         raise Denied('BACKUP_INSTALLATION_INVALID')
-    files['config/' + trust] = protected_bytes(CONFIG / trust, owner=0)
+    read('config/' + trust, CONFIG / trust)
     if os.path.lexists(UNITS / 'vpn-orbit-web.service'):
         secure_directory(WEB)
-        files['web/unit'] = protected_bytes(UNITS / 'vpn-orbit-web.service', owner=0)
-        files['web/nginx.conf'] = protected_bytes(WEB / 'nginx.conf', owner=0)
+        read('web/unit', UNITS / 'vpn-orbit-web.service')
+        read('web/nginx.conf', WEB / 'nginx.conf', maximum=65536)
         if cfg['public_origin'] == 'https://127.0.0.1:18443':
             for name in ('web.key', 'web.pem', 'web-ca.pem'):
-                files['web/' + name] = protected_bytes(WEB / name, owner=0, maximum=65536, private=name == 'web.key')
+                read('web/' + name, WEB / name, maximum=65536, private=name == 'web.key')
     return files, install
 
 
@@ -148,14 +155,14 @@ def pin_database(name, version, cfg, stack):
     return db
 
 
-def snapshot_databases(root, cfg):
+def snapshot_databases(root, cfg, *, phase="OPEN"):
     admission = Admission(cfg['writer_directory'])
     with ExitStack() as reads:
         # No on-disk state transition: SIGKILL releases the flock and cannot
         # leave admission closed. Publication only occurs after all validation.
         with admission.exclusive(timeout=5):
             state = admission.state()
-            if state['phase'] != 'OPEN':
+            if state['phase'] != phase:
                 raise Denied('BACKUP_ADMISSION_NOT_OPEN')
             files, install = installation_files(cfg)
             files['vault/broker-dek'] = unseal_credential(cfg['vault_credential'])
@@ -349,7 +356,7 @@ def read_archive(stream, *, start=None, sink=None):
     return value
 
 
-def create(directory, recipient, *, age, retain=None):
+def create(directory, recipient, *, age, retain=None, maintenance=False):
     from .cli import configuration
 
     if retain is not None and not 1 <= retain <= 365:
@@ -363,10 +370,11 @@ def create(directory, recipient, *, age, retain=None):
         raise Denied('BACKUP_TMPFS_REQUIRED')
     if sqlite3.sqlite_version_info < (3, 45):
         raise Denied('SQLITE_VERSION_UNSUPPORTED')
-    with process_lock(RUN / 'maintenance.lock'), tempfile.TemporaryDirectory(prefix='backup-', dir=RUN) as work:
+    lock = nullcontext() if maintenance else process_lock(RUN / 'maintenance.lock')
+    with lock, tempfile.TemporaryDirectory(prefix='backup-', dir=RUN) as work:
         cfg = configuration(CONFIG / 'runtime.json')
         bound_layout(cfg)
-        captured, files, install, staged = snapshot_databases(Path(work), cfg)
+        captured, files, install, staged = snapshot_databases(Path(work), cfg, phase="RECOVERY_HOLD" if maintenance else "OPEN")
         checked_snapshot(files, staged, cfg)
         all_files = files | staged
         index = archive_index(captured, all_files, install)

@@ -1,0 +1,92 @@
+name: VPN-Orbit in-place upgrade
+
+on:
+  pull_request:
+    paths: [".github/workflows/upgrade.yml", "deploy/**", "vpn_orbit/**", "tests/lab/upgrade.py", "web/**"]
+  push:
+    branches: [main]
+    paths: [".github/workflows/upgrade.yml", "deploy/**", "vpn_orbit/**", "tests/lab/upgrade.py", "web/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade:
+    name: Released v1.0.0 to 1.1.0 fixture / ${{ matrix.scenario }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [resume, rollback]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15.2"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26.13.0"
+      - name: Build signed candidate fixture from a disposable worktree
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          python -m pip install -r requirements-dev.txt
+          python tools/fetch_age.py --output "$RUNNER_TEMP/age.tar.gz"
+          tar --no-same-owner -xzf "$RUNNER_TEMP/age.tar.gz" -C "$RUNNER_TEMP" -- age/age age/age-keygen
+          git worktree add --detach "$RUNNER_TEMP/old" v1.0.0
+          git worktree add --detach "$RUNNER_TEMP/new"
+          cd "$RUNNER_TEMP/new"
+          python - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          from nacl.signing import SigningKey
+          root = Path(os.environ["RUNNER_TEMP"])
+          signer = SigningKey.generate()
+          key = root / "fixture-signing.seed"
+          key.touch(mode=0o600, exist_ok=False)
+          key.write_bytes(bytes(signer))
+          (root / "fixture-signing.pub").write_bytes(bytes(signer.verify_key))
+          for name in ("pyproject.toml", "vpn_orbit/__init__.py", "vpn_orbit/release-manifest.json"):
+              path = Path(name)
+              path.write_text(path.read_text().replace('"1.0.0"', '"1.1.0"', 1))
+          if os.environ["SCENARIO"] == "rollback":
+              unit = Path("deploy/systemd/vpn-orbit-broker.service")
+              unit.write_text(re.sub(r"(?m)^ExecStart=.*$", "ExecStart=/usr/bin/false", unit.read_text()))
+          PY
+          git -c user.name=CI -c user.email=ci@example.invalid commit -am 'Prepare lab-only upgrade candidate'
+          python deploy/build_bundle.py --output "$RUNNER_TEMP/candidate" --include-web \
+            --signing-key "$RUNNER_TEMP/fixture-signing.seed" --age-tool "$RUNNER_TEMP/age/age" \
+            --python-image docker.io/library/python@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928
+      - name: Install the actual released Controller on a disposable host
+        run: |
+          sudo chmod 0755 /opt
+          sudo systemctl stop docker.service docker.socket containerd.service || true
+          mapfile -t installed < <(dpkg-query -W -f='${binary:Package} ${db:Status-Status}\n' \
+            docker-ce docker-ce-cli docker-ce-rootless-extras docker-buildx-plugin docker-compose-plugin moby-engine moby-cli moby-containerd moby-buildx moby-compose \
+            containerd.io docker.io docker-buildx docker-compose docker-compose-v2 containerd runc 2>/dev/null \
+            | awk '$2 == "installed" { print $1 }')
+          if (( ${#installed[@]} )); then
+            sudo apt-get purge -y "${installed[@]}"
+          fi
+          sudo rm -f /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker.sources
+          cd "$RUNNER_TEMP/old"
+          sudo ./install
+      - name: Exercise upgrade, preservation and recovery after faults
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+        run: |
+          sudo -n /usr/bin/env GITHUB_ACTIONS=true "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" \
+            "$(command -v python)" tests/lab/upgrade.py \
+            --bundle "$RUNNER_TEMP/candidate" --public "$RUNNER_TEMP/fixture-signing.pub" \
+            --age-keygen "$RUNNER_TEMP/age/age-keygen" --scenario "$SCENARIO"
+      - name: Inspect only the controller units on failure
+        if: failure()
+        run: |
+          sudo stat -c '%a %u %g %s %F %n' /opt/vpn-orbit-bootstrap/{nginx.conf,web.key,web.pem,web-ca.pem}
+          sudo journalctl --no-pager -n 30 -u vpn-orbit-compose -u vpn-orbit-web -u vpn-orbit-broker -u vpn-orbit-supervisor
