@@ -6,11 +6,33 @@
 - Release-review checkpoint `f57cb55e3d00fe1034286dfadbe95d4e371064e8`
   includes PRs #172 and #173.
 - P0 removal of excluded backup, rescue, activation, self-update, stage0, and recovery installation functionality is complete.
-- The dedicated disposable Ubuntu VM is the only server used for staging.
-- `v1.0.0` release acceptance is incomplete.
+- Staging used the dedicated disposable Ubuntu VM and the separately authorized
+  `vpn-orbit-staging` VPS. No production host was used.
+- The `v1.0.0` staging gates passed on November 24, 2026. Final publication
+  requires green release CI.
 - The MVP scope now includes typed deployment and lifecycle of all four
   products, product dependencies, drift checks, and ownership-verified removal.
   Production readiness still requires a separate decision.
+
+## Final staging acceptance
+
+- Verified the staging VPS IP, hostname and saved Ed25519 SSH fingerprint.
+  Used a separate network namespace for Panel HTTPS, without modifying or
+  restarting the existing Nginx or SSH services.
+- Deployed pinned Remnawave Panel and Bedolaga Bot/Cabinet with their dedicated
+  PostgreSQL and Redis services. Verified migrations, Redis `PONG`, health,
+  Cabinet HTTPS and authenticated Bot-to-Panel HTTPS.
+- Confirmed `setWebhook` and exact URL readback via `getWebhookInfo`. The
+  restricted Cloudflare Quick Tunnel passed only secret-authenticated
+  `POST /webhook`. A real Telegram `/start` returned `200` and reached the
+  Bedolaga handler; readback showed no pending updates or new delivery error.
+- Verified install replay, drift refusal and reconciliation of a real
+  Cabinet start after a deliberately lost reply, without a second start.
+  Data survived restart, and typed removal retained the original volumes
+  and networks. The earlier quarantined VM disk was not changed.
+- Cleared the test webhook, stopped the tunnel and removed the test containers.
+  Nginx retained the same PID and configuration hash. SSH, Nginx and Docker
+  remained active.
 
 ## Expanded MVP implementation
 
