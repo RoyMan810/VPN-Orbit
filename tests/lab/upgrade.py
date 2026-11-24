@@ -47,20 +47,44 @@ def read_state():
     return json.loads(STATE.read_bytes())
 
 
-def interrupt_flags(python, script, args):
+def interrupt_flags(python, script, checkpoint, args):
     code = """import os, signal, sys
 sys.path.insert(0, sys.argv[1])
 import upgrade
-sys.argv = [sys.argv[0], *sys.argv[2:]]
+checkpoint = sys.argv[2]
+sys.argv = [sys.argv[0], *sys.argv[3:]]
 save = upgrade.save
 def save_then_interrupt(state, phase, **extra):
     save(state, phase, **extra)
-    if phase == 'SWITCHING':
+    if phase == checkpoint:
         os.kill(os.getpid(), signal.SIGKILL)
 upgrade.save = save_then_interrupt
 upgrade.main()
 """
-    return (python, "-c", code, str(script.parent), *args)
+    return (python, "-c", code, str(script.parent), checkpoint, *args)
+
+
+def registry_unavailable(python, script, options):
+    run = installation.run
+    folder = Path("/etc/systemd/system/docker.service.d")
+    folder.mkdir(mode=0o755, exist_ok=True)
+    fixture = folder / "99-vpn-orbit-lab-unavailable-registry.conf"
+    with fixture.open("x") as stream:
+        stream.write('[Service]\nEnvironment="HTTPS_PROXY=http://127.0.0.1:1" "HTTP_PROXY=http://127.0.0.1:1" "NO_PROXY="\n')
+    try:
+        run("/usr/bin/systemctl", "daemon-reload")
+        run("/usr/bin/systemctl", "restart", "docker.service", timeout=120)
+        pull = run("/usr/bin/docker", "--host", "unix:///run/docker.sock", "info", "--format", "{{.HTTPSProxy}}")
+        assert pull.stdout.strip() == b"http://127.0.0.1:1"
+        result = run(python, script, *options, check=False, timeout=100)
+        assert result.returncode and b"INSTALL_COMMAND_FAILED_DOCKER" in result.stderr
+        assert not STATE.exists() and not MARKER.exists()
+        assert json.loads(META.read_bytes())["version"] == "1.0.0"
+    finally:
+        fixture.unlink()
+        run("/usr/bin/systemctl", "daemon-reload")
+        run("/usr/bin/systemctl", "restart", "docker.service", timeout=120)
+    wait_https()
 
 
 def fixtures(path):
@@ -173,10 +197,16 @@ def main():
             assert invalid.returncode and b"ARTIFACT_SIGNATURE_INVALID" in invalid.stderr
             assert not STATE.exists()
             wait_https()
+            registry_unavailable(python, script, options)
         if args.scenario == "resume":
-            result = run(*interrupt_flags(python, script, options), check=False, timeout=600)
+            result = run(*interrupt_flags(python, script, "BACKED_UP", options), check=False, timeout=600)
             if result.returncode != -signal.SIGKILL:
-                raise RuntimeError("Expected interruption after verified backup, before switch: " + result.stderr.decode())
+                raise RuntimeError("Expected interruption after verified backup, before migration: " + result.stderr.decode())
+            assert read_state()["phase"] == "BACKED_UP" and MARKER.is_file()
+            result = run(*interrupt_flags(python, script, "SWITCHING", ("--resume", "--confirm")),
+                         check=False, timeout=240)
+            if result.returncode != -signal.SIGKILL:
+                raise RuntimeError("Expected interruption after migration, before switch: " + result.stderr.decode())
             assert read_state()["phase"] == "SWITCHING" and MARKER.is_file()
             outcome = json.loads(run(python, script, "--resume", "--confirm", timeout=240).stdout)
             assert outcome["phase"] == "COMPLETE"
