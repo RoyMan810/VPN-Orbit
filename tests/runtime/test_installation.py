@@ -41,6 +41,8 @@ class InstallationTests(unittest.TestCase):
                              "https://api.github.com/repos/RoyMan810/VPN-Orbit/releases/latest")
             github("v1.10.0")
             self.assertEqual(discover_release("1.10.0")["status"], "NO_NEWER_RELEASE")
+            github("v1.0.0")
+            self.assertEqual(discover_release("1.1.0")["status"], "NO_NEWER_RELEASE")
             github("v2.0.0", prerelease=True)
             with self.assertRaisesRegex(ArtifactError, "UPDATE_RELEASE_DISCOVERY_UNAVAILABLE"):
                 discover_release("1.10.0")
