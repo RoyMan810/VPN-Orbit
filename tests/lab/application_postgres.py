@@ -59,6 +59,15 @@ def main():
     inventory = app.inventory(document)
     with app.journal.write() as db:
         db.execute("UPDATE installation SET inventory=? WHERE id=1", (canonical(inventory).decode(),))
+    # Let the real application establish its own migration baseline before
+    # adding our test rows. An empty Pg cluster with a sentinel table isn't
+    # a backup of a configured Remnawave installation.
+    for service in ("panel-db", "panel-redis", "remnawave-panel"):
+        cid = inventory["containers"][service]["Id"]
+        app.docker("container", "start", cid)
+        ready(app, service, cid)
+    for service in ("remnawave-panel", "panel-redis"):
+        app.docker("container", "stop", inventory["containers"][service]["Id"])
     os.umask(0o077)
     with tempfile.TemporaryDirectory(dir="/run") as temp:
         root = Path(temp)
