@@ -17,7 +17,9 @@ import subprocess
 import sys
 import time
 from urllib.request import HTTPSHandler, ProxyHandler, build_opener
+from urllib.parse import urlsplit
 
+import bootstrap
 import installer as base
 from artifact import AGE_FILE, ArtifactError, WEB_INDEX, canonical, manifest, snapshot
 
@@ -147,6 +149,25 @@ def install_guards():
     base.command(SYSTEMCTL, "daemon-reload")
 
 
+def protect_generated_nginx(origin):
+    path = WEB / "nginx.conf"
+    trusted_dir(path.parent)
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1:
+        raise ArtifactError("UPDATE_WEB_CONFIGURATION_UNTRUSTED")
+    if not info.st_mode & 0o022:
+        return
+    # A default ACL on /opt could bypass the v1.0.0 writer's umask. Do not
+    # bless a writable/custom file: only replace the exact stock configuration.
+    origin = base.origin(origin)
+    endpoint = bootstrap.WebEndpoint(None if origin == bootstrap.ORIGIN else urlsplit(origin).hostname)
+    expected = bootstrap.nginx_config(bootstrap.WEB_STATE, Path("/run/credentials") / PROXY, endpoint).encode()
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+        if os.fstat(stream.fileno()).st_ino != info.st_ino or stream.read(len(expected) + 1) != expected:
+            raise ArtifactError("UPDATE_WEB_CONFIGURATION_DRIFT")
+    base.write(path, expected, mode=0o644, replace=True)
+
+
 def prepare(args):
     installed = base.load_installation()
     if installed["version"] != SOURCE or installed["channel"] != "release":
@@ -224,6 +245,8 @@ def prepare(args):
         for name, raw in contents.items():
             base.write(new / name, raw, mode=installed_files(web)[name][1])
         base.write(SLOT / "signer.pub", key, mode=0o600)
+        if web:
+            protect_generated_nginx(config["public_origin"])
         install_guards()
         for current, _, files in os.walk(SLOT, topdown=False):
             for name in files:

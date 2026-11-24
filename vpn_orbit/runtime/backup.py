@@ -119,7 +119,7 @@ def installation_files(cfg):
     if os.path.lexists(UNITS / 'vpn-orbit-web.service'):
         secure_directory(WEB)
         read('web/unit', UNITS / 'vpn-orbit-web.service')
-        read('web/nginx.conf', WEB / 'nginx.conf')
+        read('web/nginx.conf', WEB / 'nginx.conf', maximum=65536)
         if cfg['public_origin'] == 'https://127.0.0.1:18443':
             for name in ('web.key', 'web.pem', 'web-ca.pem'):
                 read('web/' + name, WEB / name, maximum=65536, private=name == 'web.key')

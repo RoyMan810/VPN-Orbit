@@ -348,6 +348,7 @@ def prepare_web(temporary, endpoint):
         create_local_certificate(temporary)
     credentials = Path("/run/credentials") / WEB_UNIT.name
     (TOOLS / "nginx.conf").write_text(nginx_config(WEB_STATE, credentials, endpoint))
+    (TOOLS / "nginx.conf").chmod(0o644)
 
 
 def create_local_certificate(temporary):
