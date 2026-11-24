@@ -42,6 +42,21 @@ test('shows the Owner basic controller status and retries an unavailable check',
   await expect(page.getByText('sudo /opt/vpn-orbit/admin diagnose', { exact: true })).toBeVisible()
 })
 
+test('shows published release metadata without attempting an update', async ({ page }) => {
+  let checked = false
+  await page.route('**/api/v1/controller/release', route => {
+    checked = true
+    return route.fulfill({ json: { status: 'UPDATE_AVAILABLE', github_release_version: '1.1.0',
+      checked_at: '2026-11-24T12:00:00+00:00', artifact_verified: false } })
+  })
+  await signIn(page)
+  await page.getByRole('button', { name: 'Help', exact: true }).click()
+  expect(checked).toBe(false)
+  await page.getByRole('button', { name: 'Check for updates' }).click()
+  await expect(page.getByText(/Release available: 1.1.0/)).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Safe update instructions' })).toBeVisible()
+})
+
 test('checks audit integrity on demand and displays the latest result', async ({ page }) => {
   let checks = 0
   page.on('request', req => {
