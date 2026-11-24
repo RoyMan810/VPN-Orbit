@@ -75,8 +75,9 @@ jobs:
             sudo apt-get purge -y "${installed[@]}"
           fi
           sudo rm -f /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker.sources
+          python tests/lab/upgrade.py --fixture "$RUNNER_TEMP/upgrade-targets.json"
           cd "$RUNNER_TEMP/old"
-          sudo ./install
+          sudo ./install --targets "$RUNNER_TEMP/upgrade-targets.json"
       - name: Exercise upgrade, preservation and recovery after faults
         env:
           SCENARIO: ${{ matrix.scenario }}
