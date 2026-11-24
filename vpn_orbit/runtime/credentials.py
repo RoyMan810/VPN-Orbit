@@ -14,12 +14,15 @@ from .storage import new_private_file, protected_bytes
 # systemd's CRED_AES256_GCM_BY_HOST. Allow only what seal_credential
 # produces, including on systemd 255, which does not have --refuse-null.
 _HOST_CREDENTIAL = bytes.fromhex("5a1c6a86df9d4096b1d5a65e0862f19a")
+_CREDENTIAL_NAMES = {"broker-dek", "restore-authority-key"}
 
 
-def unseal_credential(source):
+def unseal_credential(source, *, name="broker-dek"):
     """Local root only. Return the DEK to the caller, not to a path or log."""
     if os.geteuid() != 0:
         raise Denied("LOCAL_ROOT_REQUIRED")
+    if name not in _CREDENTIAL_NAMES:
+        raise Denied("OS_CREDENTIAL_NAME_INVALID")
     sealed = protected_bytes(source, owner=0, exact_mode=0o600)
     try:
         envelope = base64.b64decode(b"".join(sealed.split()), validate=True)
@@ -29,7 +32,7 @@ def unseal_credential(source):
         raise Denied("OS_CREDENTIAL_UNSEAL_FAILED")
     try:
         result = subprocess.run(
-            ["/usr/bin/systemd-creds", "decrypt", "--name=broker-dek", "-", "-"],
+            ["/usr/bin/systemd-creds", "decrypt", f"--name={name}", "-", "-"],
             input=sealed, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5,
             env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": "/nonexistent"},
         )
@@ -40,11 +43,13 @@ def unseal_credential(source):
     return result.stdout
 
 
-def seal_credential(key, destination):
+def seal_credential(key, destination, *, name="broker-dek"):
     if os.geteuid() != 0:
         raise Denied("LOCAL_ROOT_REQUIRED")
     if not isinstance(key, bytes) or len(key) != 32:
         raise Denied("VAULT_KEY_INVALID")
+    if name not in _CREDENTIAL_NAMES:
+        raise Denied("OS_CREDENTIAL_NAME_INVALID")
     destination = Path(destination).absolute()
     for parent in destination.parents:
         info = parent.lstat()
@@ -56,7 +61,7 @@ def seal_credential(key, destination):
     if destination.exists() or destination.is_symlink():
         raise Denied("CREDENTIAL_ALREADY_EXISTS")
     try:
-        result = subprocess.run(["/usr/bin/systemd-creds", "encrypt", "--with-key=host", "--name=broker-dek", "-", "-"],
+        result = subprocess.run(["/usr/bin/systemd-creds", "encrypt", "--with-key=host", f"--name={name}", "-", "-"],
             input=key, capture_output=True, timeout=15,
             env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": "/nonexistent"})
     except (OSError, subprocess.TimeoutExpired):

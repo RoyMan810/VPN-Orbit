@@ -1,5 +1,6 @@
 [Unit]
 Description=VPN-Orbit scoped Secrets and SSH Broker
+ConditionPathExists=!/var/lib/vpn-orbit/restore.pending
 Requires=vpn-orbit-broker.socket vpn-orbit-supervisor.socket
 After=vpn-orbit-broker.socket vpn-orbit-supervisor.socket
 StartLimitIntervalSec=300

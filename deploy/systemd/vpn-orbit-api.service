@@ -1,5 +1,6 @@
 [Unit]
 Description=VPN-Orbit versioned API
+ConditionPathExists=!/var/lib/vpn-orbit/restore.pending
 After=network.target
 StartLimitIntervalSec=300
 StartLimitBurst=5

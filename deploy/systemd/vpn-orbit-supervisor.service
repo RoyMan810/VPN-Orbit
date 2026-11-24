@@ -1,5 +1,6 @@
 [Unit]
 Description=VPN-Orbit independent admission authority
+ConditionPathExists=!/var/lib/vpn-orbit/restore.pending
 Requires=vpn-orbit-supervisor.socket
 After=vpn-orbit-supervisor.socket
 StartLimitIntervalSec=300

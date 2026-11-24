@@ -421,6 +421,7 @@ def install(args):
         write(Path("/etc/tmpfiles.d/vpn-orbit.conf"), tmpfiles.encode())
         cli = f"{DOCKER} --host {args.docker_host} compose --project-name vpn-orbit --project-directory {APP} --file {CONFIG}/compose.json"
         unit = ("[Unit]\nDescription=VPN-Orbit API and Worker containers\nRequires=vpn-orbit-broker.socket vpn-orbit-supervisor.socket\n"
+                "ConditionPathExists=!/var/lib/vpn-orbit/restore.pending\n"
                 "After=docker.service vpn-orbit-broker.socket vpn-orbit-supervisor.socket\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\n"
                 f"ExecStartPre={python} {bundle}/deploy/installer.py verify-image\n"
                 f"ExecStart={cli} up --detach --no-build --wait\nExecStop={cli} stop --timeout 60\n"
@@ -466,6 +467,11 @@ def main(argv=None):
     if Path(sys.prefix) == APP / "venv":
         from vpn_orbit.runtime.backup import add_commands
         add_commands(commands)
+        restore = commands.add_parser("restore-apply", help="Install staged state on this stopped controller in read-only recovery")
+        restore.add_argument("--sha256", required=True)
+        restore.add_argument("--resume", action="store_true", help="Resume an interrupted restore of this exact archive")
+        restore.add_argument("--confirm-replace", action="store_true", required=True,
+                             help="Confirm local replacement and retain the previous state for review")
     args = parser.parse_args(argv)
     try:
         if os.geteuid() != 0:
@@ -475,15 +481,24 @@ def main(argv=None):
         elif args.command == "verify-image":
             verify_image()
         elif args.command == "create-owner":
+            if (DATA / "restore.pending").exists():
+                raise ArtifactError("RESTORE_RESUME_REQUIRED")
             create_owner(args.username)
+        elif args.command == "restore-apply":
+            os.umask(0o077)
+            import resource
+            from vpn_orbit.runtime.recovery import install as restore_install
+            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+            print(json.dumps(restore_install(args.sha256, docker_host=load_installation()["docker_host"], resume=args.resume)))
         else:
             from vpn_orbit.runtime.backup import administer
             print(json.dumps(administer(args)))
     except Exception as error:
         # Keep arbitrary subprocess, filesystem, validation and secret values out of output.
         from_code = getattr(error, "code", None)
-        code = str(error) if isinstance(error, ArtifactError) else from_code or (
-            "BACKUP_UNAVAILABLE" if args.command in {"backup", "backup-verify"} else "INSTALLATION_UNAVAILABLE")
+        category = {"backup": "BACKUP", "backup-verify": "BACKUP",
+                    "restore-stage": "RESTORE", "restore-apply": "RESTORE"}.get(args.command, "INSTALLATION")
+        code = str(error) if isinstance(error, ArtifactError) else from_code or category + "_UNAVAILABLE"
         print("VPN-Orbit: " + code, file=sys.stderr)
         if code == "INSTALLATION_UNAVAILABLE":
             # Code locations and exception classes help diagnose installation

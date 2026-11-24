@@ -40,6 +40,8 @@ class Worker:
 
     def run_one(self):
         try:
+            if self.queue.store.writers is not None and self.queue.store.writers.state()["phase"] == "READ_ONLY_RECOVERY":
+                return False  # An imported controller cannot contact managed hosts before fencing.
             if self.restart.reconcile_pending():
                 return True
             if self.firewall.reconcile_pending():

@@ -386,6 +386,7 @@ def start_web(endpoint):
     with WEB_UNIT.open("x") as unit:
         unit.write(f"""[Unit]
 Description=VPN-Orbit WebUI and HTTPS proxy
+ConditionPathExists=!/var/lib/vpn-orbit/restore.pending
 Requires=vpn-orbit-compose.service
 After=vpn-orbit-compose.service
 
