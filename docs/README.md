@@ -8,7 +8,7 @@
 | Подготовить и подключить VPS, проверить SSH, настроить firewall или тестовый перезапуск | [Управление VPS](vps.md) |
 | Настроить Remnawave Panel/Node или Bedolaga Bot/Cabinet | [Приложения](applications.md) |
 | Найти причину отказа, проверить аудит, время или состояние операции | [Обслуживание и диагностика](operations.md) |
-| Посмотреть планы развития после MVP | [Roadmap](roadmap.md) |
+| Проверить требования и план v2.0.0 | [Техническое задание](specification.md) · [Roadmap](roadmap.md) |
 | Собрать проект, запустить тесты, открыть PR | [Разработка](../CONTRIBUTING.md) |
 
 [Обзор проекта](../README.md) · [Релиз v1.0.0](https://github.com/RoyMan810/VPN-Orbit/releases/tag/v1.0.0)
