@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [resume, rollback]
+        scenario: [resume, rollback, migration-failure, incompatible-data]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -58,6 +58,12 @@ jobs:
           if os.environ["SCENARIO"] == "rollback":
               unit = Path("deploy/systemd/vpn-orbit-broker.service")
               unit.write_text(re.sub(r"(?m)^ExecStart=.*$", "ExecStart=/usr/bin/false", unit.read_text()))
+          if os.environ["SCENARIO"] == "migration-failure":
+              path = Path("vpn_orbit/runtime/migrations.py")
+              source = path.read_text()
+              marker = "(_AUDIT_SCHEMA,)"
+              assert source.count(marker) == 1
+              path.write_text(source.replace(marker, '(_AUDIT_SCHEMA, "INSERT INTO absent_fixture_table VALUES (1)")'))
           PY
           git -c user.name=CI -c user.email=ci@example.invalid commit -am 'Prepare lab-only upgrade candidate'
           python deploy/build_bundle.py --output "$RUNNER_TEMP/candidate" --include-web \
