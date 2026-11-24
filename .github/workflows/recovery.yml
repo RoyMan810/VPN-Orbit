@@ -26,15 +26,20 @@ jobs:
           tar -xzf "$RUNNER_TEMP/age.tar.gz" -C "$RUNNER_TEMP" -- age/age-keygen
           "$RUNNER_TEMP/age/age-keygen" -o "$RUNNER_TEMP/isolated-lab.identity"
           "$RUNNER_TEMP/age/age-keygen" -y "$RUNNER_TEMP/isolated-lab.identity" > "$RUNNER_TEMP/recipient"
+          ssh-keygen -q -t ed25519 -N '' -f "$RUNNER_TEMP/fixture-host"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-only-lab-identity
-          path: ${{ runner.temp }}/isolated-lab.identity
+          path: |
+            ${{ runner.temp }}/isolated-lab.identity
+            ${{ runner.temp }}/fixture-host
           retention-days: 1
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-only-lab-recipient
-          path: ${{ runner.temp }}/recipient
+          path: |
+            ${{ runner.temp }}/recipient
+            ${{ runner.temp }}/fixture-host.pub
           retention-days: 1
 
   source:
@@ -47,7 +52,7 @@ jobs:
         with:
           name: test-only-lab-recipient
           path: ${{ runner.temp }}/handoff
-      - run: python3 tests/lab/recovery_hosts.py fixture --transfer "$RUNNER_TEMP"
+      - run: python3 tests/lab/recovery_hosts.py fixture --transfer "$RUNNER_TEMP" --key "$RUNNER_TEMP/handoff/fixture-host.pub"
       - &install
         name: Install the Controller on a fresh disposable runner
         run: |
@@ -100,6 +105,7 @@ jobs:
           sudo install -d -m 0700 /run/vpn-orbit/lab-transfer
           sudo install -m 0600 "$RUNNER_TEMP/transfer/"* /run/vpn-orbit/lab-transfer/
           sudo install -m 0600 "$RUNNER_TEMP/handoff/isolated-lab.identity" /run/vpn-orbit/lab-transfer/identity
+          sudo install -m 0600 "$RUNNER_TEMP/handoff/fixture-host" /run/vpn-orbit/lab-transfer/fixture-host
           sudo -n env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             /opt/vpn-orbit/venv/bin/python tests/lab/recovery_hosts.py destination \
             --transfer /run/vpn-orbit/lab-transfer --key /run/vpn-orbit/lab-transfer/identity
