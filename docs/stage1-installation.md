@@ -7,7 +7,7 @@
 На чистой Ubuntu Server 24.04 или 26.04 (amd64) с работающим systemd:
 
 ```sh
-git clone https://github.com/RoyMan810/VPN-Orbit.git
+git clone --branch v1.0.0 https://github.com/RoyMan810/VPN-Orbit.git
 sudo ./VPN-Orbit/install
 ```
 

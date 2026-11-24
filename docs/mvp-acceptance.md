@@ -42,13 +42,13 @@ Status date: November 24, 2026
 | Bedolaga Bot and Cabinet | November 24 staging run passed pinned images, migrations, Redis `PONG`, health, verified HTTPS and the native Bot-to-Panel client with a real API key. Replay, stop/start, database readback, drift/shared-resource refusal, and exact-ID removal with volume and network retention passed | PASS |
 | Telegram webhook receiver | The pinned Bot image rejected missing and wrong secrets and invalid payloads, then passed a valid synthetic update to the processor on staging | PASS |
 | Staging webhook ingress | Temporary Cloudflare Quick Tunnel on an isolated application guest. Verified public HTTPS returns `401` without the correct secret and `404` for other methods and routes, including health and API. Controller stayed online on its original VM | PASS |
-| Bedolaga installation reconciliation | PR #184 restored inventory verification on a disposable child of the original disk after Docker normalized empty DNS lists. Staging Panel also regained health after a Docker restart with its original inventory. Bedolaga still logged Telegram transport errors during webhook registration, and its health probe got connection refused. Reconciliation returned `APP_QUARANTINED` without replay. This operation has a local journal and no Controller runtime receipts | BLOCKED |
-| Telegram delivery | `getMe` previously confirmed the token. Staging repeatedly times out before TCP connects to `api.telegram.org:443` over IPv4. The workstation on the same uplink briefly received HTTP 302 over verified TLS, then timed out again. TCP traceroute received replies beyond the LAN gateway, and the guest has no IPv6 route. No independent authorized uplink is configured. Quick Tunnel scope checks passed previously. Successful `setWebhook`, live URL readback and Telegram `/start` remain unverified | BLOCKED |
+| Bedolaga installation reconciliation | On the authorized staging VPS, a lost reply after starting the stopped Cabinet produced `UNKNOWN_OUTCOME`. Readback verified the same container IDs, health and unchanged `StartedAt` after reconciliation; no start was replayed. Replay of the original install returned the same receipt, drift blocked removal, and exact-ID removal retained volumes and networks. The earlier offline VM operation remains quarantined and was not replayed or cleared | PASS |
+| Telegram delivery | On November 24, 2026, the authorized staging VPS passed `getMe`, `setWebhook`, and exact URL readback via `getWebhookInfo`. A real `/start` reached the pinned Bedolaga receiver over the restricted HTTPS tunnel, returned `200`, and was confirmed by the Bot handler. Readback reported an empty pending queue and no delivery error during the run. The test webhook was cleared and the tunnel stopped | PASS |
+| Authorized staging VPS isolation | SSH IP, hostname and pinned Ed25519 identity matched. Panel HTTPS ran in a separate network namespace. Quick Tunnel exposed only authenticated `POST /webhook`. After cleanup, the Nginx PID and configuration hash were unchanged and SSH, Nginx and Docker were active | PASS |
 | Existing Compose installations | Fragment comparison and labels support manual review. The managed removal executor requires a journal of Docker identities from a VPN-Orbit installation | MANUAL |
 
 ## Remaining Boundary
 
-The recorded checks cover the controller and the disposable test scenarios listed
-above. The `v1.0.0` gate requires the remaining product-backed staging,
-reconciliation and removal scenarios to pass. Production readiness requires
-a separate decision.
+The required staging scenarios passed. Publication requires green release CI
+on the final commit. Existing unmanaged Compose installations remain
+manual-review only. Production readiness requires a separate decision.
