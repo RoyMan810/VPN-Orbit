@@ -33,6 +33,10 @@ def host():
     return hashlib.sha256(Path("/etc/machine-id").read_bytes().strip()).hexdigest()
 
 
+def boot():
+    return hashlib.sha256(Path("/proc/sys/kernel/random/boot_id").read_bytes().strip()).hexdigest()
+
+
 def fixture(directory):
     with tempfile.TemporaryDirectory() as temp:
         key = Path(temp) / "host"
@@ -86,7 +90,7 @@ def source(output, recipient):
         private = Path(temp)
         result = json.loads(run(ADMIN, "backup", "--directory", private, "--recipient", recipient.read_text().strip()).stdout)
         shutil.copyfile(private / result["archive"], output / "fixture.age")
-    review = {"source_host": host(), "digest": result["sha256"], "owner": owner["user"]["id"], "operator": operator,
+    review = {"source_boot": boot(), "digest": result["sha256"], "owner": owner["user"]["id"], "operator": operator,
               "old_credential_sha256": hashlib.sha256(Path(cfg["vault_credential"]).read_bytes()).hexdigest()}
     run("/usr/bin/systemctl", "stop", *UNITS, timeout=100)
     for unit in UNITS:
@@ -97,7 +101,9 @@ def source(output, recipient):
 
 def destination(transfer, identity):
     evidence = json.loads((transfer / "fixture.json").read_bytes())
-    assert host() != evidence["source_host"]
+    # Hosted images can share a template machine-id. Distinct kernel boot IDs
+    # and separate OS credential envelopes are the relevant evidence here.
+    assert boot() != evidence["source_boot"]
     local = json.loads(Path(CONFIG).read_bytes())
     Path("/var/lib/vpn-orbit-recovery").mkdir(mode=0o700)
     run(ADMIN, "restore-stage", "--archive", transfer / "fixture.age", "--identity", identity, "--sha256", evidence["digest"])
