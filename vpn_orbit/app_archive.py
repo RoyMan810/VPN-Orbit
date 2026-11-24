@@ -8,7 +8,6 @@ from pathlib import Path, PurePosixPath
 import re
 import resource
 import shutil
-import subprocess
 import tarfile
 import tempfile
 
