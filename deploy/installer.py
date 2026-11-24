@@ -597,11 +597,8 @@ def main(argv=None):
     except Exception as error:
         # Keep arbitrary subprocess, filesystem, validation and secret values out of output.
         from_code = getattr(error, "code", None)
-<<<<<<< HEAD
         category = {"backup": "BACKUP", "backup-verify": "BACKUP", "diagnose": "DIAGNOSTICS",
-=======
-        category = {"backup": "BACKUP", "backup-verify": "BACKUP", "release-check": "UPDATE", "update-check": "UPDATE",
->>>>>>> 9c31b9b (Verify stable release candidates and installed compatibility before updates)
+                    "release-check": "UPDATE", "update-check": "UPDATE",
                     "restore-stage": "RESTORE", "restore-apply": "RESTORE"}.get(args.command, "INSTALLATION")
         code = str(error) if isinstance(error, ArtifactError) else from_code or category + "_UNAVAILABLE"
         print("VPN-Orbit: " + code, file=sys.stderr)
