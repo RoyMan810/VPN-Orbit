@@ -21,8 +21,8 @@ ANCHOR_FIELDS = ("v", "plan_id", "revision", "boot_id", "generation", "issued_at
 
 
 class TimeHealth:
-    def __init__(self, directory, *, source=None, clock=None, watch=None):
-        self.journal = Journal(Path(directory) / "time.sqlite3")
+    def __init__(self, directory, *, source=None, clock=None, watch=None, writers=None):
+        self.journal = Journal(Path(directory) / "time.sqlite3", writers=writers)
         self.source, self.clock, self.watch = source or HostSources(), clock or clocks, watch or ClockWatch()
         self._next_probe = 0
         self._recovery_failed = True

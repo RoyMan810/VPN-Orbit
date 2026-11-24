@@ -5,6 +5,7 @@ import argparse
 from contextlib import contextmanager
 import hashlib
 import http.server
+import io
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,7 @@ import sqlite3
 import ssl
 import subprocess
 import sys
+import tarfile
 import tempfile
 from threading import Thread
 import time
@@ -90,6 +92,59 @@ def owner_create():
             process.kill()
             process.wait(timeout=5)
         os.close(master)
+
+
+def controller_backup(age_keygen, cfg):
+    admin = "/opt/vpn-orbit/admin"
+    age = "/opt/vpn-orbit/tools/age"
+    with tempfile.TemporaryDirectory(dir="/run/vpn-orbit") as temp:
+        root = Path(temp)
+        repo = root / "archives"
+        repo.mkdir(mode=0o700)
+        identity = root / "offline"
+        run(age_keygen, "-o", identity)
+        recipient = run(age_keygen, "-y", identity).stdout.decode().strip()
+        # Give the Broker access only to the fixture key, not the backup identity.
+        secret = Path(tempfile.mkdtemp(dir="/run/vpn-orbit"))
+        try:
+            run("/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", secret / "ssh")
+            os.chown(secret, cfg["broker_uid"], cfg["broker_gid"])
+            os.chown(secret / "ssh", cfg["broker_uid"], cfg["broker_gid"])
+            code = """import json, os, sqlite3, sys
+from pathlib import Path
+from vpn_orbit.admission import Admission
+from vpn_orbit.runtime.vault import Vault
+c=json.load(open('/etc/vpn-orbit/runtime.json'))
+v=Vault(c['vault_directory'],Path(os.environ['CREDENTIALS_DIRECTORY'])/'broker-dek',
+        systemd_credential=True,writers=Admission(c['writer_directory']))
+v.import_ssh('01JCYQZ4T9V8MNVYEH3D2M7Q1C',1,Path(sys.argv[1]).read_bytes(),owner_id=sys.argv[2],
+             worker_uid=c['worker_uid'],target='01JCYQZ4T9V8MNVYEH3D2M7Q1A')
+"""
+            with sqlite3.connect(cfg["database"]) as db:
+                owner, = db.execute("SELECT id FROM users WHERE role='Owner'").fetchone()
+            run("/usr/bin/systemd-run", "--quiet", "--wait", "--collect",
+                "--property=User=" + str(cfg["broker_uid"]), "--property=Group=" + str(cfg["broker_gid"]),
+                "--property=LoadCredentialEncrypted=broker-dek:" + cfg["vault_credential"],
+                "/opt/vpn-orbit/venv/bin/python", "-c", code, secret / "ssh", owner)
+        finally:
+            shutil.rmtree(secret)
+        result = json.loads(run(admin, "backup", "--directory", repo, "--recipient", recipient).stdout)
+        archive = repo / result["archive"]
+        assert result["status"] == "CREATED" and result["decryption_verified"] is False
+        assert archive.stat().st_mode & 0o777 == 0o600
+        assert hashlib.sha256(archive.read_bytes()).hexdigest() == result["sha256"]
+        verified = run(admin, "backup-verify", "--archive", archive, "--identity", identity, "--sha256", result["sha256"])
+        assert json.loads(verified.stdout)["status"] == "VERIFIED"
+        # Inspect only synthetic fixture data in-process, never emit it to CI.
+        with tarfile.open(fileobj=io.BytesIO(run(age, "-d", "-i", identity, archive).stdout), mode="r:") as saved:
+            app = root / "snapshot.sqlite3"
+            with app.open("xb") as target:
+                shutil.copyfileobj(saved.extractfile("app/controller.sqlite3"), target)
+            with sqlite3.connect(app.as_uri() + "?mode=ro&immutable=1", uri=True) as db:
+                assert db.execute("SELECT id FROM users WHERE role='Owner'").fetchone() == (owner,)
+            manifest = json.load(saved.extractfile("manifest.json"))
+            assert len([f for f in manifest["files"] if f.startswith("vault/objects/")]) == 1
+        print("Live controller backup preserved Owner and authenticated a provisioned Vault object; offline age verification passed.", flush=True)
 
 
 
@@ -343,6 +398,7 @@ def main():
     parser.add_argument("--isolated-vm", action="store_true")
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--trust-key", type=Path, required=True)
+    parser.add_argument("--age-keygen", type=Path)
     parser.add_argument("--docker-host", required=True)
     args = parser.parse_args()
     if (not args.isolated_vm or os.geteuid() != 0 or os.environ.get("GITHUB_ACTIONS") != "true"
@@ -500,6 +556,8 @@ print('VERIFIED_HOST_TIME')
                     raise RuntimeError("Installed Owner could not authenticate through HTTPS proxy")
                 login.close()
             print("First web visitor had no bootstrap authority; hidden-input local Owner setup and HTTPS login passed.", flush=True)
+            if args.age_keygen is not None:
+                controller_backup(args.age_keygen, cfg)
             before = {name: hashlib.sha256(Path(path).read_bytes()).hexdigest() for name, path in (
                 ("credential", "/etc/vpn-orbit/credentials/broker-dek.cred"),
                 ("gate", "/var/lib/vpn-orbit/control-gate/signing.key"))}
