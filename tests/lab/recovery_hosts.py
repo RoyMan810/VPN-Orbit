@@ -56,6 +56,9 @@ def call(client, path, body=None, **headers):
 
 
 def login():
+    run("/usr/bin/curl", "--disable", "--silent", "--show-error", "--fail", "--noproxy", "*",
+        "--retry", "8", "--retry-connrefused", "--retry-max-time", "30", "--max-time", "4",
+        "--cacert", "/opt/vpn-orbit-bootstrap/web-ca.pem", "--output", "/dev/null", ORIGIN + "/healthz", timeout=40)
     context = ssl.create_default_context(cafile="/opt/vpn-orbit-bootstrap/web-ca.pem")
     client = build_opener(HTTPSHandler(context=context), HTTPCookieProcessor(CookieJar()))
     with call(client, "/api/v1/auth/login", {"username": "roman", "password": installation.PASSWORD}) as response:
