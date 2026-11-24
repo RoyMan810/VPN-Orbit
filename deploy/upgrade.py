@@ -13,6 +13,7 @@ import resource
 import shutil
 import ssl
 import stat
+import subprocess
 import sys
 import time
 from urllib.request import HTTPSHandler, ProxyHandler, build_opener
@@ -84,8 +85,15 @@ def maintenance_lock():
 
 
 def runtime(*args, timeout=30):
-    return json.loads(base.command(SLOT / "venv/bin/python", "-I", "-m", "vpn_orbit.runtime.upgrade",
-                                   *args, timeout=timeout))
+    result = subprocess.run([str(arg) for arg in (SLOT / "venv/bin/python", "-I", "-m", "vpn_orbit.runtime.upgrade", *args)],
+                            capture_output=True, timeout=timeout,
+                            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/root", "LANG": "C.UTF-8"})
+    if result.returncode:
+        code = result.stderr.decode("ascii", errors="replace").strip()
+        if not re.fullmatch(r"(?:MIGRATION|UPDATE|BACKUP|OS_CREDENTIAL|PROTECTED_FILE|SNAPSHOT|WRITER|SCHEMA)_[A-Z0-9_]{1,62}", code):
+            code = "UPDATE_RUNTIME_FAILED"
+        raise ArtifactError(code)
+    return json.loads(result.stdout)
 
 
 def save(state, phase, **extra):
