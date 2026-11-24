@@ -344,6 +344,8 @@ def install(staged_id, *, docker_host, resume=False):
         else:
             if os.path.lexists(flag):
                 raise Denied('RESTORE_RESUME_REQUIRED')
+            if (backup.DATA / 'restored.json').exists():
+                raise Denied('RESTORE_TARGET_ALREADY_IMPORTED')
             token = identifier()
         transaction = '.restore-' + token
         if not re.fullmatch(r'[0-9A-HJKMNP-TV-Z]{26}', token):
@@ -373,6 +375,12 @@ def install(staged_id, *, docker_host, resume=False):
         swap_entries(backup.CONFIG, config_tx, CONFIG_FILES)
         if Admission(backup.DATA / 'writer-admission').state()['phase'] != 'READ_ONLY_RECOVERY':
             raise Denied('RESTORE_QUARANTINE_REQUIRED')
+        restored = backup.DATA / 'restored.json'
+        restore_fact = canonical({'v': 1, 'archive_sha256': staged_id, 'transaction': token})
+        if not os.path.lexists(restored):
+            new_private_file(restored, restore_fact)
+        elif protected_bytes(restored, owner=0, exact_mode=0o600) != restore_fact:
+            raise Denied('RESTORE_BASELINE_CHANGED')
         flag.unlink()
         directory_sync(flag.parent)
         return {'status': 'RESTORED_READ_ONLY', 'archive_sha256': staged_id,
