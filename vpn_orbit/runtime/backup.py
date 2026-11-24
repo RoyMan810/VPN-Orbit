@@ -23,7 +23,8 @@ from nacl.secret import Aead
 from nacl.signing import SigningKey
 
 from ..admission import Admission
-from ..database import SCHEMA_VERSION, Store
+from ..database import Store
+from .data_contract import DATABASES as DBS
 from ..errors import Denied
 from .credentials import unseal_credential
 from .protocol import canonical
@@ -41,8 +42,6 @@ VERSION = re.compile(r'[0-9]+\.[0-9]+\.[0-9]+(?:\.dev[0-9]+)?')
 FILENAME = re.compile(r'controller-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}\.age')
 RECIPIENT = re.compile(r'age1[023456789acdefghjklmnpqrstuvwxyz]{58}')
 IDENTITY = re.compile(rb'AGE-SECRET-KEY-1[023456789ACDEFGHJKLMNPQRSTUVWXYZ]{58}')
-DBS = {'app/controller.sqlite3': SCHEMA_VERSION, 'broker/receipts.sqlite3': 1, 'vault/vault.sqlite3': 1,
-       'control-gate/gate.sqlite3': 1, 'control-gate/time-health/time.sqlite3': 1}
 REQUIRED = set(DBS) | {'config/runtime.json', 'config/targets.json', 'config/compose.json', 'config/gate.pub',
                        'installation.json', 'install-state.json', 'control-gate/signing.key',
                        'control-gate/verify.key', 'broker/known_hosts', 'vault/broker-dek', 'writers/state.json'}
