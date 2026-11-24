@@ -21,7 +21,7 @@ import sys
 import tempfile
 import traceback
 from urllib.parse import urlsplit
-from urllib.request import urlopen
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener, urlopen
 
 from artifact import AGE_FILE, ArtifactError, bundle_channel, canonical, snapshot, trusted_key
 
@@ -35,6 +35,7 @@ HOST_UNITS = ("vpn-orbit-supervisor.socket", "vpn-orbit-supervisor.service",
               "vpn-orbit-broker.socket", "vpn-orbit-broker.service")
 COMPOSE_UNIT = "vpn-orbit-compose.service"
 DOCKER = "/usr/bin/docker"
+GITHUB_RELEASES = "https://api.github.com/repos/RoyMan810/VPN-Orbit/releases/latest"
 
 
 def command(*args, timeout=60, env=None):
@@ -274,6 +275,81 @@ def verify_image():
         raise ArtifactError("INSTALLED_IMAGE_ID_CHANGED")
 
 
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def stable_version(version):
+    if bundle_channel(version) != "release":
+        raise ArtifactError("UPDATE_STABLE_VERSION_REQUIRED")
+    return tuple(int(part) for part in version.split("."))
+
+
+def discover_release(installed):
+    current = stable_version(installed)
+    request = Request(GITHUB_RELEASES, headers={"Accept": "application/vnd.github+json", "User-Agent": "VPN-Orbit-maintenance"})
+    try:
+        with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=10) as response:
+            data = response.read(1024**2 + 1)
+        if len(data) > 1024**2:
+            raise ValueError
+        release = json.loads(data)
+        tag = release["tag_name"]
+        if release["draft"] is not False or release["prerelease"] is not False or not tag.startswith("v"):
+            raise ValueError
+        latest = stable_version(tag[1:])
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, ArtifactError):
+        raise ArtifactError("UPDATE_RELEASE_DISCOVERY_UNAVAILABLE") from None
+    return {"installed_version": installed, "github_release_version": tag[1:],
+            "status": "UPDATE_AVAILABLE" if latest > current else "NO_NEWER_RELEASE",
+            "artifact_verified": False}
+
+
+def check_update_bundle(args, installed):
+    """Authenticate a release and compare local compatibility without applying it."""
+    from vpn_orbit.runtime.cli import configuration
+    from vpn_orbit.runtime.data_contract import inspect
+
+    expected = stable_version(args.version)
+    if expected <= stable_version(installed["version"]):
+        raise ArtifactError("UPDATE_VERSION_NOT_NEWER")
+    path = CONFIG / "release-trust.pub"
+    if os.path.lexists(path):
+        key = trusted_key(path)
+        if args.trust_key is not None and trusted_key(args.trust_key) != key:
+            raise ArtifactError("UPDATE_TRUST_KEY_MISMATCH")
+    else:
+        if args.trust_key is None:
+            raise ArtifactError("INDEPENDENT_TRUST_KEY_REQUIRED")
+        if args.trust_key.resolve().is_relative_to(args.bundle.resolve()):
+            raise ArtifactError("INDEPENDENT_TRUST_KEY_REQUIRED")
+        key = trusted_key(args.trust_key)
+    if shutil.disk_usage(APP).free < 2 * 1024**3 or shutil.disk_usage("/var/tmp").free < 512 * 1024**2:
+        raise ArtifactError("UPDATE_DISK_SPACE_INSUFFICIENT")
+    with tempfile.TemporaryDirectory(prefix="vpn-orbit-update-check-", dir="/var/tmp") as directory:
+        stage = Path(directory) / "bundle"
+        release, digest = snapshot(args.bundle, stage, key)
+        if release["version"] != args.version:
+            raise ArtifactError("UPDATE_BUNDLE_VERSION_MISMATCH")
+        if release["python"] != f"{sys.version_info.major}.{sys.version_info.minor}":
+            raise ArtifactError("HOST_BUNDLE_PYTHON_MISMATCH")
+        if not (stage / AGE_FILE).is_file():
+            raise ArtifactError("PINNED_AGE_TOOL_REQUIRED")
+        selected = installed["docker_host"]
+        if not docker(selected, "version", "--format", "{{.Server.Version}}").startswith("29."):
+            raise ArtifactError("DOCKER_VERSION_UNSUPPORTED")
+        if not supported_compose(docker(selected, "compose", "version", "--short")):
+            raise ArtifactError("DOCKER_COMPOSE_UNSUPPORTED")
+        check_buildx(selected)
+        cfg = configuration(CONFIG / "runtime.json")
+        compatible = inspect(cfg, target_schema=release["sqlite_schema"])
+        if compatible["writer_phase"] != "OPEN":
+            raise ArtifactError("UPDATE_ADMISSION_NOT_OPEN")
+    return {"status": "VERIFIED_COMPATIBLE", "installed_version": installed["version"], "candidate_version": release["version"],
+            "manifest_sha256": digest, "migration": compatible["migration"], "applied": False}
+
+
 def create_owner(username):
     # This command runs with the host venv, never inside the public API.
     from vpn_orbit.auth import AuthService
@@ -477,6 +553,11 @@ def main(argv=None):
                              help="Confirm local replacement and retain the previous state for review")
         schema = commands.add_parser("schema-check", help="Review all installed data contracts without modifying databases")
         schema.add_argument("--target-schema", type=int, help="Expected SQLite schema of the candidate release")
+        commands.add_parser("release-check", help="Look up the latest stable public GitHub release without installing it")
+        candidate = commands.add_parser("update-check", help="Verify a local signed update bundle without executing it")
+        candidate.add_argument("--bundle", type=Path, required=True)
+        candidate.add_argument("--version", required=True, help="Expected candidate version without v")
+        candidate.add_argument("--trust-key", type=Path, help="Independently obtained public key for an installation without a pinned signer")
     args = parser.parse_args(argv)
     try:
         if os.geteuid() != 0:
@@ -506,6 +587,10 @@ def main(argv=None):
             from vpn_orbit.runtime.data_contract import inspect
             options = {} if args.target_schema is None else {"target_schema": args.target_schema}
             print(json.dumps(inspect(configuration(CONFIG / "runtime.json"), **options)))
+        elif args.command == "release-check":
+            print(json.dumps(discover_release(load_installation()["version"])))
+        elif args.command == "update-check":
+            print(json.dumps(check_update_bundle(args, load_installation())))
         else:
             from vpn_orbit.runtime.backup import administer
             print(json.dumps(administer(args)))
@@ -513,6 +598,7 @@ def main(argv=None):
         # Keep arbitrary subprocess, filesystem, validation and secret values out of output.
         from_code = getattr(error, "code", None)
         category = {"backup": "BACKUP", "backup-verify": "BACKUP", "diagnose": "DIAGNOSTICS",
+                    "release-check": "UPDATE", "update-check": "UPDATE",
                     "restore-stage": "RESTORE", "restore-apply": "RESTORE"}.get(args.command, "INSTALLATION")
         code = str(error) if isinstance(error, ArtifactError) else from_code or category + "_UNAVAILABLE"
         print("VPN-Orbit: " + code, file=sys.stderr)

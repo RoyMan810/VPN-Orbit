@@ -22,11 +22,53 @@ from vpn_orbit.runtime.storage import _credential_permissions
 DEPLOY = Path(__file__).resolve().parents[2] / "deploy"
 sys.path.insert(0, str(DEPLOY))
 from artifact import AGE_FILE, AGE_SHA256, ArtifactError, FIXED_FILES, canonical, manifest, snapshot, trusted_key
-from installer import (check_buildx, advise_capacity, compose_document, install, origin,
+from installer import (check_buildx, advise_capacity, check_update_bundle, compose_document, discover_release, install, origin,
                        supported_compose, supported_ubuntu, verify_image)
 
 
 class InstallationTests(unittest.TestCase):
+    def test_discovery_returns_only_a_stable_version_and_does_not_verify_artifacts(self):
+        from io import BytesIO
+        with patch("installer.build_opener") as build:
+            def github(tag, **overrides):
+                build.return_value.open.return_value = BytesIO(canonical(
+                    {"tag_name": tag, "draft": False, "prerelease": False, **overrides}))
+            github("v1.10.0", assets=[{"download": "not used"}])
+            result = discover_release("1.9.3")
+            self.assertEqual(result, {"installed_version": "1.9.3", "github_release_version": "1.10.0",
+                                      "status": "UPDATE_AVAILABLE", "artifact_verified": False})
+            self.assertEqual(build.return_value.open.call_args.args[0].full_url,
+                             "https://api.github.com/repos/RoyMan810/VPN-Orbit/releases/latest")
+            github("v1.10.0")
+            self.assertEqual(discover_release("1.10.0")["status"], "NO_NEWER_RELEASE")
+            github("v2.0.0", prerelease=True)
+            with self.assertRaisesRegex(ArtifactError, "UPDATE_RELEASE_DISCOVERY_UNAVAILABLE"):
+                discover_release("1.10.0")
+            build.return_value.open.side_effect = OSError("private fixture path")
+            with self.assertRaisesRegex(ArtifactError, "^UPDATE_RELEASE_DISCOVERY_UNAVAILABLE$"):
+                discover_release("1.10.0")
+
+    def test_update_refuses_untrusted_signed_files_before_docker_or_data_access(self):
+        old_version = "0.1.0.dev1"
+        future = "1.1.0"
+        file = f"wheelhouse/vpn_orbit-{old_version}-py3-none-any.whl"
+        wheel = file.replace(old_version, future)
+        (self.bundle / file).rename(self.bundle / wheel)
+        self.value["version"], self.value["channel"] = future, "release"
+        self.value["files"] = [{**item, "path": wheel} if item["path"] == file else item for item in self.value["files"]]
+        self.sign()
+        args = SimpleNamespace(version=future, bundle=self.bundle, trust_key=self.directory / "key.pub")
+        meta = {"version": "1.0.0", "docker_host": "unix:///run/docker.sock"}
+        with (patch("installer.CONFIG", self.directory), patch("installer.trusted_key", return_value=self.key),
+              patch("installer.shutil.disk_usage", return_value=SimpleNamespace(free=4 * 1024**3)),
+              patch("installer.docker") as docker):
+            (self.bundle / "manifest.sig").write_bytes(bytes(64))
+            with self.assertRaisesRegex(ArtifactError, "ARTIFACT_SIGNATURE_INVALID"):
+                check_update_bundle(args, meta)
+            docker.assert_not_called()
+        with self.assertRaisesRegex(ArtifactError, "UPDATE_VERSION_NOT_NEWER"):
+            check_update_bundle(args, {"version": future})
+
     def test_runtime_image_verification_binds_tag_to_channel_digest_and_image_id(self):
         base = {"v": 1, "project": "vpn-orbit", "manifest_sha256": "a" * 64,
                 "image_id": "sha256:" + "b" * 64, "docker_host": "unix:///var/run/docker.sock"}
