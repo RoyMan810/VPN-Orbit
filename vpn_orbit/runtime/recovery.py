@@ -40,7 +40,8 @@ PENDING = 'restore.pending'
 
 
 def check_compatibility(manifest, work):
-    if manifest['installation']['version'] != __version__:
+    source = manifest['installation']['version']
+    if source != __version__ and (source, __version__) != ('1.0.0', '1.1.0'):
         raise Denied('RESTORE_VERSION_UNSUPPORTED')
     entries = manifest['files']
     # Allow room for the copies and for SQLite to journal quarantine changes.
@@ -172,7 +173,8 @@ def stage(archive, identity, digest, *, age):
             seal_credential(dek.getvalue(), work / 'credentials/broker-dek.cred')
             seal_credential(signing_key.getvalue(), work / 'credentials/authority.cred', name='restore-authority-key')
         value = {'status': 'STAGED_READ_ONLY', 'archive_sha256': digest, 'directory': final.name, 'migrations': migrations,
-                 'controller_version': manifest['installation']['version'], 'services_started': False}
+                 'controller_version': __version__, 'archive_version': manifest['installation']['version'],
+                 'services_started': False}
         new_private_file(work / 'recovery.json', canonical(value))
         for path in work.rglob('*'):
             if path.is_dir():
