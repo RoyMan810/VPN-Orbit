@@ -16,7 +16,9 @@ from ..database import DataAccess, Store
 from ..errors import Denied
 from . import backup
 from .authority import verify_host_time
+from .data_contract import DATABASES, require_authority_binding
 from .ipc import Client
+from .policy import Policy
 from .storage import new_private_file, protected_bytes
 
 
@@ -128,6 +130,22 @@ def vault_status(cfg):
     return 'OK', 'VAULT_JOURNAL_CHECKED_WRAPPED_CREDENTIAL_PRESENT'
 
 
+def authority_status(cfg):
+    name = 'control-gate/gate.sqlite3'
+    try:
+        policy = Policy.load(cfg['targets'])
+        with ExitStack() as reads:
+            db = backup.pin_database(name, DATABASES[name], cfg, reads)
+            require_authority_binding(db, policy)
+    except FileNotFoundError:
+        return 'NO_DATA', 'AUTHORITY_STATE_NOT_FOUND'
+    except Denied as error:
+        if error.code == 'SCHEMA_AUTHORITY_BINDING_MISMATCH':
+            return 'ERROR', 'AUTHORITY_BINDING_MISMATCH'
+        return 'ERROR', 'AUTHORITY_POLICY_OR_JOURNAL_INVALID'
+    return 'OK', 'AUTHORITY_POLICY_AND_HOST_BOUND'
+
+
 def backup_status(directory):
     try:
         backup.secure_directory(directory, private=True)
@@ -162,7 +180,7 @@ def report(installation, *, directory=Path('/var/backups/vpn-orbit')):
     check('worker', lambda: worker_status(installation), ('UNAVAILABLE', 'WORKER_INSPECT_UNAVAILABLE'))
     check('api', lambda: ('OK', 'API_RESPONDED') if probe_http(f"http://127.0.0.1:{installation['port']}/healthz")
           else ('ERROR', 'API_RESPONSE_INVALID'), ('UNAVAILABLE', 'API_UNAVAILABLE'))
-    for name in ('admission', 'queue', 'sqlite', 'audit_outbox', 'time', 'https', 'vault'):
+    for name in ('admission', 'queue', 'sqlite', 'audit_outbox', 'time', 'authority', 'https', 'vault'):
         checks[name] = {'status': 'NO_DATA', 'code': 'RUNTIME_CONFIGURATION_UNAVAILABLE'}
     from .cli import configuration
     try:
@@ -175,6 +193,7 @@ def report(installation, *, directory=Path('/var/backups/vpn-orbit')):
             storage(cfg, checks)
         except (OSError, Denied, RuntimeError, sqlite3.Error):
             checks['sqlite'] = {'status': 'ERROR', 'code': 'SQLITE_INSPECTION_FAILED'}
+        check('authority', lambda: authority_status(cfg), ('UNAVAILABLE', 'AUTHORITY_STATE_UNAVAILABLE'))
         check('time', lambda: classify_time(cfg), ('UNAVAILABLE', 'TIME_PROOF_UNAVAILABLE'))
         check('vault', lambda: vault_status(cfg), ('ERROR', 'VAULT_JOURNAL_OR_CREDENTIAL_INVALID'))
         if checks['web']['status'] != 'NO_DATA':

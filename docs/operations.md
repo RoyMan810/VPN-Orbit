@@ -4,7 +4,7 @@
 
 ## Контроллер и HTTPS
 
-В сборках с `sudo /opt/vpn-orbit/admin diagnose` команда возвращает JSON с временем проверки, версией и состояниями API, Worker, системных служб, Docker, SQLite, Audit/Outbox, Vault, TimeHealth, HTTPS и хранилища копий. `NO_DATA` означает, что компонент не установлен или информация отсутствует; `UNAVAILABLE` — что проверка не смогла связаться с компонентом; `ERROR` — что проверка обнаружила ошибку. `--output /root/orbit-diagnostics.json` дополнительно создаёт новый файл `0600`, не перезаписывая существующий. `--backup-directory` указывает нестандартный каталог копий. Обнаружение архива и его заголовка не заменяет расшифровку и `backup-verify`; диагностика также не расшифровывает Vault и не обращается к управляемым VPS.
+В сборках с `sudo /opt/vpn-orbit/admin diagnose` команда возвращает JSON с временем проверки, версией и состояниями API, Worker, системных служб, Docker, SQLite, Audit/Outbox, Vault, TimeHealth, привязки Authority к политике и хосту, HTTPS и хранилища копий. `NO_DATA` означает, что компонент не установлен или информация отсутствует; `UNAVAILABLE` — что проверка не смогла связаться с компонентом; `ERROR` — что проверка обнаружила ошибку. `--output /root/orbit-diagnostics.json` дополнительно создаёт новый файл `0600`, не перезаписывая существующий. `--backup-directory` указывает нестандартный каталог копий. Обнаружение архива и его заголовка не заменяет расшифровку и `backup-verify`; диагностика также не расшифровывает Vault и не обращается к управляемым VPS.
 
 Для штатной установки проверьте Compose, прокси и две socket-службы:
 
@@ -65,6 +65,7 @@ sudo /opt/vpn-orbit/admin restore-stage --archive "$ARCHIVE" --identity "$IDENTI
 `STAGED_READ_ONLY` не изменяет работающую установку. Для применения остановите собственные Compose и host-службы контроллера (включая `vpn-orbit-web.service`, если есть), затем удалите **только остановленные** контейнеры проекта без томов. Используйте Docker socket из установленной конфигурации, если он нестандартный.
 
 ```sh
+sudo systemctl stop vpn-orbit-web.service  # только если эта служба установлена
 sudo systemctl stop vpn-orbit-compose.service vpn-orbit-broker.service vpn-orbit-supervisor.service \
   vpn-orbit-broker.socket vpn-orbit-supervisor.socket
 sudo docker compose --project-name vpn-orbit --file /etc/vpn-orbit/compose.json rm --force
