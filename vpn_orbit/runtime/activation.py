@@ -120,6 +120,7 @@ def activate(config, report, user, password):
             elif protected_bytes(pending, owner=0, maximum=32) != b"ACTIVATION_PENDING\n":
                 raise Denied("ACTIVATION_BASELINE_CHANGED")
             with store.write(kind="control") as db:
+                Store.verify_audit_connection(db)
                 current = db.execute("SELECT revision,role,disabled FROM users WHERE id=?", (owner["id"],)).fetchone()
                 if tuple(current or ()) != (owner["revision"], "Owner", 0):
                     raise Denied("ACTIVATION_OWNER_AUTH_REQUIRED")

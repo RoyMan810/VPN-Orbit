@@ -12,6 +12,7 @@ from unittest.mock import patch
 from vpn_orbit.admission import Admission
 from vpn_orbit.errors import Denied
 from vpn_orbit.runtime import backup
+from vpn_orbit.runtime.storage import protected_bytes
 from vpn_orbit.runtime import credentials
 from vpn_orbit.runtime.protocol import canonical
 
@@ -80,6 +81,19 @@ class ArchiveTests(unittest.TestCase):
 
 
 class SnapshotTests(unittest.TestCase):
+    def test_untrusted_fifo_does_not_hold_the_maintenance_barrier(self):
+        import subprocess
+        import sys
+        with tempfile.TemporaryDirectory() as tmp:
+            fifo = Path(tmp) / "known_hosts"
+            os.mkfifo(fifo, mode=0o600)
+            result = subprocess.run([sys.executable, "-c",
+                                     "import os,sys; from vpn_orbit.runtime.storage import protected_bytes;"
+                                     "protected_bytes(sys.argv[1],owner=os.geteuid())", fifo],
+                                    capture_output=True, timeout=3)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(b"PROTECTED_FILE_INVALID", result.stderr)
+
     def test_source_transaction_keeps_committed_wal_at_the_barrier(self):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
             root = Path(tmp)

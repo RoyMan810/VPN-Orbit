@@ -21,7 +21,7 @@ def directory_sync(path):
 
 def protected_bytes(path, *, owner, maximum=16384, exact_mode=None, private=False):
     path = Path(path)
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
         info = os.fstat(fd)
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != owner
