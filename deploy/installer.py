@@ -462,6 +462,10 @@ def main(argv=None):
     commands.add_parser("verify-image", help="Internal systemd preflight for the installed image identity")
     owner = commands.add_parser("create-owner", help="Create the initial Owner locally using hidden password input")
     owner.add_argument("--username", required=True)
+    # The bootstrap interpreter has no application wheel until install completes.
+    if Path(sys.prefix) == APP / "venv":
+        from vpn_orbit.runtime.backup import add_commands
+        add_commands(commands)
     args = parser.parse_args(argv)
     try:
         if os.geteuid() != 0:
@@ -470,12 +474,16 @@ def main(argv=None):
             install(args)
         elif args.command == "verify-image":
             verify_image()
-        else:
+        elif args.command == "create-owner":
             create_owner(args.username)
+        else:
+            from vpn_orbit.runtime.backup import administer
+            print(json.dumps(administer(args)))
     except Exception as error:
         # Keep arbitrary subprocess, filesystem, validation and secret values out of output.
         from_code = getattr(error, "code", None)
-        code = str(error) if isinstance(error, ArtifactError) else from_code or "INSTALLATION_UNAVAILABLE"
+        code = str(error) if isinstance(error, ArtifactError) else from_code or (
+            "BACKUP_UNAVAILABLE" if args.command in {"backup", "backup-verify"} else "INSTALLATION_UNAVAILABLE")
         print("VPN-Orbit: " + code, file=sys.stderr)
         if code == "INSTALLATION_UNAVAILABLE":
             # Code locations and exception classes help diagnose installation

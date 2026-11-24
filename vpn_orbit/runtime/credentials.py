@@ -6,7 +6,25 @@ import stat
 import subprocess
 
 from ..errors import Denied
-from .storage import new_private_file
+from .storage import new_private_file, protected_bytes
+
+
+def unseal_credential(source):
+    """Local root only. Return the DEK to the caller, not to a path or log."""
+    if os.geteuid() != 0:
+        raise Denied("LOCAL_ROOT_REQUIRED")
+    sealed = protected_bytes(source, owner=0, exact_mode=0o600)
+    try:
+        result = subprocess.run(
+            ["/usr/bin/systemd-creds", "decrypt", "--name=broker-dek", "--refuse-null", "-", "-"],
+            input=sealed, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": "/nonexistent"},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise Denied("OS_CREDENTIAL_UNSEAL_FAILED") from None
+    if result.returncode or len(result.stdout) != 32:
+        raise Denied("OS_CREDENTIAL_UNSEAL_FAILED")
+    return result.stdout
 
 
 def seal_credential(key, destination):

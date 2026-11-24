@@ -79,7 +79,7 @@ class Authority:
         self.directory, self.policy, self.clock = Path(directory), policy, clock
         self.journal = Journal(self.directory / "gate.sqlite3", writers=writers)
         self.key = SigningKey(protected_bytes(self.directory / "signing.key", owner=os.geteuid(), maximum=32, exact_mode=0o600))
-        self.time_health = time_health if time_health is not None else TimeHealth(self.directory / "time-health")
+        self.time_health = time_health if time_health is not None else TimeHealth(self.directory / "time-health", writers=writers)
 
     @classmethod
     def initialize(cls, directory, policy, *, clock=time.time, time_health=None):

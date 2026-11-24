@@ -141,6 +141,7 @@ jobs:
           sudo -n /usr/bin/env GITHUB_ACTIONS=true "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" \
             PYTHONDONTWRITEBYTECODE=1 "$(command -v python)" tests/lab/installation.py --isolated-vm \
             --bundle "$RUNNER_TEMP/vpn-orbit-install-bundle" --trust-key "$RUNNER_TEMP/vpn-orbit-lab-signer.pub" \
+            --age-keygen "$RUNNER_TEMP/vpn-orbit-install-age/age/age-keygen" \
             --docker-host "$DOCKER_HOST"
 
       - name: Preserve public metadata for Stage1 revalidation
