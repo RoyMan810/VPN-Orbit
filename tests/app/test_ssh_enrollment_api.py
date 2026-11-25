@@ -50,6 +50,9 @@ class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
 
         async def process_factory(process):
             fixture.sessions.append((process.command, await process.stdin.read()))
+            if fixture.output is None:
+                await process.wait_closed()
+                return
             process.stdout.write(fixture.output)
             process.stderr.write(fixture.stderr)
             process.exit(0)
@@ -163,4 +166,12 @@ class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result.status_code, 502, result.text)
                 self.assertEqual(result.json()["code"], "SSH_PREFLIGHT_UNAVAILABLE")
                 self.assertNotIn("remote-canary", result.text)
+        self.assertEqual(self.client.get("/api/v1/resources").json()["items"], [])
+
+    async def test_preflight_times_out_a_session_that_never_replies(self):
+        self.output = None
+        result = await self.enroll(preflight=True, password=PASSWORD)
+        self.assertEqual(result.json()["code"], "SSH_PREFLIGHT_UNAVAILABLE")
+        self.assertEqual(result.status_code, 502)
+        self.assertEqual(self.sessions, [(PREFLIGHT_COMMAND, b"")])
         self.assertEqual(self.client.get("/api/v1/resources").json()["items"], [])
