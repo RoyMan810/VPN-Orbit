@@ -9,7 +9,7 @@ from vpn_orbit.api import create_app
 from vpn_orbit.config import Settings
 from vpn_orbit.database import identifier
 from vpn_orbit.runtime.policy import Policy
-from vpn_orbit.runtime.ssh_enrollment import PREFLIGHT_COMMAND, PREFLIGHT_SUDO_COMMAND
+from vpn_orbit.runtime.ssh_enrollment import PREFLIGHT_COMMAND, PREFLIGHT_SUDO_COMMAND, SUDO_MARKER
 from .test_auth_api import Fixture, ORIGIN, OTHER, SCOPE
 
 
@@ -162,7 +162,7 @@ class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_preflight_checks_password_protected_sudo_only_with_password_authentication(self):
         self.output = b"VPN_ORBIT_PREFLIGHT_V1 DEBIAN_13 SUDO_OR_SSHD_UNVERIFIED\n"
-        self.sudo_output = b"VPN_ORBIT_PREFLIGHT_V1 DEBIAN_13 VERIFIED\n"
+        self.sudo_output = SUDO_MARKER
         self.stderr = PASSWORD.encode()
         key_only = await self.enroll(preflight=True, private_key=self.private_key)
         self.assertEqual(key_only.json(), {"platform": "DEBIAN_13", "ssh": "SUDO_OR_SSHD_UNVERIFIED"})

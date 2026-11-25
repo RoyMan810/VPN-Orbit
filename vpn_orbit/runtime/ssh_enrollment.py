@@ -11,11 +11,15 @@ from ..errors import Denied
 from .ssh import bounded_read
 
 
-def _preflight_command(sudo_options):
-    command = shlex.join(("/usr/bin/sudo", *sudo_options, "--", "/bin/sh", "-c",
-                         'exec </dev/null; test "$(id -u)" = 0 && /usr/sbin/sshd -t'))
-    platform = Path(__file__).with_name("vps-platform.sh").read_text(encoding="ascii")
-    return shlex.join(("/bin/sh", "-c", "set -eu\nPATH=/usr/sbin:/usr/bin:/sbin:/bin\n" + platform + f"""
+CHECK_SSHD = 'exec </dev/null; test "$(/usr/bin/id -u)" = 0 && /usr/sbin/sshd -t >/dev/null 2>&1'
+SUDO_COMMAND = ("/usr/bin/sudo", "-k")
+SUDO_VERIFY = shlex.join(SUDO_COMMAND + ("-n", "--", "/bin/sh", "-c", CHECK_SSHD))
+SUDO_MARKER = b"VPN_ORBIT_SUDO_V1\n"
+PREFLIGHT_SUDO_COMMAND = "exec " + shlex.join(SUDO_COMMAND + (
+    "-S", "-p", "", "--", "/bin/sh", "-c", CHECK_SSHD + " && printf %s " + shlex.quote(SUDO_MARKER.decode("ascii")),
+))
+PREFLIGHT_COMMAND = shlex.join(("/bin/sh", "-c", "set -eu\nPATH=/usr/sbin:/usr/bin:/sbin:/bin\n" +
+    Path(__file__).with_name("vps-platform.sh").read_text(encoding="ascii") + f"""
 if [ ! -d /etc/ssh/sshd_config.d ] || [ ! -x /usr/sbin/sshd ] ||
    [ ! -x /usr/bin/sudo ] || [ ! -x /usr/sbin/visudo ]; then
     orbit_ssh=DEPENDENCIES_MISSING
@@ -24,7 +28,7 @@ elif [ "$(id -u)" = 0 ]; then
     if /usr/sbin/sshd -t >/dev/null 2>&1; then orbit_ssh=VERIFIED; fi
 else
     orbit_ssh=SUDO_OR_SSHD_UNVERIFIED
-    if {command} >/dev/null 2>&1; then
+    if {SUDO_VERIFY} >/dev/null 2>&1; then
         orbit_ssh=VERIFIED
     fi
 fi
@@ -32,23 +36,26 @@ printf 'VPN_ORBIT_PREFLIGHT_V1 %s %s\\n' "$orbit_platform" "$orbit_ssh"
 """))
 
 
-PREFLIGHT_COMMAND = _preflight_command(("-k", "-n"))
-PREFLIGHT_SUDO_COMMAND = _preflight_command(("-k", "-S", "-p", ""))
-
-
-async def inspect_readiness(connection, *, sudo_password=None):
+async def _read_reply(connection, command, *, input_data=b""):
     try:
-        command = PREFLIGHT_COMMAND if sudo_password is None else PREFLIGHT_SUDO_COMMAND
         process = await connection.create_process(command, encoding=None, request_pty=False, window=4096)
-        if sudo_password is not None:
-            process.stdin.write(sudo_password.encode("utf-8") + b"\n")
+        if input_data:
+            process.stdin.write(input_data)
         process.stdin.write_eof()
         output, _, _ = await asyncio.gather(bounded_read(process.stdout, 128), bounded_read(process.stderr, 1024),
                                              process.wait_closed())
-        marker, platform, ssh = output.decode("ascii").removesuffix("\n").split(" ")
-    except (asyncssh.ChannelOpenError, UnicodeError, ValueError, Denied):
+    except (asyncssh.ChannelOpenError, Denied):
         raise Denied("SSH_PREFLIGHT_UNAVAILABLE", 502) from None
-    if (process.exit_status != 0 or marker != "VPN_ORBIT_PREFLIGHT_V1" or not output.endswith(b"\n")
+    return process.exit_status, output
+
+
+async def inspect_readiness(connection):
+    status, output = await _read_reply(connection, PREFLIGHT_COMMAND)
+    try:
+        marker, platform, ssh = output.decode("ascii").removesuffix("\n").split(" ")
+    except (UnicodeError, ValueError):
+        raise Denied("SSH_PREFLIGHT_UNAVAILABLE", 502) from None
+    if (status != 0 or marker != "VPN_ORBIT_PREFLIGHT_V1" or not output.endswith(b"\n")
             or platform not in ("UBUNTU_24_04", "UBUNTU_26_04", "DEBIAN_13", "UNSUPPORTED")
             or ssh not in ("VERIFIED", "DEPENDENCIES_MISSING", "SSHD_INVALID", "SUDO_OR_SSHD_UNVERIFIED")):
         raise Denied("SSH_PREFLIGHT_UNAVAILABLE", 502)
@@ -102,7 +109,13 @@ def verify_credentials(target, username, *, password, private_key, preflight=Fal
                         readiness = await inspect_readiness(connection)
                         if (readiness["platform"] != "UNSUPPORTED" and readiness["ssh"] == "SUDO_OR_SSHD_UNVERIFIED"
                                 and password and not any(character in password for character in "\n\r\0")):
-                            return await inspect_readiness(connection, sudo_password=password)
+                            status, reply = await _read_reply(
+                                connection, PREFLIGHT_SUDO_COMMAND, input_data=password.encode("utf-8") + b"\n",
+                            )
+                            if status == 0 and reply == SUDO_MARKER:
+                                readiness["ssh"] = "VERIFIED"
+                            elif status != 1 or reply:
+                                raise Denied("SSH_PREFLIGHT_UNAVAILABLE", 502)
                         return readiness
                 except TimeoutError:
                     raise Denied("SSH_PREFLIGHT_UNAVAILABLE", 502) from None

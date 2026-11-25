@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -93,11 +94,14 @@ def make_provisioner(directory, remote, *, fault=None, cleanup_on_failure=False,
     ), output
 
 
-def admin_verification_reply(command):
+def assert_admin_verification_command(command, marker, timeout):
     shell = shlex.split(command[-1])
     script = shell[shell.index("-c") + 1]
-    marker = shlex.split(script)[-1].encode("ascii")
-    return subprocess.CompletedProcess(command, 0, stdout=marker)
+    assert shlex.split(script)[-1].encode("ascii") == marker
+    assert marker.startswith(b"VPN_ORBIT_ADMIN_")
+    assert '"$(/usr/bin/id -u)" = 0' in script
+    assert "StrictHostKeyChecking=yes" in command
+    assert timeout == prepare_vps.SSH_PHASE_TIMEOUT
 
 
 class PrepareVpsTests(unittest.TestCase):
@@ -175,15 +179,15 @@ class PrepareVpsTests(unittest.TestCase):
                         self.assertEqual(Path(line.split("=", 1)[1]).read_text(),
                                          f"[192.0.2.20]:2222 ssh-ed25519 {encoded}\n")
 
-                    if kwargs.get("stdout") == subprocess.PIPE:
-                        return admin_verification_reply(cmd)
-
                 with (patch("sys.argv", argv), patch("builtins.print"),
                       patch.object(prepare_vps.subprocess, "run", side_effect=run) as runner,
+                      patch.object(prepare_vps, "_check_remote_reply", side_effect=assert_admin_verification_command) as admin,
                       patch.object(prepare_vps.subprocess, "check_output", side_effect=[
                           f"[192.0.2.20]:2222 ssh-ed25519 {encoded}\n", '{"v":8,"uid":0}']) as reader):
                     prepare_vps.main()
-                self.assertEqual(runner.call_count, 3 + len(prepare_vps.PHASES))
+                self.assertEqual(runner.call_count, 1 + len(prepare_vps.PHASES))
+                self.assertEqual(admin.call_count, 2)
+                self.assertNotEqual(admin.call_args_list[0].args[1], admin.call_args_list[1].args[1])
                 probe = reader.call_args.args[0]
                 self.assertEqual(probe[probe.index("-i") + 1], "probe")
                 self.assertNotIn(str(admin_key), probe)
@@ -486,6 +490,16 @@ class PrepareVpsTests(unittest.TestCase):
             self.assertEqual(remote.readbacks, ["sshd"])
             self.assertEqual(remote.calls.count("sshd"), 2)
 
+    def test_admin_verification_requires_a_bounded_exact_reply_and_successful_exit(self):
+        run = prepare_vps._check_remote_reply
+        marker = b"expected\n"
+        run([sys.executable, "-c", "print('expected')"], marker, 3)
+        for command in ("pass", "print('expected'); print('x' * 1000000)"):
+            with self.subTest(command=command), self.assertRaisesRegex(ValueError, "Unexpected"):
+                run([sys.executable, "-c", command], marker, 3)
+        with self.assertRaises(subprocess.CalledProcessError):
+            run([sys.executable, "-c", "print('expected'); raise SystemExit(1)"], marker, 3)
+
     def test_unconfirmed_admin_access_retains_artifacts_and_retries_verification_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             remote = FakeRemote()
@@ -604,15 +618,15 @@ class PrepareVpsTests(unittest.TestCase):
                     path = Path(cmd[cmd.index("-f") + 1])
                     path.write_bytes(b"private")
                     Path(str(path) + ".pub").write_bytes(b"ssh-ed25519 test\n")
-                if kwargs.get("stdout") == subprocess.PIPE:
-                    return admin_verification_reply(cmd)
 
             with (patch("sys.argv", argv), patch("builtins.print"),
                   patch.object(prepare_vps.subprocess, "run", side_effect=run) as runner,
+                  patch.object(prepare_vps, "_check_remote_reply", side_effect=assert_admin_verification_command) as admin,
                   patch.object(prepare_vps.subprocess, "check_output", side_effect=[
                       f"[192.0.2.20]:2222 ssh-ed25519 {encoded}\n", '{"v":8,"uid":0}'])):
                 prepare_vps.main()
-            self.assertEqual(runner.call_count, 4 + len(prepare_vps.PHASES))
+            self.assertEqual(runner.call_count, 2 + len(prepare_vps.PHASES))
+            self.assertEqual(admin.call_count, 2)
             policy = json.loads((output / "targets.json").read_text())["targets"][0]
             self.assertEqual(policy["capabilities"], ["host.probe", "firewall.apply"])
             self.assertRegex(policy["firewall_secret_ref"], r"^[0-7][0-9A-HJKMNP-TV-Z]{25}:v1$")

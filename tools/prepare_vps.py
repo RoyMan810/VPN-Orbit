@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import select
 import shlex
 import subprocess
 import tempfile
@@ -690,6 +691,31 @@ def cleanup_journal(journal, *, host, port, user, fingerprint):
         raise ValueError("Saved provisioning state belongs to a different VPS")
 
 
+def _check_remote_reply(command, expected, timeout):
+    deadline = time.monotonic() + timeout
+    with subprocess.Popen(command, stdout=subprocess.PIPE) as process:
+        reply = bytearray()
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not select.select([process.stdout], [], [], remaining)[0]:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                chunk = os.read(process.stdout.fileno(), len(expected) + 1 - len(reply))
+                if not chunk:
+                    break
+                reply.extend(chunk)
+                if not expected.startswith(reply):
+                    raise ValueError("Unexpected administrator verification reply")
+            status = process.wait(timeout=max(0, deadline - time.monotonic()))
+            if status != 0:
+                raise subprocess.CalledProcessError(status, command)
+            if reply != expected:
+                raise ValueError("Unexpected administrator verification reply")
+        finally:
+            if process.poll() is None:
+                process.kill()
+
+
 def build_transport(ip, port, identity, user, host_key):
     known = tempfile.NamedTemporaryFile(prefix="vpn-orbit-known-", delete=False)
     known.close()
@@ -707,12 +733,11 @@ def build_transport(ip, port, identity, user, host_key):
     def run_remote(script, *, expected_stdout=None):
         shell = ["/bin/sh", "-c", script, "vpn-orbit-provision"]
         remote = shlex.join(shell if user == "root" else ["sudo", "--", *shell]) + ' "${SSH_CONNECTION%% *}"'
-        result = subprocess.run(
-            [*base, "-T", *auth, f"{user}@{ip}", remote], check=True, timeout=SSH_PHASE_TIMEOUT,
-            stdout=subprocess.PIPE if expected_stdout is not None else None,
-        )
-        if expected_stdout is not None and result.stdout != expected_stdout:
-            raise ValueError("Unexpected administrator verification reply")
+        command = [*base, "-T", *auth, f"{user}@{ip}", remote]
+        if expected_stdout is None:
+            subprocess.run(command, check=True, timeout=SSH_PHASE_TIMEOUT)
+        else:
+            _check_remote_reply(command, expected_stdout, SSH_PHASE_TIMEOUT)
 
     def cleanup():
         try:
