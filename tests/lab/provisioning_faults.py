@@ -13,6 +13,7 @@ import tempfile
 import time
 
 from tools.prepare_vps import SSH_PROFILE
+from vpn_orbit.runtime.ssh_enrollment import verify_credentials
 
 REPO = Path(__file__).resolve().parents[2]
 PREPARE = REPO / "tools/prepare_vps.py"
@@ -170,6 +171,10 @@ def main():
 
         readiness = provision(directory, key, fingerprint, check=True)
         expect(readiness.returncode == 0, "Readiness must pass over the pinned administrator SSH connection", readiness)
+        web_readiness = verify_credentials({"ip": ADDRESS, "port": PORT, "fingerprint": fingerprint}, ADMIN,
+                                           password=None, private_key=key.read_text(), preflight=True)
+        expect(web_readiness == {"platform": "UBUNTU_24_04", "ssh": "VERIFIED"},
+               f"WebUI readiness must execute sshd -t through non-interactive sudo: {web_readiness}")
         expect(not (directory / "output").exists(), "Readiness must leave no provisioning state")
         expect(subprocess.run(["getent", "passwd", SERVICE], capture_output=True).returncode != 0,
                "Readiness must not create the service account")

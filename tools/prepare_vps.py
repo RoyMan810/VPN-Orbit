@@ -109,14 +109,11 @@ fi
 
 
 def _platform_guard():
-    return """set -eu
-umask 077
-. /etc/os-release
-case "${ID:-}:${VERSION_ID:-}" in
-    ubuntu:24.04|ubuntu:26.04|debian:13) ;;
-    *) printf '%s\\n' 'Use Ubuntu 24.04/26.04 or Debian 13.' >&2; exit 1 ;;
-esac
-test "$(dpkg --print-architecture)" = amd64
+    detect = (ROOT / "vpn_orbit" / "runtime" / "vps-platform.sh").read_text(encoding="ascii")
+    return "set -eu\numask 077\n" + detect + """if [ "$orbit_platform" = UNSUPPORTED ]; then
+    printf '%s\\n' 'Use Ubuntu 24.04/26.04 or Debian 13 on amd64.' >&2
+    exit 1
+fi
 """
 
 

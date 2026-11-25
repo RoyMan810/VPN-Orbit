@@ -201,8 +201,9 @@ jobs:
     steps:
       - *checkout
       - *setup_python
-      - name: Install SSH, namespace and privilege tools
+      - name: Install SSH, namespace and privilege tools and Controller dependencies
         run: |
+          python -m pip install -r requirements-app.txt
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends openssh-server iproute2 sudo
           sudo systemctl enable --now ssh.service

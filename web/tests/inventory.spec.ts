@@ -998,6 +998,37 @@ test('owner can retry SSH enrollment with a different credential', async ({ page
   await expect(key).toHaveValue('')
 })
 
+test('owner can check readiness before registration and see a localized result', async ({ page }) => {
+  const ip = '192.0.2.10'
+  const fingerprint = 'SHA256:' + 'A'.repeat(43)
+  await signIn(page)
+  await page.getByText('Connect a VPS', { exact: true }).click()
+  await page.getByLabel('VPS IP address').fill(ip)
+  await page.getByLabel('SSH username').fill('root')
+  await page.getByLabel('SSH fingerprint from the VPS console').fill(fingerprint)
+  const secret = page.getByLabel('SSH password', { exact: true })
+  await secret.fill('disposable')
+  let checks = 0
+  let registrations = 0
+  page.on('request', request => {
+    if (request.method() === 'POST' && request.url().endsWith('/api/v1/enrollment/ssh')) registrations++
+  })
+  await page.route('**/api/v1/enrollment/ssh/preflight', route => {
+    checks++
+    expect(route.request().postDataJSON()).toEqual({ ip, port: 22, username: 'root', fingerprint, password: 'disposable' })
+    return route.fulfill({ json: { platform: 'DEBIAN_13', ssh: 'VERIFIED' } })
+  })
+  await page.getByRole('button', { name: 'Check VPS readiness' }).click()
+  await expect(page.getByText('Debian 13 (amd64)', { exact: true })).toBeVisible()
+  await expect(secret).toHaveValue('')
+  await page.getByLabel('Language').selectOption('ru')
+  await expect(page.getByText('Конфигурация OpenSSH проверена с правами администратора.')).toBeVisible()
+  await page.getByLabel('IP-адрес VPS').fill('192.0.2.11')
+  await expect(page.getByText('Debian 13 (amd64)', { exact: true })).toHaveCount(0)
+  expect(checks).toBe(1)
+  expect(registrations).toBe(0)
+})
+
 test('first-run help and device time settings are keyboard accessible', async ({ page }) => {
   await signIn(page)
   const help = page.getByRole('button', { name: 'Help', exact: true })

@@ -1,6 +1,8 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { hasApiStatus, request, type Session } from './api'
+import { ApiError, hasApiStatus, request, type Session } from './api'
 import type { Copy } from './copy'
+
+type Readiness = { platform: keyof Copy['enrollmentPlatforms']; ssh: keyof Copy['enrollmentSshChecks'] }
 
 export function Enrollment({ t, session, expired, onEnroll, firstVps }: {
   t: Copy; session: Session; firstVps: boolean; expired: () => void; onEnroll: (id: string) => void
@@ -19,12 +21,16 @@ export function Enrollment({ t, session, expired, onEnroll, firstVps }: {
     return () => abort.abort()
   }, [byId, expanded, expired, firstVps])
   const [status, setStatus] = useState<'enrollmentSuccess' | 'enrollmentMismatch' | 'enrollmentMissing' | 'enrollmentConflict'
-    | 'enrollmentAuthenticationFailed' | 'enrollmentConnectionFailed' | 'enrollmentInvalid' | 'requestError' | null>(null)
+    | 'enrollmentAuthenticationFailed' | 'enrollmentConnectionFailed' | 'enrollmentInvalid' | 'enrollmentPreflightUnavailable'
+    | 'requestError' | null>(null)
+  const [readiness, setReadiness] = useState<Readiness | null>(null)
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (busy) return
     const form = event.currentTarget
+    const submitter = (event.nativeEvent as SubmitEvent).submitter
+    const preflight = !byId && submitter instanceof HTMLButtonElement && submitter.value === 'preflight'
     const data = new FormData(form)
     const fingerprint = String(data.get('fingerprint')).trim()
     const resourceId = byId ? String(data.get('id')).trim() : null
@@ -37,7 +43,12 @@ export function Enrollment({ t, session, expired, onEnroll, firstVps }: {
     data.delete(authentication)
     setBusy(true)
     setStatus(null)
+    setReadiness(null)
     try {
+      if (preflight) {
+        setReadiness(await request<Readiness>('/enrollment/ssh/preflight', { body, csrf: session.csrf_token }))
+        return
+      }
       const result = await request<{ id: string }>(byId ? '/resources' : '/enrollment/ssh', {
         body, csrf: session.csrf_token,
       })
@@ -53,6 +64,7 @@ export function Enrollment({ t, session, expired, onEnroll, firstVps }: {
       else if (hasApiStatus(error, 409)) setStatus('enrollmentConflict')
       else if (hasApiStatus(error, 422)) setStatus('enrollmentInvalid')
       else if (hasApiStatus(error, 424)) setStatus('enrollmentAuthenticationFailed')
+      else if (error instanceof ApiError && error.code === 'SSH_PREFLIGHT_UNAVAILABLE') setStatus('enrollmentPreflightUnavailable')
       else if (hasApiStatus(error, 502)) setStatus('enrollmentConnectionFailed')
       else setStatus('requestError')
     } finally {
@@ -63,17 +75,17 @@ export function Enrollment({ t, session, expired, onEnroll, firstVps }: {
   return <details className="panel enrollment" open={firstVps || undefined}
     onToggle={event => setExpanded(event.currentTarget.open)}>
     <summary>{t.enroll}</summary>
-    <form onSubmit={submit}>
+    <form onSubmit={submit} onInput={() => setReadiness(null)} aria-busy={busy}>
       <p>{t.enrollmentHelp} <a href="https://github.com/RoyMan810/VPN-Orbit/blob/main/docs/vps.md#подготовка-vps">{t.enrollmentGuide}</a></p>
       {byId ? (candidates?.length ? <label>{t.enrollmentId}
-        <select name="id" required defaultValue={candidates.length === 1 ? candidates[0] : ''}>
+        <select name="id" required disabled={busy} defaultValue={candidates.length === 1 ? candidates[0] : ''}>
           {candidates.length > 1 && <option value="">{t.enrollmentChoose}</option>}
           {candidates.map(id => <option key={id} value={id}>{id}</option>)}
         </select>
-      </label> : <label>{t.enrollmentId}<input name="id" required maxLength={26} pattern="[0-7][0-9A-HJKMNP-TV-Z]{25}"/></label>) : <>
-        <label>{t.enrollmentIp}<input name="ip" required maxLength={45} autoComplete="off" spellCheck={false}/></label>
-        <label>{t.enrollmentPort}<input name="port" type="number" min={1} max={65535} required defaultValue={22}/></label>
-        <label>{t.enrollmentUsername}<input name="username" required maxLength={64} autoComplete="off" spellCheck={false}/></label>
+      </label> : <label>{t.enrollmentId}<input name="id" required disabled={busy} maxLength={26} pattern="[0-7][0-9A-HJKMNP-TV-Z]{25}"/></label>) : <>
+        <label>{t.enrollmentIp}<input name="ip" required disabled={busy} maxLength={45} autoComplete="off" spellCheck={false}/></label>
+        <label>{t.enrollmentPort}<input name="port" type="number" min={1} max={65535} required disabled={busy} defaultValue={22}/></label>
+        <label>{t.enrollmentUsername}<input name="username" required disabled={busy} maxLength={64} autoComplete="off" spellCheck={false}/></label>
         <label>{t.enrollmentAuthentication}<select value={authentication} disabled={busy}
           onChange={event => setAuthentication(event.currentTarget.value === 'private_key' ? 'private_key' : 'password')}>
           <option value="password">{t.enrollmentPassword}</option>
@@ -84,10 +96,17 @@ export function Enrollment({ t, session, expired, onEnroll, firstVps }: {
           : <label>{t.enrollmentPrivateKey}<textarea name="private_key" required maxLength={8192} autoComplete="off" spellCheck={false} rows={5} disabled={busy}/></label>}
       </>}
       {byId && candidates?.length === 0 && status !== 'enrollmentSuccess' && <p>{t.enrollmentNoCandidates}</p>}
-      <label>{t.enrollmentPin}<input name="fingerprint" required maxLength={50} placeholder="SHA256:…" autoComplete="off" spellCheck={false}/></label>
-      <button disabled={busy}>{t.enrollmentSubmit}</button>
+      <label>{t.enrollmentPin}<input name="fingerprint" required disabled={busy} maxLength={50} placeholder="SHA256:…" autoComplete="off" spellCheck={false}/></label>
+      <div className="enrollment-actions">
+        <button type="submit" disabled={busy}>{t.enrollmentSubmit}</button>
+        {!byId && <button type="submit" value="preflight" disabled={busy}>{t.enrollmentPreflight}</button>}
+      </div>
       {status && <p role="status">{t[status]}</p>}
-      <button type="button" className="quiet" disabled={busy} onClick={() => { setById(!byId); setStatus(null) }}>
+      {readiness && <div role="status">
+        <p>{t.enrollmentPlatforms[readiness.platform]}</p>
+        <p>{t.enrollmentSshChecks[readiness.ssh]}</p>
+      </div>}
+      <button type="button" className="quiet" disabled={busy} onClick={() => { setById(!byId); setStatus(null); setReadiness(null) }}>
         {byId ? t.enrollmentUseSsh : t.enrollmentUseId}
       </button>
     </form>

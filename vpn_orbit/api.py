@@ -396,8 +396,7 @@ def create_app(settings: Settings, *, auth: AuthService | None = None, enrollmen
         response.headers["Location"] = f'/api/v1/resources/{result["id"]}'
         return result
 
-    @app.post("/api/v1/enrollment/ssh", status_code=201)
-    def enroll_ssh(body: EnrollSSH, request: Request, response: Response, actor=Depends(principal)):
+    def ssh_enrollment_request(body, request, actor, *, preflight):
         if actor.role != Role.OWNER:
             raise Denied("FORBIDDEN")
         if (body.password is None) == (body.private_key is None):
@@ -420,12 +419,23 @@ def create_app(settings: Settings, *, auth: AuthService | None = None, enrollmen
         try:
             args = (service, token(request), csrf(request), matches[0], body.fingerprint, catalog, request.state.correlation_id)
             target = queue.check_ssh_enrollment(*args)
-            verify_credentials(target, body.username,
-                               password=body.password.get_secret_value() if body.password is not None else None,
-                               private_key=body.private_key.get_secret_value() if body.private_key is not None else None)
-            result = queue.enroll(*args)
+            readiness = verify_credentials(target, body.username,
+                                           password=body.password.get_secret_value() if body.password is not None else None,
+                                           private_key=body.private_key.get_secret_value() if body.private_key is not None else None,
+                                           preflight=preflight)
+            if preflight:
+                return readiness
+            return queue.enroll(*args)
         finally:
             ssh_enrollment.release()
+
+    @app.post("/api/v1/enrollment/ssh/preflight")
+    def ssh_enrollment_preflight(body: EnrollSSH, request: Request, actor=Depends(principal)):
+        return ssh_enrollment_request(body, request, actor, preflight=True)
+
+    @app.post("/api/v1/enrollment/ssh", status_code=201)
+    def enroll_ssh(body: EnrollSSH, request: Request, response: Response, actor=Depends(principal)):
+        result = ssh_enrollment_request(body, request, actor, preflight=False)
         response.headers["Location"] = f'/api/v1/resources/{result["id"]}'
         return result
 
