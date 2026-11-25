@@ -11,7 +11,9 @@ import subprocess
 import sys
 import tempfile
 import time
+from unittest.mock import patch
 
+from tools import prepare_vps
 from tools.prepare_vps import SSH_PROFILE
 from vpn_orbit.runtime.ssh_enrollment import verify_credentials
 
@@ -151,6 +153,68 @@ def state(directory):
     return json.loads((directory / "output" / ".provision-state.json").read_text())
 
 
+def verify_existing_file_is_preserved(directory):
+    scratch = directory / "existing-file"
+    scratch.mkdir(mode=0o700)
+    path = scratch / "existing"
+    content = b"existing fixture\n"
+    path.write_bytes(content)
+    script = "set -eu\n" + prepare_vps.install_file(path, content, "0644", "test-file")
+    env = {**os.environ, "work": str(scratch), "STATE": str(scratch)}
+    for mode, accepted in ((0o640, False), (0o644, True)):
+        path.chmod(mode)
+        before = path.stat()
+        result = subprocess.run(["/bin/sh", "-c", script], env=env, capture_output=True, text=True)
+        expect((result.returncode == 0) == accepted, "Only matching protected metadata may be reused", result)
+        after = path.stat()
+        expect((after.st_ino, after.st_mode, after.st_uid, after.st_gid, after.st_mtime_ns) ==
+               (before.st_ino, before.st_mode, before.st_uid, before.st_gid, before.st_mtime_ns)
+               and path.read_bytes() == content, "Existing file must stay untouched")
+        expect(not (scratch / "created-test-file").exists(), "Existing file must not be marked for removal")
+
+    managed = scratch / "created"
+    run(["/bin/sh", "-c", "set -eu\n" + prepare_vps.install_file(managed, content, "0644", "test-file")], env=env)
+    marker = scratch / "created-test-file"
+    expect(marker.is_file(), "Installation must record the created file")
+    remove = prepare_vps.CHECK_OWNED_FILE + f"owned_file {managed} test-file remove\n"
+    managed.write_bytes(b"changed fixture\n")
+    drift = subprocess.run(["/bin/sh", "-c", remove], env=env, capture_output=True, text=True)
+    expect(drift.returncode != 0 and managed.read_bytes() == b"changed fixture\n",
+           "Cleanup must preserve a changed file", drift)
+    managed.write_bytes(content)
+    run(["/bin/sh", "-c", remove], env=env)
+    expect(not managed.exists(), "Cleanup must remove the exact file installed by this preparation")
+
+
+def verify_cleanup_binding(directory):
+    old_state = directory / "legacy-state"
+    old_state.mkdir(mode=0o700)
+    (old_state / "created-firewall-authorized").touch()
+    key = b"ssh-ed25519 first fixture\n"
+    protected_file = directory / "managed-outside-this-preparation"
+    protected_file.write_text("existing fixture\n")
+    with patch.multiple(prepare_vps, REMOTE_STATE=old_state, FIREWALL_AUTHORIZED=protected_file):
+        legacy = subprocess.run(["/bin/sh", "-c", prepare_vps.cleanup_script(key)], capture_output=True, text=True)
+        expect(legacy.returncode != 0 and protected_file.is_file(), "Legacy intent must not authorize file removal", legacy)
+
+    with patch.multiple(prepare_vps, REMOTE_STATE=directory / "missing-state", FIREWALL_AUTHORIZED=protected_file):
+        missing = subprocess.run(["/bin/sh", "-c", prepare_vps.cleanup_script(key)], capture_output=True, text=True)
+        expect(missing.returncode != 0 and protected_file.is_file(), "A missing journal must not confirm cleanup", missing)
+
+    bound_state = directory / "bound-state"
+    bound_state.mkdir(mode=0o700)
+    with patch.multiple(prepare_vps, REMOTE_STATE=bound_state, FIREWALL_AUTHORIZED=protected_file):
+        run(["/bin/sh", "-c", "set -eu\numask 077\n" + prepare_vps._state_directory(key, create=True)])
+        run(["/bin/sh", "-c", "set -eu\n" + prepare_vps._state_directory(key)])
+        mismatch = subprocess.run(["/bin/sh", "-c", prepare_vps.cleanup_script(b"different key")],
+                                  capture_output=True, text=True)
+        expect(mismatch.returncode != 0, "A different preparation must not own an existing journal", mismatch)
+        (bound_state / "unrelated").write_text("existing fixture\n")
+        unknown = subprocess.run(["/bin/sh", "-c", prepare_vps.cleanup_script(key)], capture_output=True, text=True)
+        expect(unknown.returncode != 0 and (bound_state / "unrelated").is_file(),
+               "Cleanup must preserve unrelated files in the journal", unknown)
+
+
 def expect(condition, message, result=None):
     if not condition:
         detail = "" if result is None else f"\nstdout: {result.stdout}\nstderr: {result.stderr}"
@@ -168,6 +232,9 @@ def main():
     directory = Path(tempfile.mkdtemp(prefix="vpn-orbit-provision-lab-"))
     try:
         key, fingerprint = setup_fixture(directory)
+        verify_existing_file_is_preserved(LAB)
+        verify_cleanup_binding(LAB)
+        profile_before = PROFILE.stat()
 
         readiness = provision(directory, key, fingerprint, check=True)
         expect(readiness.returncode == 0, "Readiness must pass over the pinned administrator SSH connection", readiness)
@@ -236,6 +303,8 @@ def main():
         for path in NAMESPACES[:-1]:
             expect(not Path(path).exists(), f"Fixture artifact remains: {path}")
         expect(PROFILE.read_text() == SSH_PROFILE, "Cleanup must preserve the pre-existing SSH profile")
+        expect(PROFILE.stat().st_ino == profile_before.st_ino and PROFILE.stat().st_mtime_ns == profile_before.st_mtime_ns,
+               "Preparation and cleanup must preserve the existing SSH profile inode and contents")
         print(json.dumps({"status": "PASSED", "scenarios": [
             "disconnect-account", "retry-repair", "partial-helpers", "local-interruption",
             "verify-rollback", "cleanup"]}, sort_keys=True))

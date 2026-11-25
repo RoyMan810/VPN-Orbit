@@ -178,12 +178,16 @@ class PrepareVpsTests(unittest.TestCase):
                 subprocess.run(["sh", "-n"], input=script, text=True, check=True)
         self.assertIn("if ! id vpn-orbit-svc", scripts["account"])
         self.assertIn("cmp -s", scripts["helpers"])
-        self.assertIn("sshd-config.previous", scripts["sshd"])
-        cleanup = prepare_vps.cleanup_script()
+        self.assertNotIn("sshd-config.previous", scripts["sshd"])
+        self.assertNotIn(prepare_vps.FIREWALL_POLICY, scripts["helpers"])
+        self.assertNotIn(prepare_vps.FIREWALL_AUTHORIZED, scripts["keys"])
+        self.assertNotIn(prepare_vps.FIREWALL_SUDOERS, scripts["sudoers"])
+        self.assertNotIn(prepare_vps.FIREWALL_ACCOUNT, prepare_vps.SSH_PROFILE)
+        cleanup = prepare_vps.cleanup_script(context["probe_public_key"])
         subprocess.run(["sh", "-n"], input=cleanup, text=True, check=True)
         for artifact in (prepare_vps.AUTHORIZED, prepare_vps.SUDOERS, prepare_vps.SSH_CONFIG,
                          prepare_vps.PROBE_HOME, prepare_vps.REMOTE_STATE,
-                         prepare_vps.FIREWALL_AUTHORIZED, prepare_vps.FIREWALL_SUDOERS,
+                         prepare_vps.FIREWALL_AUTHORIZED,
                          prepare_vps.FIREWALL_POLICY, prepare_vps.FIREWALL_HOME):
             self.assertIn(artifact, cleanup)
         self.assertIn("account-created-$account", cleanup)
@@ -222,11 +226,23 @@ class PrepareVpsTests(unittest.TestCase):
             )
 
     def test_cleanup_script_removes_only_owned_files_and_directories(self):
-        cleanup = prepare_vps.cleanup_script()
-        self.assertIn('if [ -f "$STATE/created-$marker" ]; then', cleanup)
-        self.assertIn("$STATE/preexisting-sshd-config", cleanup)
+        cleanup = prepare_vps.cleanup_script(b"ssh-ed25519 test\n")
+        self.assertIn('for operation in check remove', cleanup)
+        self.assertIn('probe-key.sha256', cleanup)
+        self.assertIn("0:0:700", cleanup)
+        self.assertNotIn("sshd-config.previous", cleanup)
+        self.assertNotIn(prepare_vps.FIREWALL_SUDOERS, cleanup)
+        self.assertNotIn('rm -rf -- "$STATE"', cleanup)
         self.assertNotIn(f"rm -f -- {prepare_vps.AUTHORIZED} {prepare_vps.SUDOERS}", cleanup)
         self.assertIn("dir-libexec", cleanup)
+
+    def test_failed_userdel_leaves_cleanup_unconfirmed(self):
+        script = "id() { return 0; }; pkill() { return 0; }; userdel() { return 1; }; sleep() { return 0; }\n"
+        script += prepare_vps.REMOVE_ACCOUNT + 'remove_account fixture || exit 1\nprintf "cleanup completed\\n"\n'
+        result = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("Provisioning account still exists: fixture", result.stderr)
 
     def test_cli_cleanup_rejects_mismatched_state_before_host_probe(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -410,6 +426,7 @@ class PrepareVpsTests(unittest.TestCase):
         self.assertIn("vpn-orbit-firewall ALL=(root) NOPASSWD: /usr/local/libexec/vpn-orbit/firewall-apply", rules)
         sshd = prepare_vps.PHASE_SCRIPTS["sshd"](context)
         self.assertIn("firewall-gateway", sshd)
+        self.assertIn("Match User vpn-orbit-firewall", prepare_vps.FIREWALL_SSH_PROFILE)
         with tempfile.TemporaryDirectory() as tmp:
             remote = FakeRemote()
             provisioner, output = make_provisioner(Path(tmp), remote, firewall=True)
