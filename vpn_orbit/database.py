@@ -14,6 +14,16 @@ from dataclasses import dataclass
 
 SCHEMA_VERSION = 6
 _ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+_JOBS_SCHEMA = """
+CREATE TABLE jobs (
+    id TEXT PRIMARY KEY, actor_id TEXT NOT NULL REFERENCES users(id),
+    resource_id TEXT NOT NULL REFERENCES resources(id), action TEXT NOT NULL CHECK(action IN ('host.probe','docker.restart','firewall.apply','apps.lifecycle','host.prepare')),
+    payload_hash TEXT NOT NULL, scope_digest TEXT NOT NULL, policy_revision INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('QUEUED','INTENT_PREPARED','DISPATCHING','EXECUTING','VERIFYING','SUCCEEDED','FAILED','UNKNOWN_OUTCOME','CANCELLED_SAFE')),
+    revision INTEGER NOT NULL DEFAULT 1, claimed_by TEXT, claim_nonce TEXT,
+    permit TEXT, result TEXT, reason TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+)
+"""
 _SCHEMA = r"""
 CREATE TABLE api_calls (user_id TEXT NOT NULL, ip TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE audit (
@@ -46,14 +56,7 @@ CREATE TABLE job_incidents (
     id TEXT PRIMARY KEY, job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id),
     state TEXT NOT NULL CHECK(state='OPEN'), created_at INTEGER NOT NULL
 );
-CREATE TABLE jobs (
-    id TEXT PRIMARY KEY, actor_id TEXT NOT NULL REFERENCES users(id),
-    resource_id TEXT NOT NULL REFERENCES resources(id), action TEXT NOT NULL CHECK(action IN ('host.probe','docker.restart','firewall.apply','apps.lifecycle')),
-    payload_hash TEXT NOT NULL, scope_digest TEXT NOT NULL, policy_revision INTEGER NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('QUEUED','INTENT_PREPARED','DISPATCHING','EXECUTING','VERIFYING','SUCCEEDED','FAILED','UNKNOWN_OUTCOME','CANCELLED_SAFE')),
-    revision INTEGER NOT NULL DEFAULT 1, claimed_by TEXT, claim_nonce TEXT,
-    permit TEXT, result TEXT, reason TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-);
+""" + _JOBS_SCHEMA + ";\n" + r"""
 CREATE TABLE login_attempts (
     id TEXT PRIMARY KEY, account TEXT NOT NULL, ip TEXT NOT NULL,
     at INTEGER NOT NULL, failed INTEGER NOT NULL CHECK(failed IN (0,1))

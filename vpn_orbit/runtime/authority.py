@@ -14,7 +14,7 @@ from nacl.signing import SigningKey, VerifyKey
 
 from ..errors import Denied
 from . import policy as policy_module
-from .protocol import SHA256, ULID, application_payload, canonical, checksum, fields, firewall_payload, integer, restart_payload, text
+from .protocol import SHA256, ULID, application_payload, canonical, checksum, fields, firewall_payload, integer, preparation_digest, restart_payload, text
 from .storage import Journal, new_private_file, protected_bytes
 from .timehealth import ANCHOR_FIELDS, TimeHealth
 
@@ -106,12 +106,17 @@ class Authority:
         """Called under the lifetime process lock, before accepting any requests."""
         with self.journal.write() as db:
             gate = self._gate(db)
-            active = db.execute("SELECT job_id,target,mutating FROM attempts WHERE state IN ('ISSUED','DISPATCHING')").fetchall()
+            active = db.execute("SELECT job_id,target,mutating,state,claims FROM attempts WHERE state IN ('ISSUED','DISPATCHING')").fetchall()
+            hold = gate["state"] != "NORMAL"
             for row in active:
+                if row["state"] == "ISSUED" and json.loads(row["claims"]).get("capability") == "host.prepare":
+                    db.execute("""UPDATE attempts SET state='CANCELLED_SAFE',result_code='AUTHORITY_RESTART_BEFORE_DISPATCH'
+                                  WHERE job_id=?""", (row["job_id"],))
+                    continue
                 db.execute("UPDATE attempts SET state='UNKNOWN_OUTCOME',result_code='AUTHORITY_RESTART' WHERE job_id=?", (row["job_id"],))
                 if row["mutating"]:
                     db.execute("INSERT OR IGNORE INTO incidents VALUES(?,?)", (row["job_id"], canonical(self.policy.closure(row["target"])).decode()))
-            hold = gate["state"] != "NORMAL" or any(row["mutating"] for row in active)
+                    hold = True
             db.execute("UPDATE gate SET epoch=epoch+1,state=? WHERE id=1", ("RECOVERY_HOLD" if hold else "NORMAL",))
         try:
             self.time_health.recover()
@@ -184,6 +189,11 @@ class Authority:
         integer(request["revision"], 1, 2**31 - 1)
         text(request["plan_digest"], SHA256)
         text(request["scope_digest"], SHA256)
+        if name == "host.prepare" and (
+                request["job_id"] != request["plan_id"] or request["job_id"] != request["approval_id"]
+                or request["revision"] != 1 or request["plan_digest"] != preparation_digest(
+                    request["job_id"], request["actor_id"], request["target"], request["scope_digest"])):
+            raise Denied("PERMIT_BINDING_INVALID")
         target = self.policy.target(request["target"], request["capability"], request["scope_digest"])
         mutating = policy_module.CAPABILITIES[request["capability"]].mutating
         with self.journal.write(kind="dispatch") as db:
@@ -290,11 +300,7 @@ class Authority:
             db.execute("UPDATE attempts SET state=? WHERE job_id=?", (resolved, request["job_id"]))
             db.execute("DELETE FROM incidents WHERE job_id=?", (request["job_id"],))
             # A recovered authority stays fenced for unrelated incidents/updates.
-            if (gate["state"] == "RECOVERY_HOLD" and gate["activated"] and gate["update_ticket"] is None
-                    and not self.recovery_authorization
-                    and not db.execute("SELECT 1 FROM incidents").fetchone()
-                    and not db.execute("SELECT 1 FROM attempts WHERE mutating=1 AND state IN ('ISSUED','DISPATCHING','UNKNOWN_OUTCOME')").fetchone()):
-                db.execute("UPDATE gate SET state='NORMAL' WHERE id=1")
+            self._release_recovery_hold(db, gate)
         return self.status(request["job_id"])
 
     def reconcile_application(self, request):
@@ -313,11 +319,41 @@ class Authority:
                 raise Denied("APP_RECONCILIATION_UNVERIFIED")
             db.execute("UPDATE attempts SET state='RECONCILED_SUCCEEDED' WHERE job_id=?", (request["job_id"],))
             db.execute("DELETE FROM incidents WHERE job_id=?", (request["job_id"],))
-            if (gate["state"] == "RECOVERY_HOLD" and gate["activated"] and gate["update_ticket"] is None
-                    and not self.recovery_authorization
-                    and not db.execute("SELECT 1 FROM incidents").fetchone()
-                    and not db.execute("SELECT 1 FROM attempts WHERE mutating=1 AND state IN ('ISSUED','DISPATCHING','UNKNOWN_OUTCOME')").fetchone()):
-                db.execute("UPDATE gate SET state='NORMAL' WHERE id=1")
+            self._release_recovery_hold(db, gate)
+        return self.status(request["job_id"])
+
+    def _release_recovery_hold(self, db, gate):
+        if (gate["state"] == "RECOVERY_HOLD" and gate["activated"] and gate["update_ticket"] is None
+                and not self.recovery_authorization
+                and not db.execute("SELECT 1 FROM incidents").fetchone()
+                and not db.execute("SELECT 1 FROM attempts WHERE mutating=1 AND state IN ('ISSUED','DISPATCHING','UNKNOWN_OUTCOME')").fetchone()):
+            db.execute("UPDATE gate SET state='NORMAL' WHERE id=1")
+
+    def preparation_reconciliation(self, request, *, complete):
+        fields(request, ("job_id", "nonce"))
+        text(request["job_id"], ULID)
+        text(request["nonce"], SHA256)
+        with self.journal.write(kind="dispatch") as db:
+            gate = self._gate(db)
+            if (not gate["activated"] or gate["state"] not in ("NORMAL", "RECOVERY_HOLD")
+                    or gate["update_ticket"] is not None or self.recovery_authorization):
+                raise Denied("GATE_CLOSED")
+            row = db.execute("SELECT * FROM attempts WHERE job_id=? AND nonce=?",
+                             (request["job_id"], request["nonce"])).fetchone()
+            claims = json.loads(row["claims"]) if row else {}
+            allowed = ("UNKNOWN_OUTCOME", "RECONCILED_SUCCEEDED", "SUCCEEDED")
+            if not complete:
+                allowed += ("FAILED", "CANCELLED_SAFE")
+            if (claims.get("capability") != "host.prepare"
+                    or row["state"] not in allowed):
+                raise Denied("VPS_PREPARATION_RECONCILIATION_UNVERIFIED")
+            self.policy.target(claims["target"], "host.prepare", claims["scope_digest"])
+            if complete and row["state"] == "UNKNOWN_OUTCOME":
+                result = {"outcome": "SUCCEEDED", "code": "VPS_PREPARATION_RECONCILED", "observation": None}
+                db.execute("""UPDATE attempts SET state='RECONCILED_SUCCEEDED',result_code=?,result_digest=?
+                              WHERE job_id=?""", (result["code"], checksum(result), request["job_id"]))
+                db.execute("DELETE FROM incidents WHERE job_id=?", (request["job_id"],))
+                self._release_recovery_hold(db, gate)
         return self.status(request["job_id"])
 
     def update(self, operation, request):
@@ -384,6 +420,8 @@ class Authority:
             return self.reconcile_firewall(payload)
         if role == "broker" and operation == "apps.reconcile":
             return self.reconcile_application(payload)
+        if role == "broker" and operation in ("prepare.readback", "prepare.reconcile"):
+            return self.preparation_reconciliation(payload, complete=operation == "prepare.reconcile")
         if role in ("worker", "broker") and operation == "permit.cancel":
             return self.cancel(payload)
         if role in ("worker", "broker", "updater") and operation == "attempt.status":

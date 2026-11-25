@@ -1,19 +1,29 @@
 """Scoped SSH-use with durable receipts, gate consumption and protected Vault policy."""
 
+import asyncio
 from pathlib import Path
+import sqlite3
+from threading import Lock, Timer
 import time
 
 from ..errors import Denied
 from .authority import verify_permit
-from .protocol import ULID, canonical, checksum, decode, fields, text
+from .protocol import SHA256, ULID, canonical, checksum, decode, fields, text
 from .ssh import application, apply_firewall, firewall_status, probe, provision_known_hosts, restart, verify_known_hosts
+from .ssh_preparation import PreparationSSH, validate_administrator
 from .storage import Journal
+from .vps_preparation import PHASES
 
 
 _SCHEMA = """
 CREATE TABLE receipts(job_id TEXT PRIMARY KEY, nonce TEXT NOT NULL UNIQUE, state TEXT NOT NULL,
     permit TEXT NOT NULL, response TEXT);
 """
+_PREPARATION_PHASES = """CREATE TABLE IF NOT EXISTS preparation_phases (
+    job_id TEXT PRIMARY KEY REFERENCES receipts(job_id), phase TEXT NOT NULL,
+    stage TEXT NOT NULL CHECK(stage IN ('DISPATCHING','VERIFIED')))"""
+_PREPARATION_TIMEOUT = 115
+_CREDENTIAL_TTL = 180
 
 
 class Broker:
@@ -26,6 +36,8 @@ class Broker:
         self.execute_firewall = execute_firewall
         self.execute_application = execute_application
         self.firewall_status = firewall_status
+        self._preparation_credentials = {}
+        self._credentials_lock = Lock()
         self.journal = Journal(self.directory / "receipts.sqlite3", writers=writers)
         verify_known_hosts(self.directory / "known_hosts", policy)
 
@@ -43,8 +55,11 @@ class Broker:
             current = self.gate.call("attempt.status", {"job_id": row["job_id"]})
             if current["state"] == "DISPATCHING":
                 self._complete(permit, "UNKNOWN_OUTCOME", "BROKER_RESTART", None)
-            elif current["state"] == "ISSUED":
-                receipt = self.gate.call("permit.cancel", {"job_id": row["job_id"], "nonce": row["nonce"]})
+            elif current["state"] == "ISSUED" or (current["state"] == "CANCELLED_SAFE"
+                    and permit["claims"]["capability"] == "host.prepare"):
+                receipt = current
+                if current["state"] == "ISSUED":
+                    receipt = self.gate.call("permit.cancel", {"job_id": row["job_id"], "nonce": row["nonce"]})
                 self._persist(row["job_id"], "FAILED", {
                     "outcome": "FAILED", "code": "BROKER_RESTART_BEFORE_DISPATCH",
                     "observation": None, "authority_receipt": receipt,
@@ -75,6 +90,10 @@ class Broker:
         claims = verify_permit(request["permit"], self.verify_key, now=int(self.clock()))
         target = self.policy.target(claims["target"], claims["capability"], claims["scope_digest"])
         capability = claims["capability"]
+        if capability == "host.prepare" and claims["mutating"]:
+            if not by_policy or request[ref_field] != target.value["secret_ref"]:
+                raise Denied("BROKER_SCOPE_DENIED")
+            return self._dispatch_key(request, claims, target, None)
         if capability == "host.probe" and not claims["mutating"]:
             anchor = target.value["secret_ref"]
         elif capability == "docker.restart" and claims["mutating"]:
@@ -106,6 +125,8 @@ class Broker:
         self.gate.call("permit.consume", request["permit"])
         with self.journal.write() as db:
             db.execute("UPDATE receipts SET state='DISPATCHING' WHERE job_id=?", (claims["job_id"],))
+        if claims["capability"] == "host.prepare":
+            return self._dispatch_preparation(request["permit"], target)
         if claims["capability"] in ("docker.restart", "firewall.apply", "apps.lifecycle"):
             execute, payload_key = {
                 "docker.restart": (self.execute_restart, "restart"),
@@ -125,6 +146,123 @@ class Broker:
         except Denied as error:
             # The only installed operation is read-only, with no delegated effects.
             return self._complete(request["permit"], "FAILED", error.code, None)
+
+    def _expire_credentials(self, job_id):
+        with self._credentials_lock:
+            self._preparation_credentials.pop(job_id, None)
+
+    def _preparation_request(self, payload):
+        fields(payload, ("job_id", "actor_id", "target", "scope_digest", "username", "password", "private_key"))
+        for name in ("job_id", "actor_id", "target"):
+            text(payload[name], ULID)
+        text(payload["scope_digest"], SHA256)
+        target = self.policy.target(payload["target"], "host.prepare", payload["scope_digest"])
+        username, password, private_key = (payload[name] for name in ("username", "password", "private_key"))
+        validate_administrator(username, password, private_key)
+        return target, (username, password, private_key)
+
+    def _supply_preparation(self, payload):
+        target, credentials = self._preparation_request(payload)
+        job_id = payload["job_id"]
+        with self._credentials_lock:
+            if job_id in self._preparation_credentials or len(self._preparation_credentials) >= 8:
+                raise Denied("VPS_PREPARATION_CREDENTIALS_BUSY")
+            timer = Timer(_CREDENTIAL_TTL, self._expire_credentials, (job_id,))
+            timer.daemon = True
+            self._preparation_credentials[job_id] = (
+                payload["actor_id"], target.id, target.scope_digest, time.monotonic() + _CREDENTIAL_TTL, credentials, timer,
+            )
+            timer.start()
+        return {"job_id": job_id}
+
+    def _take_credentials(self, claims):
+        with self._credentials_lock:
+            entry = self._preparation_credentials.pop(claims["job_id"], None)
+        if entry is None:
+            raise Denied("VPS_PREPARATION_CREDENTIALS_EXPIRED")
+        actor, target, scope, expiry, credentials, timer = entry
+        timer.cancel()
+        if (actor, target, scope) != (claims["actor_id"], claims["target"], claims["scope_digest"]) or time.monotonic() >= expiry:
+            raise Denied("VPS_PREPARATION_CREDENTIALS_EXPIRED")
+        return credentials
+
+    def _preparation_key(self, target):
+        ref = target.value["secret_ref"]
+        return self.vault.use_policy_key(ref, consumer_uid=self.worker_uid, target=target.id, purpose="host.probe",
+                                         scope_digest=target.scope_digest, policy_revision=target.revision, exact_ref=ref)
+
+    def _checkpoint(self, job_id, phase, stage):
+        with self.journal.write(kind="dispatch") as db:
+            db.execute(_PREPARATION_PHASES)
+            db.execute("""INSERT INTO preparation_phases VALUES(?,?,?)
+                          ON CONFLICT(job_id) DO UPDATE SET phase=excluded.phase,stage=excluded.stage""",
+                       (job_id, phase, stage))
+
+    def _dispatch_preparation(self, permit, target):
+        claims = permit["claims"]
+        dispatched = False
+
+        async def execute(transport):
+            nonlocal dispatched
+            async with asyncio.timeout(_PREPARATION_TIMEOUT):
+                for phase in PHASES:
+                    status = await transport.phase(phase, inspect=True)
+                    if status == "INCOMPLETE":
+                        self._checkpoint(claims["job_id"], phase, "DISPATCHING")
+                        dispatched = True
+                        await transport.phase(phase, inspect=False)
+                        status = await transport.phase(phase, inspect=True)
+                    if status != "VERIFIED":
+                        raise Denied({"CONFLICT": "VPS_PREPARATION_CONFLICT", "BUSY": "VPS_PREPARATION_BUSY"}.get(
+                            status, "VPS_PREPARATION_PHASE_UNCONFIRMED"))
+                    self._checkpoint(claims["job_id"], phase, "VERIFIED")
+                await transport.verify_access()
+
+        try:
+            with self.vault.key_lock(target.value["secret_ref"], shared=True):
+                username, password, private_key = self._take_credentials(claims)
+                transport = PreparationSSH(target, username, password=password, private_key=private_key,
+                                           observation_key=self._preparation_key(target))
+                asyncio.run(execute(transport))
+        except (Denied, OSError, TimeoutError, sqlite3.Error) as error:
+            code = error.code if isinstance(error, Denied) else "VPS_PREPARATION_UNCONFIRMED"
+            return self._complete(permit, "UNKNOWN_OUTCOME" if dispatched else "FAILED", code, None)
+        return self._complete(permit, "SUCCEEDED", "VPS_PREPARATION_VERIFIED", None)
+
+    def _reconcile_preparation(self, payload):
+        target, (username, password, private_key) = self._preparation_request(payload)
+        with self.journal.connect() as db:
+            row = db.execute("SELECT permit FROM receipts WHERE job_id=?", (payload["job_id"],)).fetchone()
+        if row is None:
+            raise Denied("VPS_PREPARATION_RECONCILIATION_UNVERIFIED")
+        claims = decode(row["permit"].encode())["claims"]
+        if (claims["capability"] != "host.prepare" or claims["target"] != target.id
+                or claims["scope_digest"] != target.scope_digest or claims["actor_id"] != payload["actor_id"]):
+            raise Denied("VPS_PREPARATION_RECONCILIATION_UNVERIFIED")
+        request = {"job_id": claims["job_id"], "nonce": claims["nonce"]}
+
+        async def inspect(transport):
+            async with asyncio.timeout(_PREPARATION_TIMEOUT):
+                for phase in PHASES:
+                    if await transport.phase(phase, inspect=True) != "VERIFIED":
+                        raise Denied("VPS_PREPARATION_RECONCILIATION_UNVERIFIED")
+                await transport.verify_access()
+
+        receipt = self.gate.call("prepare.readback", request)
+        if receipt["state"] in ("FAILED", "CANCELLED_SAFE"):
+            return receipt
+        with self.vault.key_lock(target.value["secret_ref"], shared=True):
+            transport = PreparationSSH(target, username, password=password, private_key=private_key,
+                                       observation_key=self._preparation_key(target))
+            try:
+                asyncio.run(inspect(transport))
+            except TimeoutError:
+                raise Denied("VPS_PREPARATION_RECONCILIATION_UNVERIFIED") from None
+            receipt = self.gate.call("prepare.reconcile", request)
+            self._persist(claims["job_id"], receipt["state"], {
+                "outcome": "SUCCEEDED", "code": receipt["result_code"], "observation": None, "authority_receipt": receipt,
+            })
+            return receipt
 
     def remote_firewall_status(self, payload, peer):
         fields(payload, ("policy_ref", "target", "operation_id"))
@@ -161,6 +299,11 @@ class Broker:
         return remote
 
     def dispatch(self, role, peer, operation, payload):
+        if role == "local-root" and (peer.uid, peer.gid) == (0, 0):
+            if operation == "prepare.credentials":
+                return self._supply_preparation(payload)
+            if operation == "prepare.reconcile":
+                return self._reconcile_preparation(payload)
         if role != "worker" or peer.uid != self.worker_uid:
             raise Denied("RPC_PEER_DENIED")
         if operation == "use_for_scoped_ssh":

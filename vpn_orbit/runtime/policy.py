@@ -20,6 +20,7 @@ class Capability:
 # New adapters enter this registry only after their preconditions/effect bounds are implemented.
 CAPABILITIES = {
     "host.probe": Capability(False, "vps:probe"),
+    "host.prepare": Capability(True, "vps:prepare"),
     "docker.restart": Capability(True, "vps:restart"),
     "firewall.apply": Capability(True, "vps:firewall"),
     "apps.lifecycle": Capability(True, "vps:apps"),
@@ -62,6 +63,8 @@ class Target:
         if (not isinstance(value["capabilities"], list) or not value["capabilities"]
                 or any(not isinstance(v, str) or v not in CAPABILITIES for v in value["capabilities"])
                 or len(set(value["capabilities"])) != len(value["capabilities"])):
+            raise Denied("CAPABILITY_DISABLED")
+        if "host.prepare" in value["capabilities"] and set(value["capabilities"]) != {"host.prepare", "host.probe"}:
             raise Denied("CAPABILITY_DISABLED")
         for capability, name in (("docker.restart", "restart_secret_ref"), ("firewall.apply", "firewall_secret_ref"),
                                  ("apps.lifecycle", "application_secret_ref")):
@@ -120,7 +123,7 @@ class Policy:
     def enrollment_catalog(self, *, ssh_endpoints=False):
         catalog = {}
         for target in self.targets.values():
-            if "host.probe" in target.value["capabilities"]:
+            if "host.probe" in target.value["capabilities"] and "host.prepare" not in target.value["capabilities"]:
                 catalog[target.id] = {"fingerprint": target.fingerprint, "scope_digest": target.scope_digest,
                                       "policy_revision": target.revision}
                 if ssh_endpoints:

@@ -1,5 +1,6 @@
 """One process owns a durable queue claim. All SSH use goes through protected local IPC."""
 
+import json
 from threading import Event
 
 from .database import identifier
@@ -10,6 +11,9 @@ from .queue import JobQueue
 from .restart_requests import RestartOperations
 from .runtime.protocol import checksum, compose_summary, docker_summary, fields, firewall_rules, integer, software_summary, text
 from .runtime.storage import process_lock
+
+
+_UNAVAILABLE_RPC = {"RPC_UNAVAILABLE", "RPC_STORAGE_OR_SERVICE_UNAVAILABLE"}
 
 
 class Worker:
@@ -25,6 +29,13 @@ class Worker:
 
     def _recover_result(self, row):
         if row["status"] not in ("QUEUED", "INTENT_PREPARED"):
+            if row["action"] == "host.prepare" and row["permit"]:
+                try:
+                    nonce = json.loads(row["permit"])["claims"]["nonce"]
+                except (ValueError, TypeError, KeyError):
+                    return "UNKNOWN_OUTCOME"
+                if self._preparation_failure(row["id"], nonce):
+                    return "FAILED"
             return "UNKNOWN_OUTCOME"
         try:
             status = self.gate.call("attempt.status", {"job_id": row["id"]})
@@ -36,6 +47,8 @@ class Worker:
         except Denied as error:
             if error.code == "ATTEMPT_NOT_FOUND":
                 return "CANCELLED_SAFE"
+            if row["action"] == "host.prepare" and error.code in _UNAVAILABLE_RPC:
+                raise
         return "UNKNOWN_OUTCOME"
 
     def run_one(self):
@@ -62,6 +75,7 @@ class Worker:
             restart = row["action"] == "docker.restart"
             firewall = row["action"] == "firewall.apply"
             application = row["action"] == "apps.lifecycle"
+            preparation = row["action"] == "host.prepare"
             if restart:
                 binding, secret_ref, revalidate = self.restart.prepare(row)
             elif firewall:
@@ -70,6 +84,9 @@ class Worker:
                 binding, secret_ref, revalidate = self.applications.prepare(row)
             else:
                 binding, secret_ref, revalidate = self.queue.binding(row), self.secret_refs[row["resource_id"]], None
+                if preparation:
+                    binding["time_anchor"] = self.gate.call("time.anchor", {"plan_id": binding["plan_id"],
+                                                                           "revision": binding["revision"]})
             permit = self.gate.call("permit.admit", binding)
             self.queue.advance(claim, "INTENT_PREPARED", permit=permit, binding=binding)
             self.observe("INTENT_PREPARED")
@@ -88,11 +105,13 @@ class Worker:
                     or receipt["result_digest"] != checksum(result)):
                 raise Denied("BROKER_RECEIPT_INVALID")
             text(response["code"], r"[A-Z][A-Z0-9_]{1,63}")
-            if restart or application:
+            if restart or application or preparation:
                 if response["outcome"] not in ("SUCCEEDED", "FAILED", "UNKNOWN_OUTCOME") or response["observation"] is not None:
                     raise Denied("BROKER_RECEIPT_INVALID")
                 if application and response["outcome"] == "SUCCEEDED" and response["code"] not in (
                         "APP_HEALTH_VERIFIED", "APP_REMOVED_DATA_PRESERVED", "APP_READBACK_VERIFIED"):
+                    raise Denied("BROKER_RECEIPT_INVALID")
+                if preparation and response["outcome"] == "SUCCEEDED" and response["code"] != "VPS_PREPARATION_VERIFIED":
                     raise Denied("BROKER_RECEIPT_INVALID")
                 self.queue.finish(claim, response["outcome"], response["code"])
             elif firewall:
@@ -132,15 +151,38 @@ class Worker:
             else:
                 raise Denied("BROKER_OBSERVATION_INVALID")
         except Denied as error:
+            if sent and preparation:
+                reason = self._preparation_failure(claim.job_id, permit["claims"]["nonce"])
+                if reason:
+                    self.queue.finish(claim, "FAILED", reason)
+                    return True
+            if preparation and not sent and permit is None and error.code in _UNAVAILABLE_RPC:
+                raise  # Keep the claim until Authority proves whether it issued a permit.
             if not sent and permit is not None:
                 try:
                     self.gate.call("permit.cancel", {"job_id": row["id"], "nonce": permit["claims"]["nonce"]})
-                except Denied:
+                except Denied as cancel_error:
+                    if preparation and cancel_error.code in _UNAVAILABLE_RPC:
+                        raise
                     self.queue.finish(claim, "UNKNOWN_OUTCOME", error.code)
                     return True
             # A lost reply after dispatch never becomes success and never causes an automatic retry.
             self.queue.finish(claim, "UNKNOWN_OUTCOME" if sent else "CANCELLED_SAFE", error.code)
         return True
+
+    def _preparation_failure(self, job_id, nonce):
+        try:
+            receipt = self.gate.call("attempt.status", {"job_id": job_id})
+            if receipt["nonce"] != nonce:
+                return None
+            if receipt["state"] == "ISSUED":
+                receipt = self.gate.call("permit.cancel", {"job_id": job_id, "nonce": nonce})
+            if receipt["state"] in ("CANCELLED_SAFE", "FAILED"):
+                return receipt["result_code"]
+        except Denied as error:
+            if error.code in _UNAVAILABLE_RPC:
+                raise
+        return None
 
     def run(self, *, once=False, stop=None):
         stop = stop if stop is not None else Event()

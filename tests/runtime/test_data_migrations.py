@@ -4,7 +4,7 @@ import sqlite3
 import tempfile
 import unittest
 
-from vpn_orbit.database import Store
+from vpn_orbit.database import Store, _JOBS_SCHEMA
 from vpn_orbit.errors import Denied
 from vpn_orbit.runtime.authority import Authority
 from vpn_orbit.runtime.broker import Broker
@@ -65,3 +65,25 @@ class DataMigrationTests(unittest.TestCase):
                       (Step("cyclic", start, start, ()),)):
             with self.assertRaisesRegex(Denied, "SCHEMA_TRANSITION_UNSUPPORTED"):
                 path_to(start, end, edges)
+
+    def test_preparation_jobs_migrate_without_losing_existing_job_references(self):
+        path = self.root / "app/controller.sqlite3"
+        with closing(sqlite3.connect(path, autocommit=True)) as db:
+            db.execute("DROP TABLE jobs")
+            db.execute(_JOBS_SCHEMA.replace(",'host.prepare'", ""))
+            db.execute("CREATE INDEX job_queue ON jobs(status,claimed_by,created_at)")
+            db.execute("CREATE INDEX jobs_resource_time ON jobs(resource_id,updated_at)")
+            db.execute("INSERT INTO users VALUES('owner','owner','unused',1,'Owner',0,1,0,0)")
+            db.execute("INSERT INTO resources VALUES('target','scope',1,1,1,0,0)")
+            db.execute("""INSERT INTO jobs(id,actor_id,resource_id,action,payload_hash,scope_digest,policy_revision,
+                          status,created_at,updated_at) VALUES('job','owner','target','host.probe','hash','scope',1,'UNKNOWN_OUTCOME',0,0)""")
+            db.execute("INSERT INTO request_keys VALUES('owner','host.probe','request','hash','job',1000)")
+            db.execute("INSERT INTO job_incidents VALUES('incident','job','OPEN',0)")
+        self.assertEqual(migrate_staged(self.root), ["vps-preparation-jobs", "vault-lifecycle-audit"])
+        self.assertEqual(migrate_staged(self.root), [])
+        with closing(sqlite3.connect(path, autocommit=True)) as db:
+            self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
+            self.assertEqual(db.execute("SELECT job_id FROM request_keys").fetchall(), [("job",)])
+            self.assertEqual(db.execute("SELECT job_id FROM job_incidents").fetchall(), [("job",)])
+            self.assertEqual(db.execute("SELECT action,status FROM jobs").fetchall(), [("host.probe", "UNKNOWN_OUTCOME")])
+            db.execute("UPDATE jobs SET action='host.prepare' WHERE id='job'")
