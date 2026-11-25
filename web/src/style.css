@@ -83,6 +83,7 @@ code { font-family: ui-monospace, "Cascadia Code", monospace; overflow-wrap: any
 .enrollment { padding: 14px 20px; margin-bottom: 16px; }
 .enrollment form { display: grid; gap: 12px; max-width: 34rem; margin-top: 14px; }
 .enrollment button { justify-self: start; }
+.enrollment-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .audit-export summary, .enrollment summary { cursor: pointer; font-weight: 650; }
 .audit-export label { display: grid; gap: 6px; margin-top: 12px; width: fit-content; max-width: 100%; }
 .audit-export select { max-width: 100%; }

@@ -9,6 +9,7 @@ from vpn_orbit.api import create_app
 from vpn_orbit.config import Settings
 from vpn_orbit.database import identifier
 from vpn_orbit.runtime.policy import Policy
+from vpn_orbit.runtime.ssh_enrollment import PREFLIGHT_COMMAND
 from .test_auth_api import Fixture, ORIGIN, OTHER, SCOPE
 
 
@@ -25,6 +26,8 @@ class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
         self.host_pin = host.get_fingerprint()
         self.other_pin = different_host.get_fingerprint()
         self.dials, self.auth_methods, self.sessions = [], [], []
+        self.output = b"VPN_ORBIT_PREFLIGHT_V1 DEBIAN_13 VERIFIED\n"
+        self.stderr = b""
         fixture = self
 
         class Server(asyncssh.SSHServer):
@@ -45,11 +48,14 @@ class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
                 fixture.auth_methods.append("publickey")
                 return username == "ubuntu" and key.public_data == client.public_data
 
-            def session_requested(self):
-                fixture.sessions.append(True)
-                return False
+        async def process_factory(process):
+            fixture.sessions.append((process.command, await process.stdin.read()))
+            process.stdout.write(fixture.output)
+            process.stderr.write(fixture.stderr)
+            process.exit(0)
 
-        server = await asyncssh.listen("127.0.0.1", 0, server_factory=Server, server_host_keys=[host])
+        server = await asyncssh.listen("127.0.0.1", 0, server_factory=Server, server_host_keys=[host],
+                                       process_factory=process_factory, encoding=None)
         self.addAsyncCleanup(server.wait_closed)
         self.addCleanup(server.close)
         self.port = server.get_port()
@@ -73,9 +79,10 @@ class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
 
         self.enterContext(patch("vpn_orbit.runtime.ssh_enrollment.asyncssh.connect", loopback_connect))
 
-    async def enroll(self, *, client=None, headers=None, **values):
+    async def enroll(self, *, client=None, headers=None, preflight=False, **values):
         body = {"ip": IP, "port": self.port, "username": "ubuntu", "fingerprint": self.host_pin, **values}
-        return await asyncio.to_thread((client or self.client).post, "/api/v1/enrollment/ssh",
+        endpoint = "/api/v1/enrollment/ssh/preflight" if preflight else "/api/v1/enrollment/ssh"
+        return await asyncio.to_thread((client or self.client).post, endpoint,
                                        json=body, headers=self.headers() if headers is None else headers)
 
     async def test_password_login_failures_and_retry_never_open_a_session(self):
@@ -128,3 +135,32 @@ class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("invalid-ssh-key-canary", malformed.text)
         self.assertNotIn("PRIVATE KEY", success.text)
         self.assertNotIn("PRIVATE KEY", str(self.store.events_after(0)))
+
+    async def test_preflight_runs_a_fixed_command_without_registering_or_sending_credentials_to_stdin(self):
+        wrong = await self.enroll(preflight=True, ip=OTHER_IP, fingerprint=self.other_pin, password=PASSWORD)
+        self.assertEqual(wrong.status_code, 412)
+        self.assertEqual(self.auth_methods, [])
+        self.assertEqual(self.sessions, [])
+        no_csrf = await self.enroll(preflight=True, headers={"Origin": ORIGIN}, password=PASSWORD)
+        self.assertEqual(no_csrf.status_code, 403)
+        self.assertEqual(self.dials, [(OTHER_IP, self.port)])
+
+        self.stderr = b"private-remote-diagnostic"
+        result = await self.enroll(preflight=True, password=PASSWORD)
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json(), {"platform": "DEBIAN_13", "ssh": "VERIFIED"})
+        self.assertEqual(result.headers["cache-control"], "no-store")
+        self.assertEqual(self.sessions, [(PREFLIGHT_COMMAND, b"")])
+        self.assertEqual(self.client.get("/api/v1/resources").json()["items"], [])
+        self.assertNotIn(SCOPE, str(self.store.events_after(0)))
+        self.assertNotIn(PASSWORD, str(self.store.events_after(0)))
+
+    async def test_preflight_rejects_nonprotocol_output_without_exposing_it(self):
+        for output in (b"VPN_ORBIT_PREFLIGHT_V1 DEBIAN_13 VERIFIED\nremote-canary\n", b"x" * 129):
+            with self.subTest(output=output[:17]):
+                self.output = output
+                result = await self.enroll(preflight=True, private_key=self.private_key)
+                self.assertEqual(result.status_code, 502, result.text)
+                self.assertEqual(result.json()["code"], "SSH_PREFLIGHT_UNAVAILABLE")
+                self.assertNotIn("remote-canary", result.text)
+        self.assertEqual(self.client.get("/api/v1/resources").json()["items"], [])
