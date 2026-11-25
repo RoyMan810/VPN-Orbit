@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import secrets
 import shutil
 import signal
 import subprocess
@@ -27,6 +28,7 @@ PORT = 2222
 ADDRESS = "10.231.0.2"
 HOST_ADDRESS = "10.231.0.1"
 PROFILE = Path("/etc/ssh/sshd_config.d/60-vpn-orbit-probe.conf")
+ADMIN_SUDOERS = Path("/etc/sudoers.d/vpn-orbit-provision-lab")
 LAB = Path("/run/vpn-orbit-provision-lab")
 NAMESPACES = ("/usr/local/libexec/vpn-orbit", "/etc/ssh/vpn-orbit-keys",
               "/var/lib/vpn-orbit-provision", str(PROFILE))
@@ -43,8 +45,8 @@ def output(argv):
 def cleanup():
     subprocess.run(["ip", "netns", "del", NAMESPACE], stderr=subprocess.DEVNULL)
     subprocess.run(["userdel", "-r", ADMIN], stderr=subprocess.DEVNULL)
-    for path in ("/etc/sudoers.d/vpn-orbit-provision-lab", str(PROFILE)):
-        Path(path).unlink(missing_ok=True)
+    for path in (ADMIN_SUDOERS, PROFILE):
+        path.unlink(missing_ok=True)
     shutil.rmtree(LAB, ignore_errors=True)
     for path in ("/usr/local/libexec/vpn-orbit", "/etc/ssh/vpn-orbit-keys", "/var/lib/vpn-orbit-provision"):
         shutil.rmtree(path, ignore_errors=True)
@@ -81,6 +83,8 @@ def setup_fixture(directory):
     run(["ip", "netns", "exec", NAMESPACE, "ip", "link", "set", "lo", "up"])
 
     run(["useradd", "--create-home", "--shell", "/bin/bash", "--password", "*", ADMIN])
+    password = secrets.token_urlsafe(32)
+    run(["chpasswd"], input=f"{ADMIN}:{password}\n")
     key = directory / "admin"
     run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)])
     ssh_dir = Path("/home") / ADMIN / ".ssh"
@@ -89,8 +93,8 @@ def setup_fixture(directory):
     ssh_dir.chmod(0o700)
     (ssh_dir / "authorized_keys").chmod(0o600)
     run(["chown", "-R", f"{ADMIN}:{ADMIN}", str(ssh_dir)])
-    Path("/etc/sudoers.d/vpn-orbit-provision-lab").write_text(f"{ADMIN} ALL=(root) NOPASSWD: ALL\n")
-    Path("/etc/sudoers.d/vpn-orbit-provision-lab").chmod(0o440)
+    ADMIN_SUDOERS.write_text(f"{ADMIN} ALL=(root) NOPASSWD: ALL\n")
+    ADMIN_SUDOERS.chmod(0o440)
 
     # OpenSSH reads ForceCommand at startup.  Install the exact profile before
     # starting the fixture so the phase's identical write needs no fixture reload.
@@ -103,9 +107,10 @@ def setup_fixture(directory):
     config.write_text(
         f"Port {PORT}\nListenAddress {ADDRESS}\nHostKey {host_key}\nPidFile {LAB / 'sshd.pid'}\n"
         f"UsePAM yes\nStrictModes yes\nPermitRootLogin no\nPermitUserEnvironment no\n"
-        f"AllowUsers {ADMIN} {SERVICE}\nAuthenticationMethods publickey\n"
+        f"AllowUsers {ADMIN} {SERVICE}\n"
         f"PasswordAuthentication no\nKbdInteractiveAuthentication no\n"
         f"PidFile {LAB / 'sshd.pid'}\nInclude /etc/ssh/sshd_config.d/*.conf\n"
+        f"Match User {ADMIN}\n    PasswordAuthentication yes\n"
     )
     run(["/usr/sbin/sshd", "-t", "-f", str(config)])
     log = open(LAB / "sshd.log", "wb")
@@ -121,7 +126,7 @@ def setup_fixture(directory):
         time.sleep(0.1)
     else:
         raise SystemExit("Fixture sshd did not start")
-    return key, fingerprint
+    return key, fingerprint, password
 
 
 def provision(directory, key, fingerprint, *, fault=None, cleanup_on_failure=False, cleanup=False, check=False):
@@ -259,7 +264,7 @@ def main():
     cleanup()
     directory = Path(tempfile.mkdtemp(prefix="vpn-orbit-provision-lab-"))
     try:
-        key, fingerprint = setup_fixture(directory)
+        key, fingerprint, password = setup_fixture(directory)
         verify_existing_file_is_preserved(LAB)
         verify_cleanup_binding(LAB)
         profile_before = PROFILE.stat()
@@ -270,6 +275,18 @@ def main():
                                            password=None, private_key=key.read_text(), preflight=True)
         expect(web_readiness == {"platform": "UBUNTU_24_04", "ssh": "VERIFIED"},
                f"WebUI readiness must execute sshd -t through non-interactive sudo: {web_readiness}")
+        sudoers = ADMIN_SUDOERS.read_text()
+        try:
+            ADMIN_SUDOERS.write_text(f"{ADMIN} ALL=(root) PASSWD: ALL\n")
+            target = {"ip": ADDRESS, "port": PORT, "fingerprint": fingerprint}
+            key_only = verify_credentials(target, ADMIN, password=None, private_key=key.read_text(), preflight=True)
+            expect(key_only["ssh"] == "SUDO_OR_SSHD_UNVERIFIED",
+                   f"SSH key alone must not pass password-protected sudo: {key_only}")
+            with_password = verify_credentials(target, ADMIN, password=password, private_key=None, preflight=True)
+            expect(with_password == {"platform": "UBUNTU_24_04", "ssh": "VERIFIED"},
+                   f"WebUI readiness must verify password-protected sudo: {with_password}")
+        finally:
+            ADMIN_SUDOERS.write_text(sudoers)
         expect(not (directory / "output").exists(), "Readiness must leave no provisioning state")
         expect(subprocess.run(["getent", "passwd", SERVICE], capture_output=True).returncode != 0,
                "Readiness must not create the service account")
@@ -342,6 +359,21 @@ def main():
         final = provision(directory, key, fingerprint)
         expect(final.returncode == 0, "The fixture must remain usable after rollback", final)
         expect(probe(directory, key, fingerprint).returncode == 0, "The final probe must succeed")
+        admin_authorized = Path("/home") / ADMIN / ".ssh/authorized_keys"
+        original_key = admin_authorized.read_bytes()
+        try:
+            admin_authorized.write_bytes(b'command="/bin/true" ' + original_key)
+            inaccessible = provision(directory, key, fingerprint, cleanup_on_failure=True)
+            expect(inaccessible.returncode != 0 and "SSH_ADMIN_ACCESS_UNCONFIRMED" in inaccessible.stderr,
+                   "An administrative key which only runs a forced command must not verify", inaccessible)
+            expect(state(directory)["phases"]["verify"] == "IN_PROGRESS"
+                   and probe(directory, key, fingerprint).returncode == 0,
+                   "An unconfirmed administrative session must leave preparation resumable and observation intact")
+        finally:
+            admin_authorized.write_bytes(original_key)
+        retried = provision(directory, key, fingerprint, fault="phase=sshd,when=before,kind=fail")
+        expect(retried.returncode == 0 and state(directory)["status"] == "VERIFIED",
+               "A restored administrator session must verify without reapplying the SSH profile", retried)
         provision(directory, key, fingerprint, cleanup=True)
         for path in NAMESPACES[:-1]:
             expect(not Path(path).exists(), f"Fixture artifact remains: {path}")
@@ -350,7 +382,7 @@ def main():
                "Preparation and cleanup must preserve the existing SSH profile inode and contents")
         print(json.dumps({"status": "PASSED", "scenarios": [
             "disconnect-account", "retry-repair", "partial-helpers", "local-interruption",
-            "verify-rollback", "cleanup"]}, sort_keys=True))
+            "verify-rollback", "sudo-password", "admin-access-recovery", "cleanup"]}, sort_keys=True))
     finally:
         subprocess.run(["ip", "netns", "del", NAMESPACE], stderr=subprocess.DEVNULL)
         subprocess.run(["ip", "link", "del", "vpnprobe0"], stderr=subprocess.DEVNULL)

@@ -580,6 +580,16 @@ class Provisioner:
         journal["phases"] = {phase: "PENDING" for phase in PHASES}
         self.state.save(journal)
 
+    def _verify_admin(self, journal, phase):
+        try:
+            # A new administrator session must execute the trusted command.
+            marker = ("VPN_ORBIT_ADMIN_" + secrets.token_hex(16) + "\n").encode("ascii")
+            script = 'test "$(/usr/bin/id -u)" = 0 && printf %s ' + shlex.quote(marker.decode("ascii"))
+            self.run_remote(script, expected_stdout=marker)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            self._record(journal, phase, "IN_PROGRESS", error="SSH_ADMIN_ACCESS_UNCONFIRMED")
+            raise ValueError(f"SSH_ADMIN_ACCESS_UNCONFIRMED during {phase}") from None
+
     def _probe_verified(self):
         try:
             observation = self.probe(self.key)
@@ -621,6 +631,8 @@ class Provisioner:
 
         try:
             context = self._context()
+            if journal["phases"].get("preflight") != "DONE":
+                self._verify_admin(journal, "preflight")
             for phase in PHASES:
                 progress = journal["phases"].get(phase)
                 if progress == "DONE":
@@ -649,6 +661,7 @@ class Provisioner:
                 self._record(journal, phase, "DONE")
 
             self._record(journal, "verify", "IN_PROGRESS")
+            self._verify_admin(journal, "verify")
             if (self.fault and self.fault["phase"] == "verify") or not self._probe_verified():
                 self._record(journal, "verify", "FAILED", error="POSTCONDITION_FAILED")
                 if self.cleanup_on_failure:
@@ -691,10 +704,15 @@ def build_transport(ip, port, identity, user, host_key):
     else:
         auth = ["-i", str(identity), "-o", "IdentitiesOnly=yes", "-o", "PreferredAuthentications=publickey"]
 
-    def run_remote(script):
+    def run_remote(script, *, expected_stdout=None):
         shell = ["/bin/sh", "-c", script, "vpn-orbit-provision"]
         remote = shlex.join(shell if user == "root" else ["sudo", "--", *shell]) + ' "${SSH_CONNECTION%% *}"'
-        subprocess.run([*base, "-T", *auth, f"{user}@{ip}", remote], check=True, timeout=SSH_PHASE_TIMEOUT)
+        result = subprocess.run(
+            [*base, "-T", *auth, f"{user}@{ip}", remote], check=True, timeout=SSH_PHASE_TIMEOUT,
+            stdout=subprocess.PIPE if expected_stdout is not None else None,
+        )
+        if expected_stdout is not None and result.stdout != expected_stdout:
+            raise ValueError("Unexpected administrator verification reply")
 
     def cleanup():
         try:

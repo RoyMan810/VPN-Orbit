@@ -11,8 +11,11 @@ from ..errors import Denied
 from .ssh import bounded_read
 
 
-PREFLIGHT_COMMAND = shlex.join(("/bin/sh", "-c", "set -eu\nPATH=/usr/sbin:/usr/bin:/sbin:/bin\n" +
-    Path(__file__).with_name("vps-platform.sh").read_text(encoding="ascii") + """
+def _preflight_command(sudo_options):
+    command = shlex.join(("/usr/bin/sudo", *sudo_options, "--", "/bin/sh", "-c",
+                         'exec </dev/null; test "$(id -u)" = 0 && /usr/sbin/sshd -t'))
+    platform = Path(__file__).with_name("vps-platform.sh").read_text(encoding="ascii")
+    return shlex.join(("/bin/sh", "-c", "set -eu\nPATH=/usr/sbin:/usr/bin:/sbin:/bin\n" + platform + f"""
 if [ ! -d /etc/ssh/sshd_config.d ] || [ ! -x /usr/sbin/sshd ] ||
    [ ! -x /usr/bin/sudo ] || [ ! -x /usr/sbin/visudo ]; then
     orbit_ssh=DEPENDENCIES_MISSING
@@ -21,7 +24,7 @@ elif [ "$(id -u)" = 0 ]; then
     if /usr/sbin/sshd -t >/dev/null 2>&1; then orbit_ssh=VERIFIED; fi
 else
     orbit_ssh=SUDO_OR_SSHD_UNVERIFIED
-    if /usr/bin/sudo -n -- /bin/sh -c 'test "$(id -u)" = 0 && /usr/sbin/sshd -t' >/dev/null 2>&1; then
+    if {command} >/dev/null 2>&1; then
         orbit_ssh=VERIFIED
     fi
 fi
@@ -29,9 +32,16 @@ printf 'VPN_ORBIT_PREFLIGHT_V1 %s %s\\n' "$orbit_platform" "$orbit_ssh"
 """))
 
 
-async def inspect_readiness(connection):
+PREFLIGHT_COMMAND = _preflight_command(("-k", "-n"))
+PREFLIGHT_SUDO_COMMAND = _preflight_command(("-k", "-S", "-p", ""))
+
+
+async def inspect_readiness(connection, *, sudo_password=None):
     try:
-        process = await connection.create_process(PREFLIGHT_COMMAND, encoding=None, request_pty=False, window=4096)
+        command = PREFLIGHT_COMMAND if sudo_password is None else PREFLIGHT_SUDO_COMMAND
+        process = await connection.create_process(command, encoding=None, request_pty=False, window=4096)
+        if sudo_password is not None:
+            process.stdin.write(sudo_password.encode("utf-8") + b"\n")
         process.stdin.write_eof()
         output, _, _ = await asyncio.gather(bounded_read(process.stdout, 128), bounded_read(process.stderr, 1024),
                                              process.wait_closed())
@@ -88,12 +98,17 @@ def verify_credentials(target, username, *, password, private_key, preflight=Fal
                 raise Denied("SSH_AUTHENTICATION_FAILED", 424)
             if preflight:
                 try:
-                    return await asyncio.wait_for(inspect_readiness(connection), 3)
+                    async with asyncio.timeout(5):
+                        readiness = await inspect_readiness(connection)
+                        if (readiness["platform"] != "UNSUPPORTED" and readiness["ssh"] == "SUDO_OR_SSHD_UNVERIFIED"
+                                and password and not any(character in password for character in "\n\r\0")):
+                            return await inspect_readiness(connection, sudo_password=password)
+                        return readiness
                 except TimeoutError:
                     raise Denied("SSH_PREFLIGHT_UNAVAILABLE", 502) from None
 
     async def bounded():
-        return await asyncio.wait_for(check(), 8 if not preflight else 11)
+        return await asyncio.wait_for(check(), 8 if not preflight else 13)
 
     try:
         return asyncio.run(bounded())

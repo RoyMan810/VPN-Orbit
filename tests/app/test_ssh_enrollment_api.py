@@ -9,7 +9,7 @@ from vpn_orbit.api import create_app
 from vpn_orbit.config import Settings
 from vpn_orbit.database import identifier
 from vpn_orbit.runtime.policy import Policy
-from vpn_orbit.runtime.ssh_enrollment import PREFLIGHT_COMMAND
+from vpn_orbit.runtime.ssh_enrollment import PREFLIGHT_COMMAND, PREFLIGHT_SUDO_COMMAND
 from .test_auth_api import Fixture, ORIGIN, OTHER, SCOPE
 
 
@@ -27,6 +27,7 @@ class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
         self.other_pin = different_host.get_fingerprint()
         self.dials, self.auth_methods, self.sessions = [], [], []
         self.output = b"VPN_ORBIT_PREFLIGHT_V1 DEBIAN_13 VERIFIED\n"
+        self.sudo_output = None
         self.stderr = b""
         fixture = self
 
@@ -50,10 +51,11 @@ class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
 
         async def process_factory(process):
             fixture.sessions.append((process.command, await process.stdin.read()))
-            if fixture.output is None:
+            output = fixture.sudo_output if process.command == PREFLIGHT_SUDO_COMMAND else fixture.output
+            if output is None:
                 await process.wait_closed()
                 return
-            process.stdout.write(fixture.output)
+            process.stdout.write(output)
             process.stderr.write(fixture.stderr)
             process.exit(0)
 
@@ -157,6 +159,20 @@ class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.get("/api/v1/resources").json()["items"], [])
         self.assertNotIn(SCOPE, str(self.store.events_after(0)))
         self.assertNotIn(PASSWORD, str(self.store.events_after(0)))
+
+    async def test_preflight_checks_password_protected_sudo_only_with_password_authentication(self):
+        self.output = b"VPN_ORBIT_PREFLIGHT_V1 DEBIAN_13 SUDO_OR_SSHD_UNVERIFIED\n"
+        self.sudo_output = b"VPN_ORBIT_PREFLIGHT_V1 DEBIAN_13 VERIFIED\n"
+        self.stderr = PASSWORD.encode()
+        key_only = await self.enroll(preflight=True, private_key=self.private_key)
+        self.assertEqual(key_only.json(), {"platform": "DEBIAN_13", "ssh": "SUDO_OR_SSHD_UNVERIFIED"})
+        result = await self.enroll(preflight=True, password=PASSWORD)
+        self.assertEqual(result.json(), {"platform": "DEBIAN_13", "ssh": "VERIFIED"})
+        self.assertEqual(self.sessions, [(PREFLIGHT_COMMAND, b""), (PREFLIGHT_COMMAND, b""),
+                                         (PREFLIGHT_SUDO_COMMAND, PASSWORD.encode() + b"\n")])
+        self.assertNotIn(PASSWORD, PREFLIGHT_SUDO_COMMAND)
+        self.assertNotIn(PASSWORD, result.text + str(self.store.events_after(0)))
+        self.assertEqual(self.client.get("/api/v1/resources").json()["items"], [])
 
     async def test_preflight_rejects_nonprotocol_output_without_exposing_it(self):
         for output in (b"VPN_ORBIT_PREFLIGHT_V1 DEBIAN_13 VERIFIED\nremote-canary\n", b"x" * 129):

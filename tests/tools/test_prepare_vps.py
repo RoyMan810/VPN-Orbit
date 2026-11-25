@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -26,12 +27,17 @@ class FakeRemote:
         self.state = False
         self.files = set()
         self.cleaned = False
+        self.admin_available = True
 
     def phase(self, script):
         match = re.search(r"# vpn-orbit-phase: ([a-z]+)", script)
         return match.group(1) if match else "unknown"
 
-    def __call__(self, script):
+    def __call__(self, script, *, expected_stdout=None):
+        if expected_stdout is not None:
+            if not self.admin_available and "sshd" in self.files:
+                raise ValueError("Unexpected administrator verification reply")
+            return
         match = re.search(r"# vpn-orbit-readback: ([a-z]+)", script)
         if match:
             phase = match.group(1)
@@ -85,6 +91,13 @@ def make_provisioner(directory, remote, *, fault=None, cleanup_on_failure=False,
         fingerprint="SHA256:" + "A" * 43, state=prepare_vps.State(output / prepare_vps.STATE_FILE),
         fault=fault, cleanup_on_failure=cleanup_on_failure, sleep=lambda _: None, firewall=firewall,
     ), output
+
+
+def admin_verification_reply(command):
+    shell = shlex.split(command[-1])
+    script = shell[shell.index("-c") + 1]
+    marker = shlex.split(script)[-1].encode("ascii")
+    return subprocess.CompletedProcess(command, 0, stdout=marker)
 
 
 class PrepareVpsTests(unittest.TestCase):
@@ -162,12 +175,15 @@ class PrepareVpsTests(unittest.TestCase):
                         self.assertEqual(Path(line.split("=", 1)[1]).read_text(),
                                          f"[192.0.2.20]:2222 ssh-ed25519 {encoded}\n")
 
+                    if kwargs.get("stdout") == subprocess.PIPE:
+                        return admin_verification_reply(cmd)
+
                 with (patch("sys.argv", argv), patch("builtins.print"),
                       patch.object(prepare_vps.subprocess, "run", side_effect=run) as runner,
                       patch.object(prepare_vps.subprocess, "check_output", side_effect=[
                           f"[192.0.2.20]:2222 ssh-ed25519 {encoded}\n", '{"v":8,"uid":0}']) as reader):
                     prepare_vps.main()
-                self.assertEqual(runner.call_count, 1 + len(prepare_vps.PHASES))
+                self.assertEqual(runner.call_count, 3 + len(prepare_vps.PHASES))
                 probe = reader.call_args.args[0]
                 self.assertEqual(probe[probe.index("-i") + 1], "probe")
                 self.assertNotIn(str(admin_key), probe)
@@ -470,6 +486,25 @@ class PrepareVpsTests(unittest.TestCase):
             self.assertEqual(remote.readbacks, ["sshd"])
             self.assertEqual(remote.calls.count("sshd"), 2)
 
+    def test_unconfirmed_admin_access_retains_artifacts_and_retries_verification_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            remote = FakeRemote()
+            remote.admin_available = False
+            provisioner, output = make_provisioner(Path(tmp), remote, cleanup_on_failure=True)
+            with self.assertRaisesRegex(ValueError, "SSH_ADMIN_ACCESS_UNCONFIRMED during verify"):
+                provisioner.run()
+            self.assertFalse(remote.cleaned)
+            self.assertTrue((output / "probe").is_file())
+            journal = provisioner.state.load()
+            self.assertEqual(journal["error"], "SSH_ADMIN_ACCESS_UNCONFIRMED")
+            self.assertEqual(journal["phases"]["verify"], "IN_PROGRESS")
+            self.assertTrue(all(journal["phases"][phase] == "DONE" for phase in prepare_vps.PHASES))
+            calls = remote.calls.copy()
+
+            remote.admin_available = True
+            self.assertEqual(provisioner.run()["status"], "VERIFIED")
+            self.assertEqual(remote.calls, calls)
+
     def test_failed_postcondition_rolls_back_local_and_remote_keys_when_requested(self):
         with tempfile.TemporaryDirectory() as tmp:
             remote = FakeRemote(probe_result={"v": 7, "uid": 0})
@@ -569,13 +604,15 @@ class PrepareVpsTests(unittest.TestCase):
                     path = Path(cmd[cmd.index("-f") + 1])
                     path.write_bytes(b"private")
                     Path(str(path) + ".pub").write_bytes(b"ssh-ed25519 test\n")
+                if kwargs.get("stdout") == subprocess.PIPE:
+                    return admin_verification_reply(cmd)
 
             with (patch("sys.argv", argv), patch("builtins.print"),
                   patch.object(prepare_vps.subprocess, "run", side_effect=run) as runner,
                   patch.object(prepare_vps.subprocess, "check_output", side_effect=[
                       f"[192.0.2.20]:2222 ssh-ed25519 {encoded}\n", '{"v":8,"uid":0}'])):
                 prepare_vps.main()
-            self.assertEqual(runner.call_count, 2 + len(prepare_vps.PHASES))
+            self.assertEqual(runner.call_count, 4 + len(prepare_vps.PHASES))
             policy = json.loads((output / "targets.json").read_text())["targets"][0]
             self.assertEqual(policy["capabilities"], ["host.probe", "firewall.apply"])
             self.assertRegex(policy["firewall_secret_ref"], r"^[0-7][0-9A-HJKMNP-TV-Z]{25}:v1$")
