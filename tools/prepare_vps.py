@@ -50,7 +50,10 @@ SSH_PROFILE = f"""Match User {PROBE_ACCOUNT}
     PermitTTY no
     PermitUserRC no
 
-Match User {FIREWALL_ACCOUNT}
+Match all
+"""
+
+FIREWALL_SSH_PROFILE = SSH_PROFILE.removesuffix("Match all\n") + f"""Match User {FIREWALL_ACCOUNT}
     AuthorizedKeysFile {FIREWALL_AUTHORIZED}
     ForceCommand {LIBEXEC}/firewall-gateway
     AuthenticationMethods publickey
@@ -89,23 +92,48 @@ def identify_host(ip, port, expected):
     return f"{algorithm} {encoded}"
 
 
-def install_file(path, contents, mode, marker=None):
+def _protected_ancestors(path):
+    if not Path(path).is_absolute():
+        raise ValueError("Provisioning paths must be absolute")
+    return f"""(
+    orbit_directory={shlex.quote(str(Path(path).parent))}
+    while [ "$orbit_directory" != / ]; do
+        if [ -e "$orbit_directory" ] || [ -L "$orbit_directory" ]; then
+            if [ ! -d "$orbit_directory" ] || [ -L "$orbit_directory" ] ||
+               [ "$(stat -c '%u:%g' "$orbit_directory")" != 0:0 ]; then
+                printf 'Unexpected provisioning directory: %s\\n' "$orbit_directory" >&2
+                exit 1
+            fi
+            orbit_mode=$(stat -c '%a' "$orbit_directory") || exit 1
+            if [ "$((0$orbit_mode & 022))" -ne 0 ]; then
+                printf 'Writable provisioning directory: %s\\n' "$orbit_directory" >&2
+                exit 1
+            fi
+        fi
+        orbit_directory=${{orbit_directory%/*}}
+        orbit_directory=${{orbit_directory:-/}}
+    done
+) || exit 1
+"""
+
+
+def install_file(path, contents, mode, marker):
     encoded = base64.b64encode(contents).decode()
     validate = '/usr/sbin/visudo -cf "$work/file"\n' if path in (SUDOERS, FIREWALL_SUDOERS) else ""
-    ownership = ""
-    if marker is not None:
-        ownership = f"""if [ -e {path} ] || [ -L {path} ]; then
-    test -f {path} && test ! -L {path}
-    : > "$STATE/preexisting-{marker}"
+    filename = shlex.quote(str(path))
+    fingerprint = f"{mode.lstrip('0')}:{hashlib.sha256(contents).hexdigest()}"
+    return _protected_ancestors(path) + f"""printf %s {shlex.quote(encoded)} | base64 -d > "$work/file"
+{validate}if [ -e {filename} ] || [ -L {filename} ]; then
+    if [ ! -f {filename} ] || [ -L {filename} ] ||
+       [ "$(stat -c '%u:%g:%a:%h' {filename})" != 0:0:{mode.lstrip('0')}:1 ] ||
+       ! cmp -s "$work/file" {filename}; then
+        printf 'Existing provisioning file has unexpected contents or metadata: %s\\n' {filename} >&2
+        exit 1
+    fi
 else
-    : > "$STATE/created-{marker}"
-fi
-"""
-    return (ownership +
-            f'printf %s {shlex.quote(encoded)} | base64 -d > "$work/file"\n'
-            f'{validate}'
-            f'if [ -e {path} ] || [ -L {path} ]; then test ! -L {path}; cmp -s "$work/file" {path}; fi\n'
-            f'install -o root -g root -m {mode} "$work/file" {path}')
+    printf '%s\\n' {fingerprint} > "$STATE/created-{marker}"
+    install -o root -g root -m {mode} "$work/file" {filename}
+fi"""
 
 
 def _platform_guard():
@@ -117,19 +145,34 @@ fi
 """
 
 
-def _state_directory():
-    return f"""\
+def _state_directory(probe_public_key, *, create=False):
+    binding = hashlib.sha256(probe_public_key).hexdigest()
+    missing = 'mkdir -m 0700 "$STATE"' if create else "exit 1"
+    claim = f"""if [ ! -e "$owner_key" ] && [ ! -L "$owner_key" ] && [ -z "$(ls -A -- "$STATE")" ]; then
+    (set -C; printf '%s\\n' {binding} > "$owner_key") || exit 1
+fi
+""" if create else ""
+    return _protected_ancestors(REMOTE_STATE) + f"""\
 STATE={REMOTE_STATE}
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
-    test -d "$STATE" && test ! -L "$STATE" && test "$(stat -c %u "$STATE")" = 0
+    if [ ! -d "$STATE" ] || [ -L "$STATE" ] || [ "$(stat -c '%u:%g:%a' "$STATE")" != 0:0:700 ]; then
+        printf '%s\\n' 'Unexpected provisioning state directory metadata.' >&2
+        exit 1
+    fi
 else
-    install -d -o root -g root -m 0700 "$STATE"
+    {missing}
+fi
+owner_key="$STATE/probe-key.sha256"
+{claim}if [ ! -f "$owner_key" ] || [ -L "$owner_key" ] || [ "$(stat -c '%u:%g:%a:%h' "$owner_key")" != 0:0:600:1 ] ||
+   [ "$(cat "$owner_key")" != {binding} ]; then
+    printf '%s\\n' 'Provisioning state belongs to another preparation or has no key binding.' >&2
+    exit 1
 fi
 """
 
 
-def _preamble():
-    return _platform_guard() + _state_directory()
+def _preamble(ctx):
+    return _platform_guard() + _state_directory(ctx["probe_public_key"])
 
 
 def _accounts(ctx):
@@ -139,13 +182,17 @@ def _accounts(ctx):
     return values
 
 
+def _account_checks(account, home):
+    return f'''test "$(getent passwd "{account}" | cut -d: -f6,7)" = "{home}:/bin/sh"
+test "$(passwd -S "{account}" | cut -d' ' -f2)" = L
+test "$(id -Gn "{account}")" = "{account}"'''
+
+
 def _check_remote(ctx):
     checks = []
     for account, home in _accounts(ctx):
         checks.append(f"""if getent passwd {account} >/dev/null 2>&1; then
-    test "$(getent passwd {account} | cut -d: -f6,7)" = {home}:/bin/sh
-    test "$(passwd -S {account} | cut -d' ' -f2)" = L
-    test "$(id -Gn {account})" = {account}
+{_account_checks(account, home)}
 fi""")
     return _platform_guard() + f"""test -d /etc/ssh/sshd_config.d
 test -x /usr/sbin/sshd
@@ -157,16 +204,7 @@ test -x /usr/sbin/visudo
 
 
 def _phase_preflight(ctx):
-    return _check_remote(ctx) + _state_directory() + f"""\
-if [ ! -f "$STATE/preflight-done" ]; then
-    if [ -e {SSH_CONFIG} ] || [ -L {SSH_CONFIG} ]; then
-        test -f {SSH_CONFIG} && test ! -L {SSH_CONFIG}
-        cp -p -- {SSH_CONFIG} "$STATE/sshd-config.previous"
-        : > "$STATE/preexisting-sshd-config"
-    fi
-    : > "$STATE/preflight-done"
-fi
-"""
+    return _check_remote(ctx) + _state_directory(ctx["probe_public_key"], create=True)
 
 
 def _phase_account(ctx):
@@ -174,41 +212,33 @@ def _phase_account(ctx):
     for account, home in _accounts(ctx):
         steps.append(f"""if ! id {account} >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir {home} --shell /bin/sh {account}
-    : > "$STATE/account-created-{account}"
+    id -u {account} > "$STATE/account-created-{account}"
 fi
-test "$(getent passwd {account} | cut -d: -f6,7)" = {home}:/bin/sh
-test "$(passwd -S {account} | cut -d' ' -f2)" = L
-test "$(id -Gn {account})" = {account}""")
+{_account_checks(account, home)}""")
     directories = [(home, "dir-" + account + "-home") for account, home in _accounts(ctx)]
     directories.extend(((LIBEXEC, "dir-libexec"), ("/etc/ssh/vpn-orbit-keys", "dir-authorized"),
                         ("/etc/vpn-orbit", "dir-config")))
     ensure = []
     for path, marker in directories:
-        ensure.append(f"""if [ -e {path} ] || [ -L {path} ]; then
-    test -d {path} && test ! -L {path}
-    : > "$STATE/preexisting-{marker}"
-else
+        ensure.append(_protected_ancestors(Path(path) / "entry") + f"""if [ ! -d {path} ]; then
     install -d -o root -g root -m 0755 {path}
-    : > "$STATE/created-{marker}"
+    stat -c '%d:%i' {path} > "$STATE/created-{marker}"
 fi""")
-    return _preamble() + "\n".join(steps) + "\n" + "\n".join(ensure) + "\n"
+    return _preamble(ctx) + "\n".join(ensure) + "\n" + "\n".join(steps) + "\n"
 
 
 def _phase_helpers(ctx):
-    payload = {name: (ROOT / "remote" / name).read_bytes() for name in HELPER_FILES}
+    helper_names = HELPER_FILES if ctx["firewall"] else ("ssh-gateway", "typed-helper")
+    payload = {name: (ROOT / "remote" / name).read_bytes() for name in helper_names}
     commands = "\n".join(install_file(f"{LIBEXEC}/{name}", contents, "0755", f"helper-{name}")
                           for name, contents in payload.items())
-    policy = json.dumps({"v": 1, "ssh_port": ctx["ssh_port"], "max_rules": 32,
-                         "rollback_seconds": 60}, sort_keys=True, separators=(",", ":")) + "\n"
-    commands += "\n" + install_file(FIREWALL_POLICY, policy.encode(), "0600", "firewall-policy")
-    return _preamble() + f"""work=$(mktemp -d)
+    if ctx["firewall"]:
+        policy = json.dumps({"v": 1, "ssh_port": ctx["ssh_port"], "max_rules": 32,
+                             "rollback_seconds": 60}, sort_keys=True, separators=(",", ":")) + "\n"
+        commands += "\n" + install_file(FIREWALL_POLICY, policy.encode(), "0600", "firewall-policy")
+    return _preamble(ctx) + f"""work=$(mktemp -d)
 trap 'rm -f "$work/file"; rmdir "$work"' EXIT
 {commands}
-for name in {' '.join(HELPER_FILES)}; do
-    test -f "{LIBEXEC}/$name" && test ! -L "{LIBEXEC}/$name"
-    test "$(stat -c '%u:%a' "{LIBEXEC}/$name")" = 0:755
-done
-test "$(stat -c '%u:%a' {FIREWALL_POLICY})" = 0:600
 """
 
 
@@ -218,15 +248,7 @@ def _phase_keys(ctx):
     if ctx["firewall"]:
         firewall = f'restrict,command="{LIBEXEC}/firewall-gateway" '.encode() + ctx["firewall_public_key"]
         commands.append(install_file(FIREWALL_AUTHORIZED, firewall, "0644", "firewall-authorized"))
-    else:
-        commands.append(f"""if [ -e {FIREWALL_AUTHORIZED} ] || [ -L {FIREWALL_AUTHORIZED} ]; then
-    test -f {FIREWALL_AUTHORIZED} && test ! -L {FIREWALL_AUTHORIZED}
-    : > "$STATE/preexisting-firewall-authorized"
-else
-    : > "$STATE/created-firewall-authorized"
-fi
-    """)
-    return _preamble() + f"""work=$(mktemp -d)
+    return _preamble(ctx) + f"""work=$(mktemp -d)
 trap 'rm -f "$work/file"; rmdir "$work"' EXIT
 {chr(10).join(commands)}
 """
@@ -237,17 +259,30 @@ def _phase_sudoers(ctx):
     if ctx["firewall"]:
         lines.append(f'{FIREWALL_ACCOUNT} ALL=(root) NOPASSWD: {LIBEXEC}/firewall-apply ""')
     contents = ("\n".join(lines) + "\n").encode()
-    extra = "" if ctx["firewall"] else f"""
-if [ -e {FIREWALL_SUDOERS} ] || [ -L {FIREWALL_SUDOERS} ]; then
-    test -f {FIREWALL_SUDOERS} && test ! -L {FIREWALL_SUDOERS}
-    : > "$STATE/preexisting-firewall-sudoers"
-else
-    : > "$STATE/created-firewall-sudoers"
-fi
-    """
-    return _preamble() + f"""work=$(mktemp -d)
+    return _preamble(ctx) + f"""work=$(mktemp -d)
 trap 'rm -f "$work/file"; rmdir "$work"' EXIT
-{install_file(SUDOERS, contents, "0440", "probe-sudoers")}{extra}
+{install_file(SUDOERS, contents, "0440", "probe-sudoers")}
+"""
+
+
+CHECK_OWNED_FILE = """owned_file() {
+    file=$1
+    marker=$STATE/created-$2
+    if [ ! -f "$marker" ] || { [ ! -e "$file" ] && [ ! -L "$file" ]; }; then
+        return 0
+    fi
+    if [ -L "$marker" ] || [ ! -f "$file" ] || [ -L "$file" ] ||
+       [ "$(stat -c '%u:%g:%h' "$file")" != 0:0:1 ]; then
+        return 1
+    fi
+    file_mode=$(stat -c '%a' "$file")
+    file_digest=$(sha256sum "$file")
+    if [ "$(cat "$marker")" != "$file_mode:${file_digest%% *}" ]; then
+        printf 'Provisioning file has changed: %s\\n' "$file" >&2
+        return 1
+    fi
+    if [ "$3" = remove ]; then rm -- "$file"; fi
+}
 """
 
 
@@ -258,15 +293,12 @@ def _phase_sshd(ctx):
         checks.append("! /usr/sbin/sshd -T -C \"user={0},addr=$1,host=localhost\" | grep -Fxq 'forcecommand {1}/firewall-gateway'".format(
             FIREWALL_ACCOUNT, LIBEXEC))
     condition = " ||\n   ".join(["! /usr/sbin/sshd -t", *checks, "! systemctl reload ssh.service"])
-    return _preamble() + f"""work=$(mktemp -d)
+    profile = FIREWALL_SSH_PROFILE if ctx["firewall"] else SSH_PROFILE
+    return _preamble(ctx) + f"""work=$(mktemp -d)
 trap 'rm -f "$work/file"; rmdir "$work"' EXIT
-{install_file(SSH_CONFIG, SSH_PROFILE.encode(), "0644", "sshd-config")}
+{install_file(SSH_CONFIG, profile.encode(), "0644", "sshd-config")}
 if {condition}; then
-    if [ -f "$STATE/preexisting-sshd-config" ]; then
-        install -o root -g root -m 0644 "$STATE/sshd-config.previous" {SSH_CONFIG}
-    else
-        rm -f -- {SSH_CONFIG}
-    fi
+    {CHECK_OWNED_FILE}    owned_file {SSH_CONFIG} sshd-config remove
     /usr/sbin/sshd -t && systemctl reload ssh.service || true
     exit 1
 fi
@@ -290,58 +322,74 @@ def provision(probe_public_key, firewall_public_key=None, *, ssh_port=22):
     return "set -eu\n" + "\n".join(PHASE_SCRIPTS[phase](ctx) for phase in PHASES)
 
 
-def cleanup_script():
+REMOVE_ACCOUNT = """remove_account() {
+    account=$1
+    pkill -TERM -u "$account" 2>/dev/null || true
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        if userdel "$account" 2>/dev/null; then break; fi
+        sleep 0.2
+    done
+    if id "$account" >/dev/null 2>&1; then
+        printf 'Provisioning account still exists: %s\\n' "$account" >&2
+        return 1
+    fi
+}
+"""
+
+
+def cleanup_script(probe_public_key):
+    files = [(AUTHORIZED, "probe-authorized"), (SUDOERS, "probe-sudoers"),
+             (FIREWALL_AUTHORIZED, "firewall-authorized"), (FIREWALL_POLICY, "firewall-policy"),
+             (SSH_CONFIG, "sshd-config")]
+    files.extend((f"{LIBEXEC}/{name}", f"helper-{name}") for name in HELPER_FILES)
+    directories = [(LIBEXEC, "dir-libexec"), ("/etc/ssh/vpn-orbit-keys", "dir-authorized"),
+                   ("/etc/vpn-orbit", "dir-config"), (PROBE_HOME, f"dir-{PROBE_ACCOUNT}-home"),
+                   (FIREWALL_HOME, f"dir-{FIREWALL_ACCOUNT}-home")]
+    allowed_markers = [f"created-{marker}" for _, marker in files + directories]
+    allowed_markers.extend((f"account-created-{PROBE_ACCOUNT}", f"account-created-{FIREWALL_ACCOUNT}", "probe-key.sha256"))
+    parents = "".join(_protected_ancestors(path) for path in dict.fromkeys(path for path, _ in files + directories))
     return f"""set -eu
-STATE={REMOTE_STATE}
-for path_marker in \
-    "{AUTHORIZED}|probe-authorized" \
-    "{SUDOERS}|probe-sudoers" \
-    "{FIREWALL_AUTHORIZED}|firewall-authorized" \
-    "{FIREWALL_SUDOERS}|firewall-sudoers" \
-    "{FIREWALL_POLICY}|firewall-policy" \
-    {' '.join(f'"{LIBEXEC}/{name}|helper-{name}"' for name in HELPER_FILES)}; do
-    path="${{path_marker%%|*}}"
-    marker="${{path_marker##*|}}"
-    if [ -f "$STATE/created-$marker" ]; then
-        rm -f -- "$path"
+{_state_directory(probe_public_key)}{parents}{CHECK_OWNED_FILE}{REMOVE_ACCOUNT}for state_file in "$STATE"/* "$STATE"/.[!.]* "$STATE"/..?*; do
+    if [ ! -e "$state_file" ] && [ ! -L "$state_file" ]; then continue; fi
+    case "${{state_file##*/}}" in
+        {'|'.join(allowed_markers)}) test -f "$state_file" && test ! -L "$state_file" || exit 1 ;;
+        *) printf 'Unexpected provisioning state file: %s\\n' "$state_file" >&2; exit 1 ;;
+    esac
+done
+for account_home in '{PROBE_ACCOUNT}|{PROBE_HOME}' '{FIREWALL_ACCOUNT}|{FIREWALL_HOME}'; do
+    account="${{account_home%%|*}}"
+    home="${{account_home#*|}}"
+    marker="$STATE/account-created-$account"
+    if [ -f "$marker" ] && id "$account" >/dev/null 2>&1; then
+        test "$(id -u "$account")" = "$(cat "$marker")" || exit 1
+{_account_checks('$account', '$home')}
     fi
 done
-for path_marker in \
-    "{LIBEXEC}|dir-libexec" \
-    "/etc/ssh/vpn-orbit-keys|dir-authorized" \
-    "/etc/vpn-orbit|dir-config"; do
-    path="${{path_marker%%|*}}"
-    marker="${{path_marker##*|}}"
-    if [ -f "$STATE/created-$marker" ]; then
-        rmdir -- "$path" 2>/dev/null || true
-    fi
+for operation in check remove; do
+    for path_marker in {' '.join(f'"{path}|{marker}"' for path, marker in files)}; do
+        owned_file "${{path_marker%%|*}}" "${{path_marker##*|}}" "$operation" || exit 1
+    done
 done
 if [ -f "$STATE/created-sshd-config" ]; then
-    rm -f -- {SSH_CONFIG}
-elif [ -f "$STATE/preexisting-sshd-config" ]; then
-    install -o root -g root -m 0644 "$STATE/sshd-config.previous" {SSH_CONFIG}
+    /usr/sbin/sshd -t
+    systemctl reload ssh.service
 fi
-/usr/sbin/sshd -t && systemctl reload ssh.service || true
 for account in {PROBE_ACCOUNT} {FIREWALL_ACCOUNT}; do
     if [ -f "$STATE/account-created-$account" ] && id "$account" >/dev/null 2>&1; then
-        pkill -TERM -u "$account" 2>/dev/null || true
-        for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            if userdel "$account" 2>/dev/null; then break; fi
-            sleep 0.2
-        done
-        ! id "$account" >/dev/null 2>&1
+        remove_account "$account" || exit 1
     fi
 done
 for path_marker in \
-    "{PROBE_HOME}|dir-{PROBE_ACCOUNT}-home" \
-    "{FIREWALL_HOME}|dir-{FIREWALL_ACCOUNT}-home"; do
+    {' '.join(f'"{path}|{marker}"' for path, marker in directories)}; do
     path="${{path_marker%%|*}}"
     marker="${{path_marker##*|}}"
-    if [ -f "$STATE/created-$marker" ]; then
+    if [ -f "$STATE/created-$marker" ] && [ -d "$path" ] && [ ! -L "$path" ] &&
+       [ "$(stat -c '%d:%i' "$path")" = "$(cat "$STATE/created-$marker")" ]; then
         rmdir -- "$path" 2>/dev/null || true
     fi
 done
-rm -rf -- "$STATE"
+for name in {' '.join(allowed_markers)}; do rm -f -- "$STATE/$name"; done
+rmdir -- "$STATE"
 """
 
 
@@ -455,7 +503,10 @@ class Provisioner:
 
     def _cleanup(self, journal):
         try:
-            self._remote("# vpn-orbit-phase: cleanup\n" + cleanup_script())
+            public_key = self.key.with_suffix(".pub")
+            if not self._managed_file(public_key):
+                raise OSError("The saved public observation key is missing or untrusted")
+            self._remote("# vpn-orbit-phase: cleanup\n" + cleanup_script(public_key.read_bytes()))
         except (OSError, subprocess.SubprocessError):
             journal["status"] = "CLEANUP_FAILED"
             self.state.save(journal)
@@ -634,6 +685,13 @@ def main():
         if args.cleanup:
             cleanup_state = state.load()
             cleanup_journal(cleanup_state, host=ip, port=args.port, user=args.user, fingerprint=args.fingerprint)
+            if cleanup_state["status"] == "CLEANED":
+                print("Provisioning artifacts removed.")
+                return
+            public_key = args.output / "probe.pub"
+            if not Provisioner._managed_file(public_key):
+                raise ValueError("The saved public observation key is required for cleanup")
+            cleanup = cleanup_script(public_key.read_bytes())
         host_key = identify_host(ip, args.port, args.fingerprint)
         run_remote, cleanup_transport, _, _ = build_transport(ip, args.port, args.identity, args.user, host_key)
         host = ip if args.port == 22 else f"[{ip}]:{args.port}"
@@ -641,7 +699,7 @@ def main():
         known_hosts.write_text(f"{host} {host_key}\n")
         try:
             if args.cleanup:
-                run_remote(cleanup_script())
+                run_remote(cleanup)
                 for path in (args.output / "probe", args.output / "probe.pub",
                              args.output / "firewall", args.output / "firewall.pub",
                              args.output / "targets.json"):
