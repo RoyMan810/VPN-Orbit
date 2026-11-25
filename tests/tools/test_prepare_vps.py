@@ -1,4 +1,5 @@
 import base64
+import fcntl
 import hashlib
 import json
 import os
@@ -19,6 +20,8 @@ class FakeRemote:
         self.fault = fault
         self.probe_result = probe_result if probe_result is not None else {"v": 8, "uid": 0}
         self.calls = []
+        self.readbacks = []
+        self.readback_errors = {}
         self.account = False
         self.state = False
         self.files = set()
@@ -29,6 +32,16 @@ class FakeRemote:
         return match.group(1) if match else "unknown"
 
     def __call__(self, script):
+        match = re.search(r"# vpn-orbit-readback: ([a-z]+)", script)
+        if match:
+            phase = match.group(1)
+            self.readbacks.append(phase)
+            present = {"preflight": self.state, "account": self.account, "helpers": "ssh-gateway" in self.files,
+                       "keys": "authorized" in self.files, "sudoers": "sudoers" in self.files, "sshd": "sshd" in self.files}
+            code = self.readback_errors.get(phase, 0 if present[phase] else prepare_vps.PHASE_INCOMPLETE)
+            if code:
+                raise subprocess.CalledProcessError(code, ["ssh"])
+            return
         phase = self.phase(script)
         self.calls.append(phase)
         if phase == "cleanup":
@@ -156,7 +169,7 @@ class PrepareVpsTests(unittest.TestCase):
                     prepare_vps.main()
                 self.assertEqual(runner.call_count, 1 + len(prepare_vps.PHASES))
                 probe = reader.call_args.args[0]
-                self.assertIn(str(output / "probe"), probe)
+                self.assertEqual(probe[probe.index("-i") + 1], "probe")
                 self.assertNotIn(str(admin_key), probe)
                 policy = json.loads((output / "targets.json").read_text())["targets"][0]
                 self.assertEqual(policy["capabilities"], ["host.probe"])
@@ -166,8 +179,62 @@ class PrepareVpsTests(unittest.TestCase):
                 self.assertTrue(all(state["phases"][phase] == "DONE" for phase in prepare_vps.PHASES))
 
     def test_generated_profile_is_valid_shell(self):
-        subprocess.run(["sh", "-n"], input=prepare_vps.provision(b"ssh-ed25519 test\n"),
-                       text=True, check=True)
+        for firewall_key in (None, b"ssh-ed25519 firewall\n"):
+            context = {"probe_public_key": b"ssh-ed25519 test\n", "firewall_public_key": firewall_key,
+                       "firewall": firewall_key is not None, "ssh_port": 22}
+            subprocess.run(["sh", "-n"], input=prepare_vps.provision(context["probe_public_key"], firewall_key),
+                           text=True, check=True)
+            for phase, build in prepare_vps.PHASE_SCRIPTS.items():
+                with self.subTest(phase=phase, firewall=context["firewall"]):
+                    subprocess.run(["sh", "-n"], input=build(context, inspect=True), text=True, check=True)
+
+    def test_cli_refuses_to_use_an_output_directory_locked_by_another_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = os.open(tmp, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                argv = ["prepare_vps.py", "--host", "192.0.2.20", "--user", "root",
+                        "--fingerprint", "SHA256:" + "A" * 43, "--output", tmp]
+                with (patch("sys.argv", argv), patch("sys.stderr") as stderr,
+                      patch.object(prepare_vps, "identify_host") as identify):
+                    with self.assertRaises(SystemExit):
+                        prepare_vps.main()
+                    stderr.write.assert_called_once()
+                    self.assertIn("Another preparation", stderr.write.call_args.args[0])
+                    identify.assert_not_called()
+            finally:
+                os.close(lock)
+
+    def test_cleanup_keeps_using_the_locked_directory_after_rename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "output"
+            output.mkdir(0o700)
+            moved = Path(tmp) / "moved"
+            fingerprint = "SHA256:" + "A" * 43
+            journal = {"version": 1, "status": "FAILED", "host": "192.0.2.20", "port": 22,
+                       "user": "root", "fingerprint": fingerprint, "phases": {}}
+            prepare_vps.State(output / prepare_vps.STATE_FILE).save(journal)
+            (output / "probe.pub").write_text("retry key")
+            cwd = Path.cwd()
+
+            def replace_output(*_):
+                output.rename(moved)
+                output.mkdir(0o700)
+                (output / "probe.pub").write_text("unrelated key")
+                return "ssh-ed25519 fixture"
+
+            argv = ["prepare_vps.py", "--host", "192.0.2.20", "--user", "root",
+                    "--fingerprint", fingerprint, "--output", str(output), "--cleanup"]
+            with (patch("sys.argv", argv), patch("builtins.print"),
+                  patch.object(prepare_vps, "identify_host", side_effect=replace_output),
+                  patch.object(prepare_vps.subprocess, "run") as remote):
+                prepare_vps.main()
+            remote.assert_called_once()
+            self.assertEqual(Path.cwd(), cwd)
+            self.assertEqual((output / "probe.pub").read_text(), "unrelated key")
+            self.assertFalse((output / prepare_vps.STATE_FILE).exists())
+            self.assertFalse((moved / "probe.pub").exists())
+            self.assertEqual(prepare_vps.State(moved / prepare_vps.STATE_FILE).load()["status"], "CLEANED")
 
     def test_every_phase_is_idempotent_and_cleanup_removes_all_artifacts(self):
         context = {"probe_public_key": b"ssh-ed25519 test\n", "firewall_public_key": None,
@@ -177,7 +244,7 @@ class PrepareVpsTests(unittest.TestCase):
             with self.subTest(phase=phase):
                 subprocess.run(["sh", "-n"], input=script, text=True, check=True)
         self.assertIn("if ! id vpn-orbit-svc", scripts["account"])
-        self.assertIn("cmp -s", scripts["helpers"])
+        self.assertIn("sha256sum", scripts["helpers"])
         self.assertNotIn("sshd-config.previous", scripts["sshd"])
         self.assertNotIn(prepare_vps.FIREWALL_POLICY, scripts["helpers"])
         self.assertNotIn(prepare_vps.FIREWALL_AUTHORIZED, scripts["keys"])
@@ -290,7 +357,8 @@ class PrepareVpsTests(unittest.TestCase):
             )
             retry.run()
             self.assertEqual(remote.calls.count("preflight"), 1)
-            self.assertEqual(remote.calls.count("account"), 2)
+            self.assertEqual(remote.calls.count("account"), 1)
+            self.assertEqual(remote.readbacks, ["account"])
             state = json.loads((output / prepare_vps.STATE_FILE).read_text())
             self.assertEqual(state["status"], "VERIFIED")
             self.assertTrue(all(state["phases"][phase] == "DONE" for phase in prepare_vps.PHASES))
@@ -324,18 +392,20 @@ class PrepareVpsTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "not private"):
                 prepare_vps.State(linked).load()
 
-    def test_partial_helper_installation_is_reinstalled_on_retry(self):
+    def test_missing_helpers_are_installed_after_readback(self):
         with tempfile.TemporaryDirectory() as tmp:
             remote = FakeRemote()
             provisioner, output = make_provisioner(
-                Path(tmp), remote, fault={"phase": "helpers", "when": "after", "kind": "fail"})
+                Path(tmp), remote, fault={"phase": "helpers", "when": "before", "kind": "fail"})
             with self.assertRaisesRegex(ValueError, "PROVISION_PHASE_FAILED during helpers"):
                 provisioner.run()
-            self.assertIn("ssh-gateway", remote.files)
+            self.assertNotIn("ssh-gateway", remote.files)
             self.assertEqual(json.loads((output / prepare_vps.STATE_FILE).read_text())["phases"]["helpers"], "IN_PROGRESS")
             provisioner.fault = None
             provisioner.run()
             self.assertEqual(remote.calls.count("helpers"), 2)
+            self.assertEqual(remote.readbacks, ["helpers"])
+            self.assertIn("ssh-gateway", remote.files)
             self.assertEqual(json.loads((output / prepare_vps.STATE_FILE).read_text())["status"], "VERIFIED")
 
     def test_workstation_interruption_after_partial_effect_resumes(self):
@@ -351,8 +421,54 @@ class PrepareVpsTests(unittest.TestCase):
             self.assertEqual(state["error"], "WORKSTATION_INTERRUPTED")
             provisioner.fault = None
             provisioner.run()
-            self.assertEqual(remote.calls.count("keys"), 2)
+            self.assertEqual(remote.calls.count("keys"), 1)
+            self.assertEqual(remote.readbacks, ["keys"])
             self.assertEqual(json.loads((output / prepare_vps.STATE_FILE).read_text())["status"], "VERIFIED")
+
+    def test_retry_stops_when_readback_is_unavailable_or_conflicts(self):
+        for failure, error in ((255, "READBACK_UNAVAILABLE"), (prepare_vps.REMOTE_BUSY, "READBACK_UNAVAILABLE"),
+                               (1, "READBACK_CONFLICT")):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                remote = FakeRemote()
+                provisioner, _ = make_provisioner(Path(tmp), remote,
+                                                  fault={"phase": "helpers", "when": "after", "kind": "disconnect"})
+                with self.assertRaisesRegex(ValueError, "SSH_DISCONNECTED during helpers"):
+                    provisioner.run()
+                mutations = remote.calls.copy()
+                remote.readback_errors["helpers"] = failure
+                provisioner.fault = None
+                with self.assertRaisesRegex(ValueError, error + " during helpers"):
+                    provisioner.run()
+                self.assertEqual(remote.calls, mutations)
+                self.assertEqual(provisioner.state.load()["error"], error)
+
+    def test_sshd_readback_requires_a_working_session_with_the_managed_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            remote = FakeRemote(probe_result={"v": 7, "uid": 0})
+            provisioner, _ = make_provisioner(Path(tmp), remote,
+                                              fault={"phase": "sshd", "when": "after", "kind": "disconnect"})
+            with self.assertRaisesRegex(ValueError, "SSH_DISCONNECTED during sshd"):
+                provisioner.run()
+            provisioner.fault = None
+            with self.assertRaisesRegex(ValueError, "SSH_ACTIVATION_UNCONFIRMED during sshd"):
+                provisioner.run()
+            self.assertEqual(remote.calls.count("sshd"), 1)
+            self.assertEqual(remote.readbacks, ["sshd"])
+            remote.probe_result = {"v": 8, "uid": 0}
+            self.assertEqual(provisioner.run()["status"], "VERIFIED")
+            self.assertEqual(remote.calls.count("sshd"), 1)
+
+    def test_firewall_profile_is_reloaded_after_its_settings_are_checked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            remote = FakeRemote()
+            provisioner, _ = make_provisioner(Path(tmp), remote, firewall=True,
+                                              fault={"phase": "sshd", "when": "after", "kind": "disconnect"})
+            with self.assertRaisesRegex(ValueError, "SSH_DISCONNECTED during sshd"):
+                provisioner.run()
+            provisioner.fault = None
+            self.assertEqual(provisioner.run()["status"], "VERIFIED")
+            self.assertEqual(remote.readbacks, ["sshd"])
+            self.assertEqual(remote.calls.count("sshd"), 2)
 
     def test_failed_postcondition_rolls_back_local_and_remote_keys_when_requested(self):
         with tempfile.TemporaryDirectory() as tmp:
