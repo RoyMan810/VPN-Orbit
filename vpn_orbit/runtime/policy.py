@@ -96,6 +96,11 @@ class Target:
     def revision(self):
         return self.value["policy_revision"]
 
+    @property
+    def fingerprint(self):
+        key = base64.b64decode(self.value["host_key"].split()[1], validate=True)
+        return "SHA256:" + base64.b64encode(hashlib.sha256(key).digest()).decode().rstrip("=")
+
 
 class Policy:
     def __init__(self, targets):
@@ -116,9 +121,7 @@ class Policy:
         catalog = {}
         for target in self.targets.values():
             if "host.probe" in target.value["capabilities"]:
-                key = base64.b64decode(target.value["host_key"].split()[1], validate=True)
-                digest = base64.b64encode(hashlib.sha256(key).digest()).decode().rstrip("=")
-                catalog[target.id] = {"fingerprint": "SHA256:" + digest, "scope_digest": target.scope_digest,
+                catalog[target.id] = {"fingerprint": target.fingerprint, "scope_digest": target.scope_digest,
                                       "policy_revision": target.revision}
                 if ssh_endpoints:
                     catalog[target.id].update(ip=target.value["ip"], port=target.value["port"])

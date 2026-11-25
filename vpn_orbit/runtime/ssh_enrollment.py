@@ -1,6 +1,7 @@
 """One credential check against an already approved SSH endpoint."""
 
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 import secrets
 import shlex
@@ -95,27 +96,37 @@ class EnrollmentClient(asyncssh.SSHClient):
         return [key] if key is not None else None
 
 
-def verify_credentials(target, username, *, password, private_key, preflight=False):
+@asynccontextmanager
+async def administrator_connection(ip, port, fingerprint, username, *, password, private_key):
     try:
         key = asyncssh.import_private_key(private_key) if private_key is not None else None
     except (asyncssh.KeyImportError, asyncssh.KeyEncryptionError, ValueError):
         raise Denied("SSH_KEY_FORMAT_UNSUPPORTED", 422) from None
 
-    client = EnrollmentClient(target["fingerprint"], password, key)
+    client = EnrollmentClient(fingerprint, password, key)
+    connection = await asyncssh.connect(
+        ip, port=port, username=username, client_factory=lambda: client,
+        config=None, known_hosts=([], [], []), server_host_key_algs=["ssh-ed25519"],
+        client_keys=None, agent_path=None, agent_forwarding=False,
+        preferred_auth=["publickey" if key is not None else "password"],
+        public_key_auth=key is not None, password_auth=password is not None,
+        kbdint_auth=False, gss_auth=False, gss_kex=False, host_based_auth=False,
+        x509_trusted_certs=None, x509_trusted_cert_paths=[], connect_timeout=4, login_timeout=5,
+    )
+    try:
+        # Servers may permit login without any authentication.
+        if not client.offered:
+            raise Denied("SSH_AUTHENTICATION_FAILED", 424)
+        yield connection
+    finally:
+        connection.abort()
 
+
+def verify_credentials(target, username, *, password, private_key, preflight=False):
     async def check():
-        async with asyncssh.connect(
-            target["ip"], port=target["port"], username=username, client_factory=lambda: client,
-            config=None, known_hosts=([], [], []), server_host_key_algs=["ssh-ed25519"],
-            client_keys=None, agent_path=None, agent_forwarding=False,
-            preferred_auth=["publickey" if key is not None else "password"],
-            public_key_auth=key is not None, password_auth=password is not None,
-            kbdint_auth=False, gss_auth=False, gss_kex=False, host_based_auth=False,
-            x509_trusted_certs=None, x509_trusted_cert_paths=[], connect_timeout=4, login_timeout=5,
+        async with administrator_connection(
+            target["ip"], target["port"], target["fingerprint"], username, password=password, private_key=private_key,
         ) as connection:
-            # Servers may permit login without any authentication.
-            if not client.offered:
-                raise Denied("SSH_AUTHENTICATION_FAILED", 424)
             if preflight:
                 try:
                     async with asyncio.timeout(5):

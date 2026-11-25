@@ -1,4 +1,5 @@
 import asyncio
+import re
 import unittest
 from unittest.mock import patch
 
@@ -8,8 +9,10 @@ from fastapi.testclient import TestClient
 from vpn_orbit.api import create_app
 from vpn_orbit.config import Settings
 from vpn_orbit.database import identifier
+from vpn_orbit.errors import Denied
 from vpn_orbit.runtime.policy import Policy
 from vpn_orbit.runtime.ssh_enrollment import PREFLIGHT_COMMAND, PREFLIGHT_SUDO_COMMAND, SUDO_MARKER
+from vpn_orbit.runtime.ssh_preparation import PreparationSSH
 from vpn_orbit.runtime.vps_preparation import ACCOUNT_CONFLICT
 from .test_auth_api import Fixture, ORIGIN, OTHER, SCOPE
 
@@ -31,6 +34,7 @@ class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
         self.sudo_output = None
         self.sudo_status = 0
         self.stderr = b""
+        self.phase_reply = None
         fixture = self
 
         class Server(asyncssh.SSHServer):
@@ -53,6 +57,12 @@ class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
 
         async def process_factory(process):
             fixture.sessions.append((process.command, await process.stdin.read()))
+            marker = re.search(r"VPN_ORBIT_PHASE_[a-f0-9]{32}", process.command)
+            if marker and fixture.phase_reply is not None:
+                status, response = fixture.phase_reply
+                process.stdout.write(response.replace(b"NONCE", marker[0].encode()))
+                process.exit(status)
+                return
             output = fixture.sudo_output if process.command == PREFLIGHT_SUDO_COMMAND else fixture.output
             if output is None:
                 await process.wait_closed()
@@ -70,7 +80,9 @@ class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
                     "host_key": key.export_public_key().decode().strip(), "secret_ref": identifier() + ":v1",
                     "policy_revision": 1, "dependencies": [], "capabilities": ["host.probe"]}
                    for identity, ip, key in ((SCOPE, IP, host), (OTHER, OTHER_IP, different_host))]
-        catalog = Policy(targets).enrollment_catalog(ssh_endpoints=True)
+        self.policy = Policy(targets)
+        self.managed_key = client.export_private_key()
+        catalog = self.policy.enrollment_catalog(ssh_endpoints=True)
         self.client = self.enterContext(TestClient(create_app(Settings(self.store.path, ORIGIN), auth=self.auth,
                                                                enrollment_catalog=catalog), base_url=ORIGIN))
         self.csrf = self.login()
@@ -206,3 +218,27 @@ class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status_code, 502)
         self.assertEqual(self.sessions, [(PREFLIGHT_COMMAND, b"")])
         self.assertEqual(self.client.get("/api/v1/resources").json()["items"], [])
+
+    async def test_preparation_readback_requires_a_bounded_phase_reply_on_the_pinned_target(self):
+        target = self.policy.targets[SCOPE]
+        transport = PreparationSSH(target, "ubuntu", password=PASSWORD, private_key=None,
+                                   observation_key=self.managed_key)
+        for status, output in ((76, b""), (0, b"false 76\n"), (0, b"NONCE 76\n" + b"x" * 128),
+                               (76, b"NONCE 76\n")):
+            self.phase_reply = (status, output)
+            with self.subTest(status=status, output=output[:15]), self.assertRaises(Denied):
+                await transport.phase("preflight", inspect=True)
+        self.phase_reply = (0, b"NONCE 76\n")
+        self.assertEqual(await transport.phase("preflight", inspect=True), "INCOMPLETE")
+        for command, stdin in self.sessions:
+            self.assertTrue(command.startswith("exec /usr/bin/sudo"))
+            self.assertNotIn(PASSWORD, command)
+            self.assertEqual(stdin, PASSWORD.encode() + b"\n")
+        sessions = self.sessions.copy()
+        wrong = PreparationSSH(self.policy.targets[OTHER], "ubuntu", password=PASSWORD, private_key=None,
+                               observation_key=self.managed_key)
+        with self.assertRaisesRegex(Denied, "VPS_PREPARATION_SSH_UNCONFIRMED"):
+            await wrong.phase("preflight", inspect=True)
+        with self.assertRaisesRegex(Denied, "VPS_PREPARATION_PHASE_INVALID"):
+            await transport.phase("cleanup", inspect=False)
+        self.assertEqual(sessions, self.sessions)
