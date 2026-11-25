@@ -8,6 +8,7 @@ import sqlite3
 import stat
 
 from ..errors import Denied
+from ..database import SCHEMA_VERSION, _JOBS_SCHEMA
 from .data_contract import DATABASES, REQUIRED_TABLES
 from .vault import _AUDIT_SCHEMA
 
@@ -24,15 +25,25 @@ class Step:
     before: Layout
     after: Layout
     statements: tuple[str, ...]
+    rebuild: bool = False
 
 
 _VAULT = "vault/vault.sqlite3"
+_APP = "app/controller.sqlite3"
 _VAULT_COLUMNS = {
     "ref": "TEXT", "replacement": "TEXT", "purpose": "TEXT", "target": "TEXT", "owner_id": "TEXT",
     "policy_revision": "INTEGER", "scope_digest": "TEXT", "broker_uid": "INTEGER", "recorded_at": "INTEGER",
 }
-TARGETS = {name: Layout(version, int(name == _VAULT)) for name, version in DATABASES.items()}
+TARGETS = {name: Layout(version, int(name in (_APP, _VAULT))) for name, version in DATABASES.items()}
 STEPS = {
+    _APP: (Step("vps-preparation-jobs", Layout(SCHEMA_VERSION), Layout(SCHEMA_VERSION, 1), (
+        _JOBS_SCHEMA.replace("CREATE TABLE jobs (", "CREATE TABLE preparation_jobs_new (", 1),
+        "INSERT INTO preparation_jobs_new SELECT * FROM jobs",
+        "DROP TABLE jobs",
+        "ALTER TABLE preparation_jobs_new RENAME TO jobs",
+        "CREATE INDEX job_queue ON jobs(status,claimed_by,created_at)",
+        "CREATE INDEX jobs_resource_time ON jobs(resource_id,updated_at)",
+    ), rebuild=True),),
     _VAULT: (Step("vault-lifecycle-audit", Layout(1), Layout(1, 1), (_AUDIT_SCHEMA,)),),
 }
 
@@ -45,6 +56,9 @@ def layout(db, name):
     if any(objects.get(table) != "table" for table in REQUIRED_TABLES[name]):
         raise Denied("SCHEMA_CURRENT_UNSUPPORTED")
     revision = 0
+    if name == _APP:
+        create, = db.execute("SELECT sql FROM sqlite_schema WHERE name='jobs'").fetchone()
+        revision = int("'host.prepare'" in create)
     if name == _VAULT and "secret_lifecycle" in objects:
         columns = dict(db.execute("SELECT name,type FROM pragma_table_info('secret_lifecycle')"))
         fk = set(db.execute('SELECT "from", "table", "to" FROM pragma_foreign_key_list(\'secret_lifecycle\')'))
@@ -79,8 +93,10 @@ def _integrity(db):
 
 
 def _apply(db, name, step):
-    db.execute("BEGIN IMMEDIATE")
+    if step.rebuild:
+        db.execute("PRAGMA foreign_keys=OFF")
     try:
+        db.execute("BEGIN IMMEDIATE")
         if layout(db, name) != step.before:
             raise Denied("MIGRATION_SOURCE_CHANGED")
         _integrity(db)
@@ -100,6 +116,9 @@ def _apply(db, name, step):
         if db.in_transaction:
             db.execute("ROLLBACK")
         raise
+    finally:
+        if step.rebuild:
+            db.execute("PRAGMA foreign_keys=ON")
 
 
 def _file(root, name):

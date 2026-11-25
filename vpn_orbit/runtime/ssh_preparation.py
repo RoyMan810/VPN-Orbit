@@ -15,6 +15,15 @@ from .ssh_enrollment import administrator_connection
 from .vps_preparation import ACCOUNT_CONFLICT, PHASE_INCOMPLETE, PHASE_SCRIPTS, REMOTE_BUSY
 
 
+def validate_administrator(username, password, private_key):
+    if (not isinstance(username, str) or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,63}", username)
+            or (password is None) == (private_key is None)
+            or (password is not None and (not isinstance(password, str) or not 1 <= len(password) <= 1024
+                                           or any(character in password for character in "\n\r\0")))
+            or (private_key is not None and (not isinstance(private_key, str) or not 1 <= len(private_key) <= 8192))):
+        raise Denied("SSH_CREDENTIAL_REQUIRED", 422)
+
+
 class PreparationSSH:
     """Keep one attempt's administrator credentials in memory.
 
@@ -23,14 +32,9 @@ class PreparationSSH:
     """
 
     def __init__(self, target, username, *, password, private_key, observation_key):
-        if ("host.probe" not in target.value["capabilities"]
-                or not isinstance(username, str) or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,63}", username)):
+        if "host.probe" not in target.value["capabilities"]:
             raise Denied("VPS_PREPARATION_TARGET_INVALID")
-        if ((password is None) == (private_key is None)
-                or (password is not None and (not isinstance(password, str) or not 1 <= len(password) <= 1024
-                                               or any(character in password for character in "\n\r\0")))
-                or (private_key is not None and (not isinstance(private_key, str) or not 1 <= len(private_key) <= 8192))):
-            raise Denied("SSH_CREDENTIAL_REQUIRED", 422)
+        validate_administrator(username, password, private_key)
         self.target, self.username = target, username
         self._known_hosts = f'vpn-orbit-{target.id} {target.value["host_key"]}\n'.encode("ascii")
         self._password, self._private_key = password, private_key

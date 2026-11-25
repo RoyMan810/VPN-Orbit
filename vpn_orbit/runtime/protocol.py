@@ -92,6 +92,10 @@ def checksum(value):
     return hashlib.sha256(canonical(value)).hexdigest()
 
 
+def preparation_digest(job_id, actor_id, target, scope_digest):
+    return checksum({"job_id": job_id, "actor_id": actor_id, "target": target,
+                     "scope_digest": scope_digest, "action": "host.prepare"})
+
 def unique_object(pairs):
     obj = {}
     for key, value in pairs:

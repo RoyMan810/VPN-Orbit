@@ -52,10 +52,10 @@ def migrate(config):
         raise Denied("UPDATE_ADMISSION_NOT_AVAILABLE")
     if not contract["migration_steps"]:
         return {"migrations": []}
-    if contract["migration_steps"] != ["vault-lifecycle-audit"]:
+    publications = {"vps-preparation-jobs": "app/controller.sqlite3", "vault-lifecycle-audit": "vault/vault.sqlite3"}
+    if any(name not in publications for name in contract["migration_steps"]):
         raise Denied("UPDATE_MIGRATION_NOT_REVERSIBLE")
-    # Snapshot all five databases for cross-contract preflight. Publish only
-    # the compatibility-preserving vault change while services are stopped.
+    # Plan and validate all migrations on unpublished copies before replacing anything.
     with tempfile.TemporaryDirectory(prefix=".upgrade-migrate-", dir=backup.DATA) as temp, ExitStack() as reads:
         root = Path(temp)
         for name, version in backup.DBS.items():
@@ -66,19 +66,22 @@ def migrate(config):
                 source.backup(target)
             source.close()
         completed = migrate_staged(root)
-        relative = "vault/vault.sqlite3"
-        candidate, live = root / relative, backup.DATA / relative
-        with closing(sqlite3.connect(live.as_uri() + "?mode=rw", uri=True, autocommit=True)) as db:
-            if db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] != 0:
-                raise Denied("UPDATE_DATABASE_STILL_OPEN")
-        for path in (candidate, live):
-            if any(os.path.lexists(str(path) + suffix) for suffix in ("-wal", "-shm")):
-                raise Denied("UPDATE_DATABASE_STILL_OPEN")
-        os.chown(candidate, config["broker_uid"], config["broker_gid"])
-        with candidate.open("rb") as stream:
-            os.fsync(stream.fileno())
-        os.replace(candidate, live)
-        directory_sync(live.parent)
+        for step in completed:
+            relative = publications[step]
+            candidate, live = root / relative, backup.DATA / relative
+            with closing(sqlite3.connect(live.as_uri() + "?mode=rw", uri=True, autocommit=True)) as db:
+                if db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] != 0:
+                    raise Denied("UPDATE_DATABASE_STILL_OPEN")
+            for path in (candidate, live):
+                if any(os.path.lexists(str(path) + suffix) for suffix in ("-wal", "-shm")):
+                    raise Denied("UPDATE_DATABASE_STILL_OPEN")
+            role = "app" if relative.startswith("app/") else "broker"
+            os.chown(candidate, config[f"{role}_uid"], config[f"{role}_gid"])
+            candidate.chmod(0o660 if role == "app" else 0o600)
+            with candidate.open("rb") as stream:
+                os.fsync(stream.fileno())
+            os.replace(candidate, live)
+            directory_sync(live.parent)
     return {"migrations": completed}
 
 

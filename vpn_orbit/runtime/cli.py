@@ -2,24 +2,27 @@
 
 import argparse
 from contextlib import contextmanager
+from getpass import GetPassWarning, getpass
 import os
 import json
 from pathlib import Path
+import resource
 import signal
 import sqlite3
 import sys
 from threading import Event
+import warnings
 
 from ..admission import Admission
 from ..config import Settings
-from ..database import DataAccess, Store
+from ..database import DataAccess, Store, identifier
 from ..errors import Denied
 from ..queue import JobQueue
 from ..worker import Worker
 from .authority import Authority, verify_host_time
 from .ipc import Client, activated_socket, serve
 from .policy import Policy
-from .protocol import checksum, fields, integer, text, decode
+from .protocol import ULID, checksum, fields, integer, text, decode
 from .storage import new_private_file, process_lock, protected_bytes
 from .vault import Vault
 from .timehealth import TimeHealth
@@ -73,7 +76,8 @@ def run(config, command, *, once=False, listener=None, import_args=None):
                  "import-firewall-key": config["broker_uid"],
                  "import-application-key": config["broker_uid"],
                 "enrollment-catalog": 0, "register-observations": 0, "initialize-time-health": 0, "time-health": 0,
-                "initialize-credential": 0, "initialize-writers": 0}[command]
+                "initialize-credential": 0, "initialize-writers": 0,
+                "prepare-observation": 0, "reconcile-preparation": 0}[command]
     if os.geteuid() != expected:
         raise Denied("LOCAL_SERVICE_IDENTITY_INVALID")
     access = DataAccess(config["app_uid"], config["app_gid"])
@@ -135,7 +139,12 @@ def run(config, command, *, once=False, listener=None, import_args=None):
     if command == "register-observations":
         queue = JobQueue(Store(config["database"], access=access, writers=writers))
         for target in policy.targets.values():
-            queue.register_resource(target.id, target.scope_digest, target.revision)
+            if "host.prepare" not in target.value["capabilities"]:
+                queue.register_resource(target.id, target.scope_digest, target.revision)
+        return
+    if command in ("prepare-observation", "reconcile-preparation"):
+        queue = JobQueue(Store(config["database"], access=access, writers=writers))
+        prepare_observation(config, policy, queue, command, import_args)
         return
     if command == "worker":
         worker = Worker(JobQueue(Store(config["database"], access=access, writers=writers)), Client(config["gate_socket"], server_uids={0}),
@@ -203,7 +212,40 @@ def run(config, command, *, once=False, listener=None, import_args=None):
     broker = Broker(config["broker_directory"], policy, vault, gate, verify_key, worker_uid=config["worker_uid"], writers=writers)
     with process_lock(Path(config["broker_directory"]) / "broker.lock"):
         broker.recover()
-        serve(listener or activated_socket(config["broker_socket"]), broker.dispatch, {(config["worker_uid"], config["worker_gid"]): "worker"})
+        serve(listener or activated_socket(config["broker_socket"]), broker.dispatch,
+              {(config["worker_uid"], config["worker_gid"]): "worker", (0, 0): "local-root"})
+
+
+def prepare_observation(config, policy, queue, command, args):
+    target = policy.targets.get(text(args.target, ULID))
+    if target is None or "host.prepare" not in target.value["capabilities"]:
+        raise Denied("CAPABILITY_DISABLED")
+    if command == "prepare-observation":
+        job_id, actor = identifier(), queue.preparation_owner()
+    else:
+        job_id = args.job
+        actor = queue.preparation_incident(job_id, target)["actor_id"]
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    password = private_key = None
+    if args.admin_key_file:
+        private_key = protected_bytes(args.admin_key_file, owner=0, maximum=8192, private=True).decode("utf-8")
+    else:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", GetPassWarning)
+            try:
+                password = getpass("VPS SSH password: ")
+            except (GetPassWarning, EOFError):
+                raise Denied("SSH_INTERACTIVE_CREDENTIAL_REQUIRED") from None
+    payload = {"job_id": job_id, "target": target.id, "actor_id": actor, "scope_digest": target.scope_digest,
+               "username": args.user, "password": password, "private_key": private_key}
+    broker = Client(config["broker_socket"], server_uids={0, config["broker_uid"]}, timeout=135)
+    if command == "prepare-observation":
+        broker.call("prepare.credentials", payload)
+        result = queue.enqueue_preparation(job_id, actor, target)
+    else:
+        receipt = broker.call("prepare.reconcile", payload)
+        result = queue.reconcile_preparation(job_id, target, receipt)
+    print(json.dumps(result))
 
 
 def main(argv=None):
@@ -217,6 +259,13 @@ def main(argv=None):
     catalog.add_argument("--ssh-endpoints", action="store_true")
     worker = commands.add_parser("worker")
     worker.add_argument("--once", action="store_true")
+    for name in ("prepare-observation", "reconcile-preparation"):
+        preparation = commands.add_parser(name)
+        preparation.add_argument("--target", required=True)
+        preparation.add_argument("--user", required=True)
+        preparation.add_argument("--admin-key-file", type=Path)
+        if name == "reconcile-preparation":
+            preparation.add_argument("--job", required=True)
     key = commands.add_parser("import-key")
     key.add_argument("--key-file", type=Path, required=True)
     key.add_argument("--secret-id", required=True)

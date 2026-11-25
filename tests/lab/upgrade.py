@@ -275,7 +275,7 @@ def main():
         if args.scenario == "migration-failure":
             assert "migrations" not in record
         else:
-            assert record["migrations"] == ["vault-lifecycle-audit"]
+            assert record["migrations"] == ["vps-preparation-jobs", "vault-lifecycle-audit"]
         assert record["backup_sha256"] == hashlib.sha256((folder / record["backup_file"]).read_bytes()).hexdigest()
         assert {name: hashlib.sha256(Path(name).read_bytes()).digest() for name in objects} == hashes
         if expected == "1.1.0":

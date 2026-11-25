@@ -9,11 +9,12 @@ import time
 from .auth import AuthService, Role, etag
 from .database import Store, identifier
 from .errors import Denied
-from .runtime.protocol import SHA256, ULID, canonical, checksum, integer, text
+from .runtime.protocol import SHA256, ULID, canonical, checksum, integer, preparation_digest, text
 
 
 _TERMINAL = {"SUCCEEDED", "FAILED", "UNKNOWN_OUTCOME", "CANCELLED_SAFE"}
 _NEXT = {"QUEUED": "INTENT_PREPARED", "INTENT_PREPARED": "DISPATCHING", "DISPATCHING": "EXECUTING", "EXECUTING": "VERIFYING", "VERIFYING": "SUCCEEDED"}
+_PREPARATION_RECONCILIATION_REASONS = {"SUCCEEDED": "VPS_PREPARATION_RECONCILED", "FAILED": "VPS_PREPARATION_NO_CHANGES"}
 
 
 @dataclass(frozen=True)
@@ -147,9 +148,84 @@ class JobQueue:
         AuthService.require(db, row, permission, resource)
 
     def _authorize_job(self, db, row):
+        if row["action"] == "host.prepare":
+            self._preparation_owner(db, row["actor_id"])
+            return
         permission = {"docker.restart": "vps:restart", "firewall.apply": "vps:firewall",
                       "apps.lifecycle": "vps:apps"}.get(row["action"], "vps:probe")
         self._actor(db, row["actor_id"], row["resource_id"], permission)
+
+    @staticmethod
+    def _preparation_owner(db, actor_id):
+        if db.execute("SELECT 1 FROM users WHERE id=? AND disabled=0 AND role='Owner'", (actor_id,)).fetchone() is None:
+            raise Denied("ACTOR_REVOKED")
+
+    def preparation_owner(self):
+        with self.store.read() as db:
+            rows = db.execute("SELECT id FROM users WHERE disabled=0 AND role='Owner' LIMIT 2").fetchall()
+            if len(rows) != 1:
+                raise Denied("VPS_PREPARATION_OWNER_REQUIRED")
+            return rows[0]["id"]
+
+    def enqueue_preparation(self, job_id, actor, target):
+        self._check_preparation_target(target)
+        text(job_id, ULID)
+        with self.store.write() as db:
+            self._schema(db)
+            self._preparation_owner(db, actor)
+            resource = db.execute("SELECT * FROM resources WHERE id=?", (target.id,)).fetchone()
+            if resource is None:
+                now = int(self.clock())
+                db.execute("INSERT INTO resources VALUES(?,?,?,1,0,?,?)",
+                           (target.id, target.scope_digest, target.revision, now, now))
+            elif (resource["enabled"] or resource["scope_digest"] != target.scope_digest
+                  or resource["policy_revision"] != target.revision):
+                raise Denied("VPS_PREPARATION_RESOURCE_NOT_PENDING", 409)
+            if db.execute("""SELECT 1 FROM jobs WHERE resource_id=? AND action='host.prepare'
+                             AND status NOT IN ('FAILED','CANCELLED_SAFE')""", (target.id,)).fetchone():
+                raise Denied("VPS_PREPARATION_ALREADY_PENDING", 409)
+            self._enqueue_mutation(db, job_id, actor, target.id, target.scope_digest, target.revision,
+                                   preparation_digest(job_id, actor, target.id, target.scope_digest), "host.prepare")
+            return self._public(db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
+
+    @staticmethod
+    def _check_preparation_target(target):
+        if set(target.value["capabilities"]) != {"host.prepare", "host.probe"}:
+            raise Denied("CAPABILITY_DISABLED")
+
+    def _pending_preparation(self, db, job_id, target):
+        self._check_preparation_target(target)
+        text(job_id, ULID)
+        row = db.execute("""SELECT * FROM jobs WHERE id=? AND action='host.prepare'
+                          AND status='UNKNOWN_OUTCOME'""", (job_id,)).fetchone()
+        if row is None or row["resource_id"] != target.id or not self._scope_matches(db, row):
+            raise Denied("VPS_PREPARATION_RECONCILIATION_UNVERIFIED")
+        if row["scope_digest"] != target.scope_digest or row["policy_revision"] != target.revision:
+            raise Denied("STALE_SCOPE")
+        self._preparation_owner(db, row["actor_id"])
+        return row
+
+    def preparation_incident(self, job_id, target):
+        with self.store.read() as db:
+            return dict(self._pending_preparation(db, job_id, target))
+
+    def reconcile_preparation(self, job_id, target, receipt):
+        with self.store.write(kind="control") as db:
+            row = self._pending_preparation(db, job_id, target)
+            permit = json.loads(row["permit"]) if row["permit"] else {}
+            if (receipt["state"] not in ("RECONCILED_SUCCEEDED", "SUCCEEDED", "FAILED", "CANCELLED_SAFE")
+                    or receipt["job_id"] != job_id or permit.get("claims", {}).get("nonce") != receipt["nonce"]):
+                raise Denied("VPS_PREPARATION_RECONCILIATION_UNVERIFIED")
+            status = "FAILED" if receipt["state"] in ("FAILED", "CANCELLED_SAFE") else "SUCCEEDED"
+            reason = _PREPARATION_RECONCILIATION_REASONS[status]
+            if status == "SUCCEEDED":
+                self._enable_prepared_resource(db, row)
+            db.execute("""UPDATE jobs SET status=?,reason=?,revision=revision+1,updated_at=? WHERE id=?""",
+                       (status, reason, int(self.clock()), job_id))
+            db.execute("DELETE FROM job_incidents WHERE job_id=?", (job_id,))
+            updated = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            self._event(db, updated, "job.preparation_reconciled", reason=reason)
+            return self._public(updated)
 
     @staticmethod
     def _public(row):
@@ -209,7 +285,7 @@ class JobQueue:
             job = self._read_job(db, auth, token, job_id)
             rows = db.execute("""SELECT seq,at,event,outcome,details FROM audit
                 WHERE target_id=? AND correlation_id=?
-                AND event IN ('job.accepted','job.transition','job.finished')
+                AND event IN ('job.accepted','job.transition','job.finished','job.preparation_reconciled')
                 ORDER BY seq LIMIT 101""", (job["resource_id"], job_id)).fetchall()
             if len(rows) > 100:
                 raise Denied("JOB_TIMELINE_INVALID", 503)
@@ -230,7 +306,11 @@ class JobQueue:
                                 (previous is None or previous in _TERMINAL or status not in _TERMINAL
                                  or (status == "SUCCEEDED" and previous != "VERIFYING")
                                  or (status == "CANCELLED_SAFE" and previous not in ("QUEUED", "INTENT_PREPARED"))))
-                            or (row["event"] != "job.finished" and reason is not None)
+                            or (row["event"] == "job.preparation_reconciled" and
+                                (job["action"] != "host.prepare" or details.get("action") != "host.prepare"
+                                 or previous != "UNKNOWN_OUTCOME" or status not in _PREPARATION_RECONCILIATION_REASONS
+                                 or reason != _PREPARATION_RECONCILIATION_REASONS[status]))
+                            or (row["event"] in ("job.accepted", "job.transition") and reason is not None)
                             or (row["event"] == "job.finished" and (not isinstance(reason, str)
                                 or re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", reason) is None))):
                         raise ValueError
@@ -276,8 +356,7 @@ class JobQueue:
                 except Denied:
                     self._finish(db, row, "CANCELLED_SAFE", "ACTOR_REVOKED")
                     continue
-                target = db.execute("SELECT * FROM resources WHERE id=? AND enabled=1", (row["resource_id"],)).fetchone()
-                if target is None or target["scope_digest"] != row["scope_digest"] or target["policy_revision"] != row["policy_revision"]:
+                if not self._scope_matches(db, row):
                     self._finish(db, row, "CANCELLED_SAFE", "STALE_SCOPE")
                     continue
                 nonce = secrets.token_hex(32)
@@ -292,6 +371,13 @@ class JobQueue:
                 "capability": row["action"], "scope_digest": row["scope_digest"]}
 
     @staticmethod
+    def _scope_matches(db, row):
+        target = db.execute("SELECT scope_digest,policy_revision,enabled FROM resources WHERE id=?",
+                            (row["resource_id"],)).fetchone()
+        return (target is not None and target["enabled"] == int(row["action"] != "host.prepare")
+                and target["scope_digest"] == row["scope_digest"] and target["policy_revision"] == row["policy_revision"])
+
+    @staticmethod
     def _claimed(db, claim):
         row = db.execute("SELECT * FROM jobs WHERE id=? AND claimed_by=? AND claim_nonce=?", (claim.job_id, claim.worker_id, claim.nonce)).fetchone()
         if row is None or row["status"] in _TERMINAL:
@@ -304,8 +390,7 @@ class JobQueue:
             if _NEXT.get(row["status"]) != state or state == "SUCCEEDED":
                 raise Denied("JOB_TRANSITION_DENIED")
             self._authorize_job(db, row)
-            target = db.execute("SELECT scope_digest,policy_revision,enabled FROM resources WHERE id=?", (row["resource_id"],)).fetchone()
-            if not target["enabled"] or target["scope_digest"] != row["scope_digest"] or target["policy_revision"] != row["policy_revision"]:
+            if not self._scope_matches(db, row):
                 raise Denied("STALE_SCOPE")
             if validate is not None:
                 validate(db)
@@ -325,6 +410,8 @@ class JobQueue:
             raise Denied("JOB_TRANSITION_DENIED")
         if outcome == "CANCELLED_SAFE" and row["status"] not in ("QUEUED", "INTENT_PREPARED"):
             raise Denied("JOB_TRANSITION_DENIED")
+        if outcome == "SUCCEEDED" and row["action"] == "host.prepare":
+            self._enable_prepared_resource(db, row)
         db.execute("UPDATE jobs SET status=?,revision=revision+1,result=?,reason=?,updated_at=? WHERE id=?",
                    (outcome, canonical(result).decode() if result else None, reason, int(self.clock()), row["id"]))
         if outcome == "UNKNOWN_OUTCOME":
@@ -337,3 +424,10 @@ class JobQueue:
     def finish(self, claim, outcome, reason, *, result=None):
         with self.store.write(kind="control") as db:
             self._finish(db, self._claimed(db, claim), outcome, reason, result)
+
+    def _enable_prepared_resource(self, db, row):
+        self._preparation_owner(db, row["actor_id"])
+        if not self._scope_matches(db, row):
+            raise Denied("STALE_SCOPE")
+        db.execute("UPDATE resources SET enabled=1,revision=revision+1,updated_at=? WHERE id=?",
+                   (int(self.clock()), row["resource_id"]))

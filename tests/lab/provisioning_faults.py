@@ -19,10 +19,12 @@ from unittest.mock import patch
 import asyncssh
 
 from tools import prepare_vps
+from tests.runtime.test_preparation_job import preparation_runtime
 from vpn_orbit.database import identifier
 from vpn_orbit.errors import Denied
 from vpn_orbit.runtime import vps_preparation as preparation
-from vpn_orbit.runtime.policy import Target
+from vpn_orbit.runtime.ipc import Peer
+from vpn_orbit.runtime.policy import Policy, Target
 from vpn_orbit.runtime.ssh_enrollment import verify_credentials
 from vpn_orbit.runtime.ssh_preparation import PreparationSSH
 
@@ -366,6 +368,40 @@ async def verify_preparation_transport(key, password):
             release()
 
 
+def verify_worker_preparation(directory, key, password):
+    policy = Policy([{
+        "id": identifier(), "ip": ADDRESS, "port": PORT, "allowed_cidrs": [ADDRESS + "/32"],
+        "host_key": " ".join((LAB / "host.pub").read_text().split()[:2]), "secret_ref": identifier() + ":v1",
+        "policy_revision": 1, "dependencies": [], "capabilities": ["host.probe", "host.prepare"],
+    }])
+    target, = policy.targets.values()
+    actor, job = identifier(), identifier()
+    observation = asyncssh.generate_private_key("ssh-ed25519")
+    queue, authority, broker, worker = preparation_runtime(
+        directory / "worker-runtime", policy, actor, observation.export_private_key("openssh"))
+    run_remote, release, _, _ = prepare_vps.build_transport(ADDRESS, PORT, key, ADMIN, target.value["host_key"])
+    try:
+        broker.dispatch("local-root", Peer(1, 0, 0), "prepare.credentials", {
+            "job_id": job, "actor_id": actor, "target": target.id, "scope_digest": target.scope_digest,
+            "username": ADMIN, "password": password, "private_key": None,
+        })
+        queue.enqueue_preparation(job, actor, target)
+        expect(worker.run_one(), "Worker must claim the preparation job")
+        with queue.store.read() as db:
+            result = db.execute("SELECT status,reason FROM jobs WHERE id=?", (job,)).fetchone()
+            expect(tuple(result) == ("SUCCEEDED", "VPS_PREPARATION_VERIFIED"), f"Preparation did not succeed: {tuple(result)}")
+            expect(db.execute("SELECT enabled FROM resources WHERE id=?", (target.id,)).fetchone()["enabled"] == 1,
+                   "Worker must enable the prepared VPS after verification")
+        expect(authority.status(job)["state"] == "SUCCEEDED", "Authority must record the successful mutation")
+    finally:
+        authority.close()
+        try:
+            if Path(preparation.REMOTE_STATE).exists():
+                run_remote(preparation.cleanup_script(observation.export_public_key("openssh")))
+        finally:
+            release()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--isolated-vm", action="store_true")
@@ -504,6 +540,7 @@ def main():
                "A restored administrator session must verify without reapplying the SSH profile", retried)
         provision(directory, key, fingerprint, cleanup=True)
         asyncio.run(verify_preparation_transport(key, password))
+        verify_worker_preparation(directory, key, password)
         for path in NAMESPACES[:-1]:
             expect(not Path(path).exists(), f"Fixture artifact remains: {path}")
         expect(PROFILE.read_text() == preparation.SSH_PROFILE, "Cleanup must preserve the pre-existing SSH profile")
@@ -512,7 +549,7 @@ def main():
         print(json.dumps({"status": "PASSED", "scenarios": [
             "disconnect-account", "retry-repair", "partial-helpers", "local-interruption",
             "verify-rollback", "sudo-password", "account-conflict", "admin-access-recovery",
-            "controller-ssh-preparation", "cleanup"]}, sort_keys=True))
+            "controller-ssh-preparation", "worker-authority-preparation", "cleanup"]}, sort_keys=True))
     finally:
         subprocess.run(["ip", "netns", "del", NAMESPACE], stderr=subprocess.DEVNULL)
         subprocess.run(["ip", "link", "del", "vpnprobe0"], stderr=subprocess.DEVNULL)
