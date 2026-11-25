@@ -67,6 +67,13 @@ def fixture(directory):
                 {"id": "e" * 64, "project": "unverified-project", "service": "web", "state": "UNKNOWN",
                  "published_ports": None},
             ]}
+        else:
+            result["software"] = {"docker": "PRESENT", "nginx": "NOT_DETECTED"}
+            result["docker"] = {"status": "NOT_CONFIGURED", "containers": []}
+            result["compose"] = {"status": "OBSERVED", "containers": [
+                {"id": "a" * 64, "image_id": "sha256:" + "b" * 64, "project": "external",
+                 "service": "web", "state": "RUNNING"},
+            ]}
         queue.finish(claim, "SUCCEEDED", "PROBE_VERIFIED", result=result)
 
     enrollment = {"01JCYQZ4T9V8MNVYEH3D2M7Q1D": {"fingerprint": "SHA256:" + "A" * 43,

@@ -171,6 +171,25 @@ def _validate_published_ports(ports, state):
         seen.add((address, host, private, protocol))
 
 
+def compose_summary(value):
+    fields(value, ("status", "containers"))
+    status, rows = value["status"], value["containers"]
+    if (status not in ("OBSERVED", "NOT_CONFIGURED", "POLICY_INVALID", "UNAVAILABLE", "LIMIT_EXCEEDED")
+            or not isinstance(rows, list) or len(rows) > 12 or rows and status != "OBSERVED"):
+        raise Denied("PROBE_COMPOSE_INVALID")
+    seen = set()
+    for row in rows:
+        fields(row, ("id", "image_id", "project", "service", "state"))
+        identity = text(row["id"], SHA256)
+        text(row["image_id"], "sha256:" + SHA256)
+        text(row["project"], r"[a-z0-9][a-z0-9_-]{0,62}")
+        text(row["service"], r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}")
+        if identity in seen or row["state"] not in ("CREATED", "RESTARTING", "RUNNING", "REMOVING", "PAUSED", "EXITED", "DEAD"):
+            raise Denied("PROBE_COMPOSE_INVALID")
+        seen.add(identity)
+    return value
+
+
 def docker_summary(value, *, include_ports=None, include_mounts=None, include_network=None, include_dependencies=None, include_started_at=None):
     fields(value, ("status", "containers"))
     status, rows = value["status"], value["containers"]

@@ -128,11 +128,14 @@ class RuntimeTests(unittest.TestCase):
                      "published_ports": [port], "mount_status": "NONE", "network_status": "ISOLATED",
                      "dependency_status": "ISOLATED"}
         summary = {"status": "OBSERVED", "containers": [container]}
+        compose = {"status": "OBSERVED", "containers": [{"id": "b" * 64, "image_id": "sha256:" + "c" * 64,
+                    "project": "external", "service": "web", "state": "RUNNING"}]}
         software = {"docker": "PRESENT", "nginx": "NOT_DETECTED"}
-        self.broker.execute = lambda *_: {**observation(), "software": software, "docker": summary}
+        self.broker.execute = lambda *_: {**observation(), "software": software, "docker": summary, "compose": compose}
         job = self.enqueue()
         self.worker.run(once=True)
         self.assertEqual(self.job(job["id"])["result"]["docker"], summary)
+        self.assertEqual(self.job(job["id"])["result"]["compose"], compose)
         invalid = {**summary, "containers": [{**container, "labels": {"secret": "fixture-canary"}}]}
         self.broker.execute = lambda *_: {**observation(), "software": software, "docker": invalid}
         job = self.enqueue("fixture-invalid-docker")

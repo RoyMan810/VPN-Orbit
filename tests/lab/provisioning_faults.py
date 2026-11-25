@@ -142,8 +142,8 @@ def probe(directory, key, fingerprint):
         ["ssh", "-F", "/dev/null", "-p", str(PORT), "-i", str(directory / "output" / "probe"),
          "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes",
          "-o", "GlobalKnownHostsFile=/dev/null", "-o", f"UserKnownHostsFile={known}",
-         f"{SERVICE}@{ADDRESS}", "vpn-orbit.v8.probe"],
-        input='{"operation":"probe","version":8}\n', capture_output=True, text=True)
+         f"{SERVICE}@{ADDRESS}", "vpn-orbit.v9.probe"],
+        input='{"operation":"probe","version":9}\n', capture_output=True, text=True)
 
 
 def state(directory):
@@ -187,8 +187,10 @@ def main():
         expect(retry.returncode == 0, "Retry after an account disconnect must repair", retry)
         expect(state(directory)["status"] == "VERIFIED", "Retry must verify the postcondition")
         result = probe(directory, key, fingerprint)
-        expect(result.returncode == 0 and json.loads(result.stdout)["uid"] == 0,
-               "A fresh SSH connection must observe uid 0", result)
+        observation = json.loads(result.stdout) if result.returncode == 0 else {}
+        expect(observation.get("v") == 9 and observation.get("uid") == 0
+               and observation.get("compose") == {"status": "NOT_CONFIGURED", "containers": []},
+               "A fresh SSH connection must observe uid 0 and opt-in Compose disabled", result)
         removed = provision(directory, key, fingerprint, cleanup=True)
         expect(removed.returncode == 0, "Cleanup after success must succeed", removed)
         expect(subprocess.run(["getent", "passwd", SERVICE], capture_output=True).returncode != 0,

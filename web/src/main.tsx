@@ -228,7 +228,8 @@ function Detail({ resource, t, lang, now, expired, session }: {
         </dl>
       </> : <p>{t.noSoftware}</p>}
     </div>}
-    {docker?.status === 'OBSERVED' && <ComposeInventory docker={docker} historical={current.status !== 'REACHABLE'} t={t}/>}
+    {(sample?.compose || docker?.status === 'OBSERVED') && <ComposeInventory compose={sample?.compose}
+      scoped={docker?.status === 'OBSERVED' ? docker.containers : []} historical={current.status !== 'REACHABLE'} t={t}/>}
     {docker && <div className="software">
       <h3>{t.dockerHeading}</h3>
       <p>{current.status === 'REACHABLE' ? t.dockerScope : t.dockerHistorical}</p>

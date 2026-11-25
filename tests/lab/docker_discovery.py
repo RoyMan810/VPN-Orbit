@@ -1,4 +1,4 @@
-"""Exercise the scoped Docker read adapter on a disposable GitHub runner."""
+"""Exercise the Docker and Compose read adapters on a disposable GitHub runner."""
 
 import argparse
 import json
@@ -28,6 +28,7 @@ def main():
     socket_path = Path(address.path).resolve(strict=True)
     helper = runpy.run_path(str(Path(__file__).resolve().parents[2] / "remote" / "typed-helper"))
     observe = helper["observe_docker"]
+    discover = helper["observe_compose"]
     prefix = "vpn-orbit-discovery-" + uuid4().hex[:10]
     ids = []
 
@@ -58,6 +59,7 @@ def main():
         # the same filesystem exposes the same socket in a root-owned directory.
         with tempfile.TemporaryDirectory(prefix="vpn-orbit-docker-", dir=socket_path.parent) as directory:
             registry = Path(directory) / "docker-discovery.json"
+            switch = Path(directory) / "compose-discovery.enabled"
             protected_socket = Path(directory) / "docker.sock"
             os.link(socket_path, protected_socket)
             registry.write_text(json.dumps({"v": 1, "containers": scope}))
@@ -76,6 +78,21 @@ def main():
                 {**scope[1], "state": "CREATED", "published_ports": []},
             ]}, result
             assert foreign not in json.dumps(result) and "label-canary" not in json.dumps(result)
+            assert discover(switch, protected_socket) == {"status": "NOT_CONFIGURED", "containers": []}
+            switch.write_bytes(b"enabled\n")
+            switch.chmod(0o644)
+            assert discover(switch, protected_socket) == {"status": "POLICY_INVALID", "containers": []}
+            switch.chmod(0o600)
+            before = docker("inspect", "--format", "{{.Id}} {{.State.Status}} {{.State.StartedAt}}", *ids)
+            projects = discover(switch, protected_socket)
+            assert projects["status"] == "OBSERVED", projects
+            assert {row["id"] for row in projects["containers"]} == set(ids), projects
+            assert {row["project"] for row in projects["containers"]} == {prefix, prefix + "-foreign"}
+            image = docker("inspect", "--format", "{{.Image}}", running)
+            assert {row["image_id"] for row in projects["containers"]} == {image}
+            assert {row["state"] for row in projects["containers"]} == {"RUNNING", "CREATED"}
+            assert "label-canary" not in json.dumps(projects)
+            assert docker("inspect", "--format", "{{.Id}} {{.State.Status}} {{.State.StartedAt}}", *ids) == before
             mounted_scope = {"id": mounted, "project": prefix, "service": "mounted"}
             registry.write_text(json.dumps({"v": 1, "containers": [*scope, mounted_scope]}))
             result = observe(registry, protected_socket, include_ports=True, include_mounts=True)
@@ -111,7 +128,7 @@ def main():
             assert observe(registry, protected_socket) == {"status": "POLICY_INVALID", "containers": []}
             registry.unlink()
             assert observe(registry, protected_socket) == {"status": "NOT_CONFIGURED", "containers": []}
-        print("Pinned Docker returned approved containers and only the published binding. Scope and label mismatches fail closed.")
+        print("Pinned Docker returned scoped containers and opt-in Compose inventory without changing any container.")
     finally:
         if ids:
             docker("rm", "-f", *ids)
