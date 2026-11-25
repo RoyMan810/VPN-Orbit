@@ -1,0 +1,31 @@
+#!/usr/bin/python3 -I
+"""Forced command for the dedicated, typed VPN-Orbit firewall account."""
+
+import os
+import signal
+import subprocess
+import sys
+
+
+LIMIT = 8192
+
+
+def main():
+    if len(sys.argv) != 1 or os.environ.get("SSH_ORIGINAL_COMMAND") != "vpn-orbit.v1.firewall":
+        return 65
+    signal.alarm(5)
+    request = sys.stdin.buffer.read(LIMIT + 1)
+    signal.alarm(0)
+    if not request or len(request) > LIMIT:
+        return 65
+    try:
+        return subprocess.run(
+            ["/usr/bin/sudo", "-n", "--", "/usr/local/libexec/vpn-orbit/firewall-apply"],
+            input=request, timeout=80, env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"},
+        ).returncode
+    except (OSError, subprocess.SubprocessError):
+        return 70
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

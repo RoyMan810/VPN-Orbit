@@ -1,0 +1,518 @@
+#!/usr/bin/python3 -I
+"""Apply one typed firewall plan with an independent host-local rollback timer.
+
+Only fixed nftables arguments and a bounded rule vocabulary are accepted.  The
+generated ruleset always accepts loopback, established flows and the SSH port
+before any Owner-supplied rule, so an incorrect rule cannot remove management
+access.  The previous table is journaled before the effect and restored by a
+timer that does not depend on the Controller or its SSH session.
+"""
+
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import stat
+import subprocess
+import sys
+import time
+
+
+OPERATION = r"[0-7][0-9A-HJKMNP-TV-Z]{25}"
+DIGEST = r"[0-9a-f]{64}"
+JOURNAL = Path("/var/lib/vpn-orbit-firewall")
+POLICY = Path("/etc/vpn-orbit/firewall-policy.json")
+TABLE = "inet vpn_orbit"
+LIMIT = 8192
+MAX_RULES = 32
+
+
+class Refused(ValueError):
+    pass
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise Refused("INVALID_REQUEST")
+        result[key] = value
+    return result
+
+
+def nft_path():
+    for name in ("/usr/sbin/nft", "/usr/bin/nft", "/sbin/nft", "/bin/nft"):
+        try:
+            entry = os.stat(name)
+        except OSError:
+            continue
+        if stat.S_ISREG(entry.st_mode) and entry.st_uid == 0 and not entry.st_mode & 0o022:
+            return name
+    raise Refused("NFTABLES_UNAVAILABLE")
+
+
+def run_nft(arguments, *, input_text=None, timeout=15):
+    return subprocess.run([nft_path(), "-nn", *arguments], input=input_text, text=True,
+                          capture_output=True, timeout=timeout,
+                          env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"})
+
+
+def ssh_port_from_host():
+    result = subprocess.run(["/usr/sbin/sshd", "-T"], text=True, capture_output=True, timeout=5,
+                            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"})
+    if result.returncode != 0:
+        raise Refused("FIREWALL_SSH_PORT_UNKNOWN")
+    for line in result.stdout.splitlines():
+        if line.startswith("port "):
+            try:
+                return int(line.split()[1])
+            except (IndexError, ValueError):
+                break
+    raise Refused("FIREWALL_SSH_PORT_UNKNOWN")
+
+
+def read_policy():
+    value = {"v": 1, "ssh_port": ssh_port_from_host(), "max_rules": MAX_RULES, "rollback_seconds": 60}
+    try:
+        descriptor = os.open(POLICY, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return value
+    try:
+        entry = os.fstat(descriptor)
+        if (not stat.S_ISREG(entry.st_mode) or entry.st_uid != 0
+                or stat.S_IMODE(entry.st_mode) != 0o600 or entry.st_nlink != 1):
+            raise Refused("FIREWALL_POLICY_UNPROTECTED")
+        with os.fdopen(descriptor, "rb") as file:
+            descriptor = -1
+            data = file.read(4097)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if len(data) > 4096:
+        raise Refused("FIREWALL_POLICY_INVALID")
+    try:
+        parsed = json.loads(data, object_pairs_hook=unique_object)
+    except (ValueError, UnicodeError):
+        raise Refused("FIREWALL_POLICY_INVALID") from None
+    if not isinstance(parsed, dict) or parsed.keys() != {"v", "ssh_port", "max_rules", "rollback_seconds"}:
+        raise Refused("FIREWALL_POLICY_INVALID")
+    if (type(parsed["v"]) is not int or parsed["v"] != 1
+            or type(parsed["ssh_port"]) is not int or not 1 <= parsed["ssh_port"] <= 65535
+            or type(parsed["max_rules"]) is not int or not 1 <= parsed["max_rules"] <= MAX_RULES
+            or type(parsed["rollback_seconds"]) is not int or not 10 <= parsed["rollback_seconds"] <= 300):
+        raise Refused("FIREWALL_POLICY_INVALID")
+    return parsed
+
+
+def validate_rules(rules, ssh_port, maximum):
+    from ipaddress import ip_network
+    if not isinstance(rules, list) or not 1 <= len(rules) <= maximum:
+        raise Refused("FIREWALL_RULES_INVALID")
+    seen = set()
+    for rule in rules:
+        if not isinstance(rule, dict) or rule.keys() != {"action", "direction", "protocol", "port", "cidr"}:
+            raise Refused("FIREWALL_RULES_INVALID")
+        if rule["action"] not in ("allow", "deny") or rule["direction"] not in ("in", "out"):
+            raise Refused("FIREWALL_RULES_INVALID")
+        if rule["protocol"] not in ("tcp", "udp"):
+            raise Refused("FIREWALL_RULES_INVALID")
+        if type(rule["port"]) is not int or not 1 <= rule["port"] <= 65535:
+            raise Refused("FIREWALL_RULES_INVALID")
+        cidr = rule["cidr"]
+        if not isinstance(cidr, str) or "%" in cidr:
+            raise Refused("FIREWALL_RULES_INVALID")
+        try:
+            if str(ip_network(cidr, strict=True)) != cidr:
+                raise ValueError
+        except ValueError:
+            raise Refused("FIREWALL_RULES_INVALID") from None
+        identity = (rule["action"], rule["direction"], rule["protocol"], rule["port"], cidr)
+        if identity in seen:
+            raise Refused("FIREWALL_RULES_INVALID")
+        seen.add(identity)
+    if not any(rule["action"] == "allow" and rule["direction"] == "in" and rule["protocol"] == "tcp"
+               and rule["port"] == ssh_port for rule in rules):
+        raise Refused("FIREWALL_SSH_RULE_REQUIRED")
+    return rules
+
+
+def nft_script(rules, ssh_port):
+    input_rules, output_rules = [], []
+    for rule in rules:
+        family = "ip6" if ":" in rule["cidr"] else "ip"
+        address = "saddr" if rule["direction"] == "in" else "daddr"
+        if rule["cidr"] in ("0.0.0.0/0", "::/0"):
+            prefix = "meta nfproto ipv6 " if family == "ip6" else "meta nfproto ipv4 "
+        else:
+            prefix = f"{family} {address} {rule['cidr']} "
+        verdict = "accept" if rule["action"] == "allow" else "drop"
+        line = f"    {prefix}{rule['protocol']} dport {rule['port']} {verdict}"
+        (input_rules if rule["direction"] == "in" else output_rules).append(line)
+    return "\n".join([
+        f"table {TABLE} {{",
+        "  chain input {",
+        "    type filter hook input priority 0; policy accept;",
+        "    ct state established,related accept",
+        '    iif "lo" accept',
+        f"    tcp dport {ssh_port} accept",
+        *input_rules,
+        "  }",
+        "  chain output {",
+        "    type filter hook output priority 0; policy accept;",
+        "    ct state established,related accept",
+        *output_rules,
+        "  }",
+        "}",
+        "",
+    ])
+
+
+def snapshot():
+    result = run_nft(["list", "table", *TABLE.split()])
+    if result.returncode == 0:
+        return result.stdout
+    if "No such file or directory" in result.stderr or "does not exist" in result.stderr:
+        return ""
+    raise Refused("FIREWALL_SNAPSHOT_FAILED")
+
+
+def restore(previous):
+    current = snapshot()
+    script = (f"delete table {TABLE}\n" if current.strip() else "") + previous
+    if script.strip():
+        result = run_nft(["-f", "-"], input_text=script)
+        if result.returncode != 0 or snapshot() != previous:
+            raise Refused("FIREWALL_RESTORE_FAILED")
+
+
+def apply_table(script):
+    script = (f"delete table {TABLE}\n" if snapshot().strip() else "") + script
+    check = run_nft(["-c", "-f", "-"], input_text=script)
+    if check.returncode != 0:
+        raise Refused("FIREWALL_RULESET_INVALID")
+    result = run_nft(["-f", "-"], input_text=script)
+    if result.returncode != 0:
+        raise Refused("FIREWALL_APPLY_FAILED")
+
+
+def verify_table(ssh_port):
+    result = run_nft(["list", "table", *TABLE.split()])
+    if result.returncode != 0 or f"tcp dport {ssh_port} accept" not in result.stdout:
+        raise Refused("FIREWALL_EFFECT_UNVERIFIED")
+
+
+def open_journal():
+    try:
+        os.mkdir(JOURNAL, 0o700)
+    except FileExistsError:
+        pass
+    descriptor = os.open(JOURNAL, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    entry = os.fstat(descriptor)
+    if entry.st_uid != 0 or stat.S_IMODE(entry.st_mode) != 0o700:
+        os.close(descriptor)
+        raise Refused("FIREWALL_JOURNAL_UNPROTECTED")
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(descriptor)
+        raise Refused("FIREWALL_BUSY") from None
+    return descriptor
+
+
+def journal_name(operation):
+    if not isinstance(operation, str) or re.fullmatch(OPERATION, operation) is None:
+        raise Refused("FIREWALL_OPERATION_INVALID")
+    return operation + ".json"
+
+
+def read_journal(descriptor, operation):
+    name = journal_name(operation)
+    try:
+        file = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(file, "rb") as handle:
+        entry = os.fstat(handle.fileno())
+        if (not stat.S_ISREG(entry.st_mode) or entry.st_uid != 0
+                or stat.S_IMODE(entry.st_mode) != 0o600 or entry.st_nlink != 1):
+            raise Refused("FIREWALL_JOURNAL_UNPROTECTED")
+        data = handle.read(65537)
+    if len(data) > 65536:
+        raise Refused("FIREWALL_JOURNAL_INVALID")
+    try:
+        value = json.loads(data, object_pairs_hook=unique_object)
+    except (ValueError, UnicodeError):
+        raise Refused("FIREWALL_JOURNAL_INVALID") from None
+    if not isinstance(value, dict) or value.get("operation_id") != operation:
+        raise Refused("FIREWALL_JOURNAL_INVALID")
+    return value
+
+
+def write_journal(descriptor, value):
+    name = journal_name(value["operation_id"])
+    temporary = name + ".tmp"
+    file = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600, dir_fd=descriptor)
+    try:
+        with os.fdopen(file, "wb") as handle:
+            file = -1
+            handle.write(canonical(value).encode())
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        if file >= 0:
+            os.close(file)
+    os.replace(temporary, name, src_dir_fd=descriptor, dst_dir_fd=descriptor)
+    os.fsync(descriptor)
+
+
+def other_armed(descriptor, operation):
+    for name in os.listdir(descriptor):
+        if name.endswith(".json") and name != journal_name(operation):
+            value = read_journal(descriptor, name.removesuffix(".json"))
+            if value is not None and value.get("state") in ("ARMED", "ROLLBACK_FAILED"):
+                return value
+    return None
+
+
+def baseline_digest(descriptor, previous):
+    if not previous.strip():
+        return hashlib.sha256(canonical([]).encode()).hexdigest()
+    for name in os.listdir(descriptor):
+        if name.endswith(".json"):
+            value = read_journal(descriptor, name.removesuffix(".json"))
+            if value is not None and value.get("state") == "CONFIRMED" and value.get("applied_table") == previous:
+                return value["rules_digest"]
+    raise Refused("FIREWALL_BASELINE_UNVERIFIED")
+
+
+def arm_timer(operation, seconds):
+    unit = f"vpn-orbit-firewall-{operation}"
+    if Path("/run/systemd/system").is_dir() and Path("/usr/bin/systemd-run").is_file():
+        result = subprocess.run(
+            ["/usr/bin/systemd-run", "--quiet", "--collect", f"--unit={unit}", f"--on-active={seconds}",
+             "--timer-property=AccuracySec=100ms", "--property=Restart=on-failure",
+             "--property=RestartSec=1s", "--property=StartLimitIntervalSec=0",
+             "/usr/local/libexec/vpn-orbit/firewall-rollback", operation],
+            text=True, capture_output=True, timeout=10,
+            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"},
+        )
+        if result.returncode == 0:
+            return {"kind": "systemd", "unit": unit}
+    raise Refused("FIREWALL_ROLLBACK_TIMER_UNAVAILABLE")
+
+
+def cancel_timer(value):
+    timer = value.get("timer")
+    if not isinstance(timer, dict):
+        return
+    if timer.get("kind") == "systemd" and isinstance(timer.get("unit"), str):
+        try:
+            subprocess.run(["/usr/bin/systemctl", "stop", timer["unit"] + ".timer"], capture_output=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            # A late watchdog observes the durable terminal state and exits.
+            pass
+
+
+def expired(value):
+    return (value.get("boot_id") != Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+            or time.clock_gettime(time.CLOCK_BOOTTIME) >= value.get("deadline_tick", 0))
+
+
+def rollback_locked(descriptor, value):
+    if value.get("state") == "ROLLED_BACK":
+        return "SUCCEEDED", "FIREWALL_ALREADY_ROLLED_BACK"
+    if value.get("state") == "CONFIRMED":
+        raise Refused("FIREWALL_CONFIRMED")
+    try:
+        restore(value["previous"])
+    except (OSError, subprocess.SubprocessError, Refused):
+        value["state"] = "ROLLBACK_FAILED"
+        write_journal(descriptor, value)
+        return "UNKNOWN_OUTCOME", "FIREWALL_ROLLBACK_UNCONFIRMED"
+    value["state"] = "ROLLED_BACK"
+    value["rolled_back_at"] = int(time.time())
+    write_journal(descriptor, value)
+    cancel_timer(value)
+    return "SUCCEEDED", "FIREWALL_ROLLED_BACK"
+
+
+def dispatch(request):
+    operation = request.get("operation")
+    if operation not in ("apply", "confirm", "rollback", "status"):
+        raise Refused("INVALID_REQUEST")
+    identifier = request.get("operation_id")
+    journal_name(identifier)
+    descriptor = open_journal()
+    try:
+        if operation == "status":
+            value = read_journal(descriptor, identifier)
+            if value is None:
+                return "SUCCEEDED", "FIREWALL_STATUS", {"state": "ABSENT"}
+            if value.get("state") == "CONFIRMED" and snapshot() != value.get("applied_table"):
+                return "UNKNOWN_OUTCOME", "FIREWALL_EFFECT_UNVERIFIED", {
+                    "state": "CONFIRMED", "rules_digest": value["rules_digest"]}
+            return "SUCCEEDED", "FIREWALL_STATUS", {
+                "state": value.get("state"), "rules_digest": value.get("rules_digest")}
+        if operation == "confirm":
+            value = read_journal(descriptor, identifier)
+            if value is None:
+                raise Refused("FIREWALL_OPERATION_NOT_FOUND")
+            if value.get("rules_digest") != request.get("rules_digest"):
+                raise Refused("FIREWALL_OPERATION_CONFLICT")
+            if value.get("state") == "CONFIRMED":
+                return "SUCCEEDED", "FIREWALL_ALREADY_CONFIRMED", {"state": "CONFIRMED"}
+            if value.get("state") != "ARMED":
+                raise Refused("FIREWALL_ROLLED_BACK")
+            if expired(value):
+                outcome, code = rollback_locked(descriptor, value)
+                if outcome != "SUCCEEDED":
+                    return outcome, code, {"state": value.get("state")}
+                raise Refused("FIREWALL_APPLICATION_EXPIRED")
+            if snapshot() != value.get("applied_table"):
+                rollback_locked(descriptor, value)
+                return "UNKNOWN_OUTCOME", "FIREWALL_EFFECT_UNVERIFIED", {"state": value["state"]}
+            value["state"] = "CONFIRMED"
+            value["confirmed_at"] = int(time.time())
+            write_journal(descriptor, value)
+            cancel_timer(value)
+            return "SUCCEEDED", "FIREWALL_CONFIRMED", {"state": "CONFIRMED"}
+        if operation == "rollback":
+            value = read_journal(descriptor, identifier)
+            if value is None:
+                return "SUCCEEDED", "FIREWALL_ALREADY_ROLLED_BACK", {"state": "ROLLED_BACK"}
+            outcome, code = rollback_locked(descriptor, value)
+            return outcome, code, {"state": value.get("state")}
+
+        policy = read_policy()
+        ssh_port = request["ssh_port"]
+        if ssh_port != policy["ssh_port"]:
+            raise Refused("FIREWALL_SSH_PORT_MISMATCH")
+        rules = validate_rules(request["rules"], ssh_port, policy["max_rules"])
+        digest = hashlib.sha256(canonical(rules).encode()).hexdigest()
+        if digest != request["rules_digest"]:
+            raise Refused("FIREWALL_RULES_INVALID")
+        value = read_journal(descriptor, identifier)
+        if value is not None:
+            if value.get("rules_digest") != digest:
+                raise Refused("FIREWALL_OPERATION_CONFLICT")
+            if value.get("state") in ("ARMED", "CONFIRMED"):
+                if value.get("state") == "ARMED" and expired(value):
+                    outcome, code = rollback_locked(descriptor, value)
+                    if outcome != "SUCCEEDED":
+                        return outcome, code, {"state": value.get("state")}
+                    raise Refused("FIREWALL_APPLICATION_EXPIRED")
+                return "SUCCEEDED", "FIREWALL_ALREADY_APPLIED", {
+                    "state": value.get("state"), "rules_digest": digest}
+            raise Refused("FIREWALL_OPERATION_TERMINAL")
+        other = other_armed(descriptor, identifier)
+        if other is not None:
+            raise Refused("FIREWALL_INCIDENT_OPEN")
+        previous = snapshot()
+        if baseline_digest(descriptor, previous) != request["previous_rules_digest"]:
+            raise Refused("FIREWALL_STALE_BASELINE")
+        now = int(time.time())
+        value = {"v": 1, "operation_id": identifier, "rules_digest": digest, "rules": rules,
+                 "ssh_port": ssh_port, "previous": previous, "state": "ARMED", "created_at": now,
+                 "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+                 "deadline_tick": int(time.clock_gettime(time.CLOCK_BOOTTIME)) + policy["rollback_seconds"],
+                 "timer": None}
+        write_journal(descriptor, value)
+        script = nft_script(rules, ssh_port)
+        try:
+            timer = arm_timer(identifier, policy["rollback_seconds"])
+            value["timer"] = timer
+            write_journal(descriptor, value)
+            apply_table(script)
+            verify_table(ssh_port)
+            value["applied_table"] = snapshot()
+        except (OSError, ValueError, subprocess.SubprocessError, Refused):
+            outcome, _ = rollback_locked(descriptor, value)
+            return ("UNKNOWN_OUTCOME" if outcome != "SUCCEEDED" else "DENIED",
+                    "FIREWALL_ROLLBACK_UNCONFIRMED" if outcome != "SUCCEEDED" else "FIREWALL_APPLY_FAILED",
+                    {"state": value["state"]})
+        value["applied_at"] = int(time.time())
+        try:
+            write_journal(descriptor, value)
+        except OSError:
+            return "UNKNOWN_OUTCOME", "FIREWALL_JOURNAL_UNCONFIRMED", {}
+        return "SUCCEEDED", "FIREWALL_APPLIED", {"state": "ARMED", "rules_digest": digest}
+    finally:
+        os.close(descriptor)
+
+
+def parse(data):
+    try:
+        value = json.loads(data, object_pairs_hook=unique_object)
+    except (ValueError, UnicodeError):
+        raise Refused("INVALID_REQUEST") from None
+    if not isinstance(value, dict):
+        raise Refused("INVALID_REQUEST")
+    operation = value.get("operation")
+    if not isinstance(operation, str):
+        raise Refused("INVALID_REQUEST")
+    expected = {"apply": {"operation", "operation_id", "rules_digest", "previous_rules_digest", "rules", "ssh_port"},
+                "confirm": {"operation", "operation_id", "rules_digest"},
+                "rollback": {"operation", "operation_id"},
+                "status": {"operation", "operation_id"}}.get(operation)
+    if expected is None or value.keys() != expected:
+        raise Refused("INVALID_REQUEST")
+    journal_name(value["operation_id"])
+    if operation in ("apply", "confirm"):
+        if not isinstance(value["rules_digest"], str) or re.fullmatch(DIGEST, value["rules_digest"]) is None:
+            raise Refused("INVALID_REQUEST")
+    if operation == "apply" and (type(value["ssh_port"]) is not int or not 1 <= value["ssh_port"] <= 65535):
+        raise Refused("INVALID_REQUEST")
+    if operation == "apply" and (not isinstance(value["previous_rules_digest"], str)
+                                  or re.fullmatch(DIGEST, value["previous_rules_digest"]) is None):
+        raise Refused("INVALID_REQUEST")
+    return value
+
+
+def internal_rollback(operation):
+    descriptor = open_journal()
+    try:
+        value = read_journal(descriptor, operation)
+        if value is None or value.get("state") in ("CONFIRMED", "ROLLED_BACK"):
+            return 0
+        outcome, _ = rollback_locked(descriptor, value)
+        return 0 if outcome == "SUCCEEDED" else 70
+    finally:
+        os.close(descriptor)
+
+
+def main():
+    if os.getuid() != 0 or os.geteuid() != 0:
+        return 65
+    if len(sys.argv) == 3 and sys.argv[1] == "--rollback":
+        try:
+            return internal_rollback(sys.argv[2])
+        except (OSError, ValueError, subprocess.SubprocessError, Refused):
+            return 70
+    if len(sys.argv) != 1:
+        return 65
+    signal.alarm(75)
+    try:
+        raw = sys.stdin.buffer.read(LIMIT + 1)
+        if not raw or len(raw) > LIMIT:
+            raise Refused("INVALID_REQUEST")
+        request = parse(raw)
+        outcome, code, extra = dispatch(request)
+    except Refused as error:
+        outcome, code, extra = "DENIED", str(error), {}
+    except (OSError, ValueError, subprocess.SubprocessError, RecursionError):
+        outcome, code, extra = "DENIED", "FIREWALL_PRECHECK_FAILED", {}
+    finally:
+        signal.alarm(0)
+    print(canonical({"outcome": outcome, "code": code, **extra}))
+    return {"SUCCEEDED": 0, "DENIED": 65, "UNKNOWN_OUTCOME": 70}[outcome]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

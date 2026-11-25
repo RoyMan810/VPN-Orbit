@@ -16,7 +16,7 @@ import time
 from unittest.mock import patch
 
 from tools import prepare_vps
-from tools.prepare_vps import SSH_PROFILE
+from vpn_orbit.runtime import vps_preparation as preparation
 from vpn_orbit.runtime.ssh_enrollment import verify_credentials
 
 REPO = Path(__file__).resolve().parents[2]
@@ -98,7 +98,7 @@ def setup_fixture(directory):
 
     # OpenSSH reads ForceCommand at startup.  Install the exact profile before
     # starting the fixture so the phase's identical write needs no fixture reload.
-    PROFILE.write_text(SSH_PROFILE)
+    PROFILE.write_text(preparation.SSH_PROFILE)
     PROFILE.chmod(0o644)
 
     host_key = LAB / "host"
@@ -166,8 +166,8 @@ def verify_existing_file_is_preserved(directory):
     content = b"existing fixture\n"
     path.write_bytes(content)
     preamble = "set -eu\numask 077\norbit_missing=0\n"
-    script = preamble + prepare_vps.install_file(path, content, "0644", "test-file")
-    readback = preamble + prepare_vps.install_file(path, content, "0644", "test-file", inspect=True)
+    script = preamble + preparation.install_file(path, content, "0644", "test-file")
+    readback = preamble + preparation.install_file(path, content, "0644", "test-file", inspect=True)
     env = {**os.environ, "work": str(scratch), "STATE": str(scratch)}
     for mode, accepted in ((0o640, False), (0o644, True)):
         path.chmod(mode)
@@ -183,12 +183,12 @@ def verify_existing_file_is_preserved(directory):
         expect(not (scratch / "created-test-file").exists(), "Existing file must not be marked for removal")
 
     managed = scratch / "created"
-    run(["/bin/sh", "-c", preamble + prepare_vps.install_file(managed, content, "0644", "test-file")], env=env)
+    run(["/bin/sh", "-c", preamble + preparation.install_file(managed, content, "0644", "test-file")], env=env)
     marker = scratch / "created-test-file"
     expect(marker.is_file(), "Installation must record the created file")
     marker_before = marker.read_bytes()
     marker.write_bytes(b"incorrect signature\n")
-    check_missing = preamble + prepare_vps.install_file(managed, content, "0644", "test-file", inspect=True)
+    check_missing = preamble + preparation.install_file(managed, content, "0644", "test-file", inspect=True)
     managed.unlink()
     checked = subprocess.run(["/bin/sh", "-c", check_missing], env=env, capture_output=True, text=True)
     expect(checked.returncode != 0 and not managed.exists() and marker.read_bytes() == b"incorrect signature\n",
@@ -196,8 +196,8 @@ def verify_existing_file_is_preserved(directory):
     marker.write_bytes(marker_before)
     run(["/bin/sh", "-c", check_missing + '\ntest "$orbit_missing" = 1'], env=env)
     expect(not managed.exists(), "Readback must leave a missing file untouched")
-    run(["/bin/sh", "-c", preamble + prepare_vps.install_file(managed, content, "0644", "test-file")], env=env)
-    remove = prepare_vps.CHECK_OWNED_FILE + f"owned_file {managed} test-file remove\n"
+    run(["/bin/sh", "-c", preamble + preparation.install_file(managed, content, "0644", "test-file")], env=env)
+    remove = preparation.CHECK_OWNED_FILE + f"owned_file {managed} test-file remove\n"
     managed.write_bytes(b"changed fixture\n")
     drift = subprocess.run(["/bin/sh", "-c", remove], env=env, capture_output=True, text=True)
     expect(drift.returncode != 0 and managed.read_bytes() == b"changed fixture\n",
@@ -217,33 +217,33 @@ def verify_cleanup_binding(directory):
     lock = os.open(pending, os.O_RDONLY | os.O_DIRECTORY)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with patch.object(prepare_vps, "REMOTE_STATE", pending):
-            script = "set -eu\numask 077\n" + prepare_vps._state_directory(key, inspect=True)
+        with patch.object(preparation, "REMOTE_STATE", pending):
+            script = "set -eu\numask 077\n" + preparation._state_directory(key, inspect=True)
             busy = subprocess.run(["/bin/sh", "-c", script], capture_output=True, text=True)
-        expect(busy.returncode == prepare_vps.REMOTE_BUSY and not list(pending.iterdir()),
+        expect(busy.returncode == preparation.REMOTE_BUSY and not list(pending.iterdir()),
                "Readback must report an outstanding remote command without changing state", busy)
     finally:
         os.close(lock)
     protected_file = directory / "managed-outside-this-preparation"
     protected_file.write_text("existing fixture\n")
-    with patch.multiple(prepare_vps, REMOTE_STATE=old_state, FIREWALL_AUTHORIZED=protected_file):
-        legacy = subprocess.run(["/bin/sh", "-c", prepare_vps.cleanup_script(key)], capture_output=True, text=True)
+    with patch.multiple(preparation, REMOTE_STATE=old_state, FIREWALL_AUTHORIZED=protected_file):
+        legacy = subprocess.run(["/bin/sh", "-c", preparation.cleanup_script(key)], capture_output=True, text=True)
         expect(legacy.returncode != 0 and protected_file.is_file(), "Legacy intent must not authorize file removal", legacy)
 
-    with patch.multiple(prepare_vps, REMOTE_STATE=directory / "missing-state", FIREWALL_AUTHORIZED=protected_file):
-        missing = subprocess.run(["/bin/sh", "-c", prepare_vps.cleanup_script(key)], capture_output=True, text=True)
+    with patch.multiple(preparation, REMOTE_STATE=directory / "missing-state", FIREWALL_AUTHORIZED=protected_file):
+        missing = subprocess.run(["/bin/sh", "-c", preparation.cleanup_script(key)], capture_output=True, text=True)
         expect(missing.returncode != 0 and protected_file.is_file(), "A missing journal must not confirm cleanup", missing)
 
     bound_state = directory / "bound-state"
     bound_state.mkdir(mode=0o700)
-    with patch.multiple(prepare_vps, REMOTE_STATE=bound_state, FIREWALL_AUTHORIZED=protected_file):
-        run(["/bin/sh", "-c", "set -eu\numask 077\n" + prepare_vps._state_directory(key, create=True)])
-        run(["/bin/sh", "-c", "set -eu\n" + prepare_vps._state_directory(key)])
-        mismatch = subprocess.run(["/bin/sh", "-c", prepare_vps.cleanup_script(b"different key")],
+    with patch.multiple(preparation, REMOTE_STATE=bound_state, FIREWALL_AUTHORIZED=protected_file):
+        run(["/bin/sh", "-c", "set -eu\numask 077\n" + preparation._state_directory(key, create=True)])
+        run(["/bin/sh", "-c", "set -eu\n" + preparation._state_directory(key)])
+        mismatch = subprocess.run(["/bin/sh", "-c", preparation.cleanup_script(b"different key")],
                                   capture_output=True, text=True)
         expect(mismatch.returncode != 0, "A different preparation must not own an existing journal", mismatch)
         (bound_state / "unrelated").write_text("existing fixture\n")
-        unknown = subprocess.run(["/bin/sh", "-c", prepare_vps.cleanup_script(key)], capture_output=True, text=True)
+        unknown = subprocess.run(["/bin/sh", "-c", preparation.cleanup_script(key)], capture_output=True, text=True)
         expect(unknown.returncode != 0 and (bound_state / "unrelated").is_file(),
                "Cleanup must preserve unrelated files in the journal", unknown)
 
@@ -291,6 +291,22 @@ def main():
         expect(subprocess.run(["getent", "passwd", SERVICE], capture_output=True).returncode != 0,
                "Readiness must not create the service account")
         expect(not Path("/var/lib/vpn-orbit-provision").exists(), "Readiness must leave no remote provisioning state")
+
+        run(["useradd", "--system", "--user-group", "--no-create-home", "--home-dir", "/nonexistent",
+             "--shell", "/bin/false", SERVICE])
+        try:
+            mismatch = verify_credentials(target, ADMIN, password=None, private_key=key.read_text(), preflight=True)
+            expect(mismatch["ssh"] == "OBSERVATION_ACCOUNT_CONFLICT",
+                   f"WebUI must report a conflicting existing account: {mismatch}")
+            cli_mismatch = provision(directory, key, fingerprint, check=True)
+            expect(cli_mismatch.returncode != 0 and "Conflicting provisioning account" in cli_mismatch.stderr,
+                   "CLI readiness must reject the same account", cli_mismatch)
+            expect(not Path(preparation.REMOTE_STATE).exists() and not (directory / "output").exists(),
+                   "Readiness must leave a conflicting VPS and local state untouched")
+            expect(output(["getent", "passwd", SERVICE]).endswith(":/nonexistent:/bin/false"),
+                   "Readiness must leave the conflicting account untouched")
+        finally:
+            run(["userdel", SERVICE])
 
         first = provision(directory, key, fingerprint,
                           fault="phase=account,when=after,kind=disconnect")
@@ -377,12 +393,12 @@ def main():
         provision(directory, key, fingerprint, cleanup=True)
         for path in NAMESPACES[:-1]:
             expect(not Path(path).exists(), f"Fixture artifact remains: {path}")
-        expect(PROFILE.read_text() == SSH_PROFILE, "Cleanup must preserve the pre-existing SSH profile")
+        expect(PROFILE.read_text() == preparation.SSH_PROFILE, "Cleanup must preserve the pre-existing SSH profile")
         expect(PROFILE.stat().st_ino == profile_before.st_ino and PROFILE.stat().st_mtime_ns == profile_before.st_mtime_ns,
                "Preparation and cleanup must preserve the existing SSH profile inode and contents")
         print(json.dumps({"status": "PASSED", "scenarios": [
             "disconnect-account", "retry-repair", "partial-helpers", "local-interruption",
-            "verify-rollback", "sudo-password", "admin-access-recovery", "cleanup"]}, sort_keys=True))
+            "verify-rollback", "sudo-password", "account-conflict", "admin-access-recovery", "cleanup"]}, sort_keys=True))
     finally:
         subprocess.run(["ip", "netns", "del", NAMESPACE], stderr=subprocess.DEVNULL)
         subprocess.run(["ip", "link", "del", "vpnprobe0"], stderr=subprocess.DEVNULL)

@@ -13,6 +13,7 @@ import unittest
 from unittest.mock import patch
 
 from tools import prepare_vps
+from vpn_orbit.runtime import vps_preparation as preparation
 
 
 class FakeRemote:
@@ -45,7 +46,7 @@ class FakeRemote:
             self.readbacks.append(phase)
             present = {"preflight": self.state, "account": self.account, "helpers": "ssh-gateway" in self.files,
                        "keys": "authorized" in self.files, "sudoers": "sudoers" in self.files, "sshd": "sshd" in self.files}
-            code = self.readback_errors.get(phase, 0 if present[phase] else prepare_vps.PHASE_INCOMPLETE)
+            code = self.readback_errors.get(phase, 0 if present[phase] else preparation.PHASE_INCOMPLETE)
             if code:
                 raise subprocess.CalledProcessError(code, ["ssh"])
             return
@@ -123,7 +124,7 @@ class PrepareVpsTests(unittest.TestCase):
             self.assertEqual(Path(path).read_text(), f"192.0.2.20 {host_key}\n")
             self.assertTrue(command[-1].startswith("/bin/sh -c "))
             self.assertIn("/usr/sbin/sshd -t", command[-1])
-            self.assertNotIn(prepare_vps.REMOTE_STATE, command[-1])
+            self.assertNotIn(preparation.REMOTE_STATE, command[-1])
             self.assertNotIn("useradd", command[-1])
 
         with (patch("sys.argv", argv), patch("builtins.print"),
@@ -136,7 +137,7 @@ class PrepareVpsTests(unittest.TestCase):
         state.assert_not_called()
 
     def test_platform_guard_requires_a_supported_release_on_amd64(self):
-        guard = prepare_vps._platform_guard().replace(". /etc/os-release", '. "$1"')
+        guard = preparation._platform_guard().replace(". /etc/os-release", '. "$1"')
         guard = 'test_arch=$2\ndpkg() { printf "%s\\n" "$test_arch"; }\n' + guard
         with tempfile.TemporaryDirectory() as directory:
             release = Path(directory) / "os-release"
@@ -185,7 +186,7 @@ class PrepareVpsTests(unittest.TestCase):
                       patch.object(prepare_vps.subprocess, "check_output", side_effect=[
                           f"[192.0.2.20]:2222 ssh-ed25519 {encoded}\n", '{"v":8,"uid":0}']) as reader):
                     prepare_vps.main()
-                self.assertEqual(runner.call_count, 1 + len(prepare_vps.PHASES))
+                self.assertEqual(runner.call_count, 1 + len(preparation.PHASES))
                 self.assertEqual(admin.call_count, 2)
                 self.assertNotEqual(admin.call_args_list[0].args[1], admin.call_args_list[1].args[1])
                 probe = reader.call_args.args[0]
@@ -196,15 +197,15 @@ class PrepareVpsTests(unittest.TestCase):
                 self.assertEqual(policy["port"], 2222)
                 state = json.loads((output / prepare_vps.STATE_FILE).read_text())
                 self.assertEqual(state["status"], "VERIFIED")
-                self.assertTrue(all(state["phases"][phase] == "DONE" for phase in prepare_vps.PHASES))
+                self.assertTrue(all(state["phases"][phase] == "DONE" for phase in preparation.PHASES))
 
     def test_generated_profile_is_valid_shell(self):
         for firewall_key in (None, b"ssh-ed25519 firewall\n"):
             context = {"probe_public_key": b"ssh-ed25519 test\n", "firewall_public_key": firewall_key,
                        "firewall": firewall_key is not None, "ssh_port": 22}
-            subprocess.run(["sh", "-n"], input=prepare_vps.provision(context["probe_public_key"], firewall_key),
+            subprocess.run(["sh", "-n"], input=preparation.provision(context["probe_public_key"], firewall_key),
                            text=True, check=True)
-            for phase, build in prepare_vps.PHASE_SCRIPTS.items():
+            for phase, build in preparation.PHASE_SCRIPTS.items():
                 with self.subTest(phase=phase, firewall=context["firewall"]):
                     subprocess.run(["sh", "-n"], input=build(context, inspect=True), text=True, check=True)
 
@@ -259,29 +260,29 @@ class PrepareVpsTests(unittest.TestCase):
     def test_every_phase_is_idempotent_and_cleanup_removes_all_artifacts(self):
         context = {"probe_public_key": b"ssh-ed25519 test\n", "firewall_public_key": None,
                    "firewall": False, "ssh_port": 22}
-        scripts = {phase: prepare_vps.PHASE_SCRIPTS[phase](context) for phase in prepare_vps.PHASES}
+        scripts = {phase: preparation.PHASE_SCRIPTS[phase](context) for phase in preparation.PHASES}
         for phase, script in scripts.items():
             with self.subTest(phase=phase):
                 subprocess.run(["sh", "-n"], input=script, text=True, check=True)
         self.assertIn("if ! id vpn-orbit-svc", scripts["account"])
         self.assertIn("sha256sum", scripts["helpers"])
         self.assertNotIn("sshd-config.previous", scripts["sshd"])
-        self.assertNotIn(prepare_vps.FIREWALL_POLICY, scripts["helpers"])
-        self.assertNotIn(prepare_vps.FIREWALL_AUTHORIZED, scripts["keys"])
-        self.assertNotIn(prepare_vps.FIREWALL_SUDOERS, scripts["sudoers"])
-        self.assertNotIn(prepare_vps.FIREWALL_ACCOUNT, prepare_vps.SSH_PROFILE)
-        cleanup = prepare_vps.cleanup_script(context["probe_public_key"])
+        self.assertNotIn(preparation.FIREWALL_POLICY, scripts["helpers"])
+        self.assertNotIn(preparation.FIREWALL_AUTHORIZED, scripts["keys"])
+        self.assertNotIn(preparation.FIREWALL_SUDOERS, scripts["sudoers"])
+        self.assertNotIn(preparation.FIREWALL_ACCOUNT, preparation.SSH_PROFILE)
+        cleanup = preparation.cleanup_script(context["probe_public_key"])
         subprocess.run(["sh", "-n"], input=cleanup, text=True, check=True)
-        for artifact in (prepare_vps.AUTHORIZED, prepare_vps.SUDOERS, prepare_vps.SSH_CONFIG,
-                         prepare_vps.PROBE_HOME, prepare_vps.REMOTE_STATE,
-                         prepare_vps.FIREWALL_AUTHORIZED,
-                         prepare_vps.FIREWALL_POLICY, prepare_vps.FIREWALL_HOME):
+        for artifact in (preparation.AUTHORIZED, preparation.SUDOERS, preparation.SSH_CONFIG,
+                         preparation.PROBE_HOME, preparation.REMOTE_STATE,
+                         preparation.FIREWALL_AUTHORIZED,
+                         preparation.FIREWALL_POLICY, preparation.FIREWALL_HOME):
             self.assertIn(artifact, cleanup)
         self.assertIn("account-created-$account", cleanup)
-        self.assertIn("created-probe-authorized", prepare_vps.PHASE_SCRIPTS["keys"](context))
-        self.assertIn("created-helper-ssh-gateway", prepare_vps.PHASE_SCRIPTS["helpers"](context))
-        self.assertIn("created-probe-sudoers", prepare_vps.PHASE_SCRIPTS["sudoers"](context))
-        self.assertIn("created-sshd-config", prepare_vps.PHASE_SCRIPTS["sshd"](context))
+        self.assertIn("created-probe-authorized", preparation.PHASE_SCRIPTS["keys"](context))
+        self.assertIn("created-helper-ssh-gateway", preparation.PHASE_SCRIPTS["helpers"](context))
+        self.assertIn("created-probe-sudoers", preparation.PHASE_SCRIPTS["sudoers"](context))
+        self.assertIn("created-sshd-config", preparation.PHASE_SCRIPTS["sshd"](context))
 
     def test_cleanup_journal_requires_exact_target_identity(self):
         journal = {
@@ -290,7 +291,7 @@ class PrepareVpsTests(unittest.TestCase):
             "port": 2222,
             "user": "admin",
             "fingerprint": "SHA256:" + "A" * 43,
-            "phases": {phase: "DONE" for phase in prepare_vps.PHASES},
+            "phases": {phase: "DONE" for phase in preparation.PHASES},
         }
         prepare_vps.cleanup_journal(
             journal, host="192.0.2.20", port=2222, user="admin",
@@ -313,19 +314,19 @@ class PrepareVpsTests(unittest.TestCase):
             )
 
     def test_cleanup_script_removes_only_owned_files_and_directories(self):
-        cleanup = prepare_vps.cleanup_script(b"ssh-ed25519 test\n")
+        cleanup = preparation.cleanup_script(b"ssh-ed25519 test\n")
         self.assertIn('for operation in check remove', cleanup)
         self.assertIn('probe-key.sha256', cleanup)
         self.assertIn("0:0:700", cleanup)
         self.assertNotIn("sshd-config.previous", cleanup)
-        self.assertNotIn(prepare_vps.FIREWALL_SUDOERS, cleanup)
+        self.assertNotIn(preparation.FIREWALL_SUDOERS, cleanup)
         self.assertNotIn('rm -rf -- "$STATE"', cleanup)
-        self.assertNotIn(f"rm -f -- {prepare_vps.AUTHORIZED} {prepare_vps.SUDOERS}", cleanup)
+        self.assertNotIn(f"rm -f -- {preparation.AUTHORIZED} {preparation.SUDOERS}", cleanup)
         self.assertIn("dir-libexec", cleanup)
 
     def test_failed_userdel_leaves_cleanup_unconfirmed(self):
         script = "id() { return 0; }; pkill() { return 0; }; userdel() { return 1; }; sleep() { return 0; }\n"
-        script += prepare_vps.REMOVE_ACCOUNT + 'remove_account fixture || exit 1\nprintf "cleanup completed\\n"\n'
+        script += preparation.REMOVE_ACCOUNT + 'remove_account fixture || exit 1\nprintf "cleanup completed\\n"\n'
         result = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
@@ -341,7 +342,7 @@ class PrepareVpsTests(unittest.TestCase):
                 "port": 2222,
                 "user": "admin",
                 "fingerprint": "SHA256:" + "A" * 43,
-                "phases": {phase: "DONE" for phase in prepare_vps.PHASES},
+                "phases": {phase: "DONE" for phase in preparation.PHASES},
                 "status": "VERIFIED",
                 "attempts": 1,
                 "created_at": 1,
@@ -381,7 +382,7 @@ class PrepareVpsTests(unittest.TestCase):
             self.assertEqual(remote.readbacks, ["account"])
             state = json.loads((output / prepare_vps.STATE_FILE).read_text())
             self.assertEqual(state["status"], "VERIFIED")
-            self.assertTrue(all(state["phases"][phase] == "DONE" for phase in prepare_vps.PHASES))
+            self.assertTrue(all(state["phases"][phase] == "DONE" for phase in preparation.PHASES))
 
     def test_managed_key_pair_rejects_symlinks_and_hardlinks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -406,7 +407,7 @@ class PrepareVpsTests(unittest.TestCase):
             directory = Path(tmp)
             state_path = directory / prepare_vps.STATE_FILE
             state = prepare_vps.State(state_path)
-            state.save({"version": 1, "phases": {phase: "PENDING" for phase in prepare_vps.PHASES}})
+            state.save({"version": 1, "phases": {phase: "PENDING" for phase in preparation.PHASES}})
             linked = directory / "state-hardlink"
             linked.hardlink_to(state_path)
             with self.assertRaisesRegex(ValueError, "not private"):
@@ -446,7 +447,7 @@ class PrepareVpsTests(unittest.TestCase):
             self.assertEqual(json.loads((output / prepare_vps.STATE_FILE).read_text())["status"], "VERIFIED")
 
     def test_retry_stops_when_readback_is_unavailable_or_conflicts(self):
-        for failure, error in ((255, "READBACK_UNAVAILABLE"), (prepare_vps.REMOTE_BUSY, "READBACK_UNAVAILABLE"),
+        for failure, error in ((255, "READBACK_UNAVAILABLE"), (preparation.REMOTE_BUSY, "READBACK_UNAVAILABLE"),
                                (1, "READBACK_CONFLICT")):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
                 remote = FakeRemote()
@@ -512,7 +513,7 @@ class PrepareVpsTests(unittest.TestCase):
             journal = provisioner.state.load()
             self.assertEqual(journal["error"], "SSH_ADMIN_ACCESS_UNCONFIRMED")
             self.assertEqual(journal["phases"]["verify"], "IN_PROGRESS")
-            self.assertTrue(all(journal["phases"][phase] == "DONE" for phase in prepare_vps.PHASES))
+            self.assertTrue(all(journal["phases"][phase] == "DONE" for phase in preparation.PHASES))
             calls = remote.calls.copy()
 
             remote.admin_available = True
@@ -578,20 +579,20 @@ class PrepareVpsTests(unittest.TestCase):
     def test_firewall_context_provisions_second_account_and_removes_its_keys(self):
         context = {"probe_public_key": b"ssh-ed25519 test\n", "firewall_public_key": b"ssh-ed25519 firewall\n",
                    "firewall": True, "ssh_port": 2222}
-        account = prepare_vps.PHASE_SCRIPTS["account"](context)
+        account = preparation.PHASE_SCRIPTS["account"](context)
         self.assertIn("id vpn-orbit-firewall", account)
-        self.assertIn(prepare_vps.FIREWALL_HOME, account)
-        keys = prepare_vps.PHASE_SCRIPTS["keys"](context)
-        self.assertIn(prepare_vps.FIREWALL_AUTHORIZED, keys)
+        self.assertIn(preparation.FIREWALL_HOME, account)
+        keys = preparation.PHASE_SCRIPTS["keys"](context)
+        self.assertIn(preparation.FIREWALL_AUTHORIZED, keys)
         payload = base64.b64decode(keys.split("printf %s ", 2)[2].split(" ", 1)[0])
         self.assertIn(b'command="/usr/local/libexec/vpn-orbit/firewall-gateway"', payload)
         self.assertIn(b"ssh-ed25519 firewall", payload)
-        sudoers = prepare_vps.PHASE_SCRIPTS["sudoers"](context)
+        sudoers = preparation.PHASE_SCRIPTS["sudoers"](context)
         rules = base64.b64decode(sudoers.split("printf %s ", 1)[1].split(" ", 1)[0]).decode()
         self.assertIn("vpn-orbit-firewall ALL=(root) NOPASSWD: /usr/local/libexec/vpn-orbit/firewall-apply", rules)
-        sshd = prepare_vps.PHASE_SCRIPTS["sshd"](context)
+        sshd = preparation.PHASE_SCRIPTS["sshd"](context)
         self.assertIn("firewall-gateway", sshd)
-        self.assertIn("Match User vpn-orbit-firewall", prepare_vps.FIREWALL_SSH_PROFILE)
+        self.assertIn("Match User vpn-orbit-firewall", preparation.FIREWALL_SSH_PROFILE)
         with tempfile.TemporaryDirectory() as tmp:
             remote = FakeRemote()
             provisioner, output = make_provisioner(Path(tmp), remote, firewall=True)
@@ -625,7 +626,7 @@ class PrepareVpsTests(unittest.TestCase):
                   patch.object(prepare_vps.subprocess, "check_output", side_effect=[
                       f"[192.0.2.20]:2222 ssh-ed25519 {encoded}\n", '{"v":8,"uid":0}'])):
                 prepare_vps.main()
-            self.assertEqual(runner.call_count, 2 + len(prepare_vps.PHASES))
+            self.assertEqual(runner.call_count, 2 + len(preparation.PHASES))
             self.assertEqual(admin.call_count, 2)
             policy = json.loads((output / "targets.json").read_text())["targets"][0]
             self.assertEqual(policy["capabilities"], ["host.probe", "firewall.apply"])
