@@ -2,6 +2,7 @@
 """Disposable-VM provisioning fault injection over a real SSH network namespace."""
 
 import argparse
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -159,13 +160,17 @@ def verify_existing_file_is_preserved(directory):
     path = scratch / "existing"
     content = b"existing fixture\n"
     path.write_bytes(content)
-    script = "set -eu\n" + prepare_vps.install_file(path, content, "0644", "test-file")
+    preamble = "set -eu\numask 077\norbit_missing=0\n"
+    script = preamble + prepare_vps.install_file(path, content, "0644", "test-file")
+    readback = preamble + prepare_vps.install_file(path, content, "0644", "test-file", inspect=True)
     env = {**os.environ, "work": str(scratch), "STATE": str(scratch)}
     for mode, accepted in ((0o640, False), (0o644, True)):
         path.chmod(mode)
         before = path.stat()
         result = subprocess.run(["/bin/sh", "-c", script], env=env, capture_output=True, text=True)
         expect((result.returncode == 0) == accepted, "Only matching protected metadata may be reused", result)
+        checked = subprocess.run(["/bin/sh", "-c", readback], env=env, capture_output=True, text=True)
+        expect((checked.returncode == 0) == accepted, "Readback must require the same protected metadata", checked)
         after = path.stat()
         expect((after.st_ino, after.st_mode, after.st_uid, after.st_gid, after.st_mtime_ns) ==
                (before.st_ino, before.st_mode, before.st_uid, before.st_gid, before.st_mtime_ns)
@@ -173,9 +178,20 @@ def verify_existing_file_is_preserved(directory):
         expect(not (scratch / "created-test-file").exists(), "Existing file must not be marked for removal")
 
     managed = scratch / "created"
-    run(["/bin/sh", "-c", "set -eu\n" + prepare_vps.install_file(managed, content, "0644", "test-file")], env=env)
+    run(["/bin/sh", "-c", preamble + prepare_vps.install_file(managed, content, "0644", "test-file")], env=env)
     marker = scratch / "created-test-file"
     expect(marker.is_file(), "Installation must record the created file")
+    marker_before = marker.read_bytes()
+    marker.write_bytes(b"incorrect signature\n")
+    check_missing = preamble + prepare_vps.install_file(managed, content, "0644", "test-file", inspect=True)
+    managed.unlink()
+    checked = subprocess.run(["/bin/sh", "-c", check_missing], env=env, capture_output=True, text=True)
+    expect(checked.returncode != 0 and not managed.exists() and marker.read_bytes() == b"incorrect signature\n",
+           "Readback must reject a missing file with an unexpected ownership marker", checked)
+    marker.write_bytes(marker_before)
+    run(["/bin/sh", "-c", check_missing + '\ntest "$orbit_missing" = 1'], env=env)
+    expect(not managed.exists(), "Readback must leave a missing file untouched")
+    run(["/bin/sh", "-c", preamble + prepare_vps.install_file(managed, content, "0644", "test-file")], env=env)
     remove = prepare_vps.CHECK_OWNED_FILE + f"owned_file {managed} test-file remove\n"
     managed.write_bytes(b"changed fixture\n")
     drift = subprocess.run(["/bin/sh", "-c", remove], env=env, capture_output=True, text=True)
@@ -191,6 +207,18 @@ def verify_cleanup_binding(directory):
     old_state.mkdir(mode=0o700)
     (old_state / "created-firewall-authorized").touch()
     key = b"ssh-ed25519 first fixture\n"
+    pending = directory / "locked-state"
+    pending.mkdir(0o700)
+    lock = os.open(pending, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with patch.object(prepare_vps, "REMOTE_STATE", pending):
+            script = "set -eu\numask 077\n" + prepare_vps._state_directory(key, inspect=True)
+            busy = subprocess.run(["/bin/sh", "-c", script], capture_output=True, text=True)
+        expect(busy.returncode == prepare_vps.REMOTE_BUSY and not list(pending.iterdir()),
+               "Readback must report an outstanding remote command without changing state", busy)
+    finally:
+        os.close(lock)
     protected_file = directory / "managed-outside-this-preparation"
     protected_file.write_text("existing fixture\n")
     with patch.multiple(prepare_vps, REMOTE_STATE=old_state, FIREWALL_AUTHORIZED=protected_file):
@@ -255,8 +283,8 @@ def main():
                f"Partial account must be durable: {first_state}")
         expect(subprocess.run(["getent", "passwd", SERVICE], capture_output=True).returncode == 0,
                "The fixture account should exist after the partial phase")
-        retry = provision(directory, key, fingerprint)
-        expect(retry.returncode == 0, "Retry after an account disconnect must repair", retry)
+        retry = provision(directory, key, fingerprint, fault="phase=account,when=before,kind=fail")
+        expect(retry.returncode == 0, "A confirmed account must not be created again after a disconnect", retry)
         expect(state(directory)["status"] == "VERIFIED", "Retry must verify the postcondition")
         result = probe(directory, key, fingerprint)
         observation = json.loads(result.stdout) if result.returncode == 0 else {}
@@ -272,18 +300,33 @@ def main():
         partial = provision(directory, key, fingerprint,
                             fault="phase=helpers,when=after,kind=fail")
         expect(partial.returncode != 0, "A helper failure must fail the run", partial)
-        expect((Path("/usr/local/libexec/vpn-orbit") / "ssh-gateway").exists(),
-               "The partially installed helper should be present")
-        repaired = provision(directory, key, fingerprint)
-        expect(repaired.returncode == 0, "Retry must repair a partial helper installation", repaired)
+        gateway = Path("/usr/local/libexec/vpn-orbit/ssh-gateway")
+        original = gateway.read_bytes()
+        changed = original + b"\n# changed lab fixture\n"
+        gateway.write_bytes(changed)
+        conflict = provision(directory, key, fingerprint)
+        expect(conflict.returncode != 0 and "READBACK_CONFLICT during helpers" in conflict.stderr,
+               "Changed helpers must stop preparation", conflict)
+        expect(gateway.read_bytes() == changed and state(directory)["phases"]["keys"] == "PENDING",
+               "A conflict must leave the file and the next phase untouched")
+        gateway.write_bytes(original)
+        repaired = provision(directory, key, fingerprint, fault="phase=helpers,when=before,kind=fail")
+        expect(repaired.returncode == 0, "Confirmed helpers must not be reinstalled", repaired)
         expect(state(directory)["status"] == "VERIFIED", "Helper retry must verify")
+        provision(directory, key, fingerprint, cleanup=True)
+
+        missing = provision(directory, key, fingerprint, fault="phase=helpers,when=before,kind=fail")
+        expect(missing.returncode != 0, "An interruption before installing helpers must fail the run", missing)
+        expect(not (Path("/usr/local/libexec/vpn-orbit") / "ssh-gateway").exists(), "Helpers must still be absent")
+        repaired = provision(directory, key, fingerprint)
+        expect(repaired.returncode == 0, "Readback must allow the installation of missing helpers", repaired)
         provision(directory, key, fingerprint, cleanup=True)
 
         interrupted = provision(directory, key, fingerprint,
                                 fault="phase=keys,when=after,kind=crash")
         expect(interrupted.returncode != 0, "A local interruption must fail the run", interrupted)
         expect(state(directory)["phases"]["keys"] == "IN_PROGRESS", "Key phase must remain resumable")
-        resumed = provision(directory, key, fingerprint)
+        resumed = provision(directory, key, fingerprint, fault="phase=keys,when=before,kind=fail")
         expect(resumed.returncode == 0, "Retry after a local interruption must succeed", resumed)
         provision(directory, key, fingerprint, cleanup=True)
 
