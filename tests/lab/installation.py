@@ -541,6 +541,10 @@ def main():
             raise RuntimeError("Controller wheel allows remote mutation")
         if any(name.startswith("tests/") for name in archive.namelist()):
             raise RuntimeError("Controller wheel contains repository test or lab code")
+        helpers = {"ssh-gateway", "typed-helper", "firewall-gateway", "firewall-apply", "firewall-rollback"}
+        expected = {"vpn_orbit/runtime/vps_preparation.py", *(f"vpn_orbit/runtime/vps_helpers/{name}" for name in helpers)}
+        if not expected <= set(archive.namelist()):
+            raise RuntimeError("Controller wheel is missing VPS preparation resources")
 
     base = [str(HOST_PYTHON), str(REPO / "deploy/installer.py"), "install", "--bundle", str(args.bundle),
             "--trust-key", str(args.trust_key), "--origin", ORIGIN,

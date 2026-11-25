@@ -1,0 +1,17 @@
+#!/usr/bin/python3 -I
+"""Host-local rollback entry point used by the independent safety timer."""
+
+import os
+import sys
+
+
+def main():
+    if os.getuid() != 0 or os.geteuid() != 0 or len(sys.argv) != 2:
+        return 65
+    os.execv("/usr/local/libexec/vpn-orbit/firewall-apply",
+             ["firewall-apply", "--rollback", sys.argv[1]])
+    return 70
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

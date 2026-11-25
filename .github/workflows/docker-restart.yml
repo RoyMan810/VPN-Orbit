@@ -5,6 +5,7 @@ on:
     paths: &restart_paths
       - .github/workflows/docker-restart.yml
       - remote/**
+      - vpn_orbit/runtime/vps_helpers/**
       - tests/lab/docker_discovery.py
       - tests/lab/docker_restart.py
       - tests/runtime/test_typed_docker_restart.py

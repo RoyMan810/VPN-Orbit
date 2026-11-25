@@ -1,0 +1,36 @@
+#!/usr/bin/python3 -I
+"""Forced command for the fixed VPN-Orbit observation capability."""
+import os
+import signal
+import subprocess
+import sys
+
+
+def main():
+    request = {
+        "vpn-orbit.v1.probe": b'{"operation":"probe","version":1}\n',
+        "vpn-orbit.v2.probe": b'{"operation":"probe","version":2}\n',
+        "vpn-orbit.v3.probe": b'{"operation":"probe","version":3}\n',
+        "vpn-orbit.v4.probe": b'{"operation":"probe","version":4}\n',
+        "vpn-orbit.v5.probe": b'{"operation":"probe","version":5}\n',
+        "vpn-orbit.v6.probe": b'{"operation":"probe","version":6}\n',
+        "vpn-orbit.v7.probe": b'{"operation":"probe","version":7}\n',
+        "vpn-orbit.v8.probe": b'{"operation":"probe","version":8}\n',
+        "vpn-orbit.v9.probe": b'{"operation":"probe","version":9}\n',
+    }.get(os.environ.get("SSH_ORIGINAL_COMMAND"))
+    if len(sys.argv) != 1 or request is None:
+        return 65
+    signal.alarm(5)
+    payload = sys.stdin.buffer.read(len(request) + 1)
+    signal.alarm(0)
+    if payload != request:
+        return 65
+    try:
+        return subprocess.run(["/usr/bin/sudo", "-n", "--", "/usr/local/libexec/vpn-orbit/typed-helper"],
+                              input=request, timeout=5, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}).returncode
+    except (OSError, subprocess.SubprocessError):
+        return 70
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

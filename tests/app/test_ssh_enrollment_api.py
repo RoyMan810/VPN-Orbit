@@ -10,6 +10,7 @@ from vpn_orbit.config import Settings
 from vpn_orbit.database import identifier
 from vpn_orbit.runtime.policy import Policy
 from vpn_orbit.runtime.ssh_enrollment import PREFLIGHT_COMMAND, PREFLIGHT_SUDO_COMMAND, SUDO_MARKER
+from vpn_orbit.runtime.vps_preparation import ACCOUNT_CONFLICT
 from .test_auth_api import Fixture, ORIGIN, OTHER, SCOPE
 
 
@@ -28,6 +29,7 @@ class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
         self.dials, self.auth_methods, self.sessions = [], [], []
         self.output = b"VPN_ORBIT_PREFLIGHT_V1 DEBIAN_13 VERIFIED\n"
         self.sudo_output = None
+        self.sudo_status = 0
         self.stderr = b""
         fixture = self
 
@@ -57,7 +59,7 @@ class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
                 return
             process.stdout.write(output)
             process.stderr.write(fixture.stderr)
-            process.exit(0)
+            process.exit(fixture.sudo_status if process.command == PREFLIGHT_SUDO_COMMAND else 0)
 
         server = await asyncssh.listen("127.0.0.1", 0, server_factory=Server, server_host_keys=[host],
                                        process_factory=process_factory, encoding=None)
@@ -182,6 +184,19 @@ class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result.status_code, 502, result.text)
                 self.assertEqual(result.json()["code"], "SSH_PREFLIGHT_UNAVAILABLE")
                 self.assertNotIn("remote-canary", result.text)
+        self.assertEqual(self.client.get("/api/v1/resources").json()["items"], [])
+
+    async def test_preflight_reports_a_conflicting_observation_account_without_registration(self):
+        self.output = b"VPN_ORBIT_PREFLIGHT_V1 DEBIAN_13 OBSERVATION_ACCOUNT_CONFLICT\n"
+        direct = await self.enroll(preflight=True, password=PASSWORD)
+        self.assertEqual(direct.json(), {"platform": "DEBIAN_13", "ssh": "OBSERVATION_ACCOUNT_CONFLICT"})
+        self.assertEqual(self.sessions, [(PREFLIGHT_COMMAND, b"")])
+
+        self.output = b"VPN_ORBIT_PREFLIGHT_V1 DEBIAN_13 SUDO_OR_SSHD_UNVERIFIED\n"
+        self.sudo_output = b""
+        self.sudo_status = ACCOUNT_CONFLICT
+        elevated = await self.enroll(preflight=True, password=PASSWORD)
+        self.assertEqual(elevated.json(), direct.json())
         self.assertEqual(self.client.get("/api/v1/resources").json()["items"], [])
 
     async def test_preflight_times_out_a_session_that_never_replies(self):

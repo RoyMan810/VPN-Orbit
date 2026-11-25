@@ -9,27 +9,39 @@ import asyncssh
 
 from ..errors import Denied
 from .ssh import bounded_read
+from .vps_preparation import ACCOUNT_CONFLICT, check_account_conflicts
 
 
-CHECK_SSHD = 'exec </dev/null; test "$(/usr/bin/id -u)" = 0 && /usr/sbin/sshd -t >/dev/null 2>&1'
+CHECK_SSHD = """exec </dev/null
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+test "$(/usr/bin/id -u)" = 0 || exit 1
+/usr/sbin/sshd -t >/dev/null 2>&1 || exit 1
+""" + check_account_conflicts()
 SUDO_COMMAND = ("/usr/bin/sudo", "-k")
 SUDO_VERIFY = shlex.join(SUDO_COMMAND + ("-n", "--", "/bin/sh", "-c", CHECK_SSHD))
+ROOT_VERIFY = shlex.join(("/bin/sh", "-c", CHECK_SSHD))
 SUDO_MARKER = b"VPN_ORBIT_SUDO_V1\n"
 PREFLIGHT_SUDO_COMMAND = "exec " + shlex.join(SUDO_COMMAND + (
-    "-S", "-p", "", "--", "/bin/sh", "-c", CHECK_SSHD + " && printf %s " + shlex.quote(SUDO_MARKER.decode("ascii")),
+    "-S", "-p", "", "--", "/bin/sh", "-c", CHECK_SSHD + "printf %s " + shlex.quote(SUDO_MARKER.decode("ascii")),
 ))
 PREFLIGHT_COMMAND = shlex.join(("/bin/sh", "-c", "set -eu\nPATH=/usr/sbin:/usr/bin:/sbin:/bin\n" +
     Path(__file__).with_name("vps-platform.sh").read_text(encoding="ascii") + f"""
 if [ ! -d /etc/ssh/sshd_config.d ] || [ ! -x /usr/sbin/sshd ] ||
-   [ ! -x /usr/bin/sudo ] || [ ! -x /usr/sbin/visudo ]; then
+   [ ! -x /usr/bin/sudo ] || [ ! -x /usr/sbin/visudo ] || ! command -v flock >/dev/null; then
     orbit_ssh=DEPENDENCIES_MISSING
-elif [ "$(id -u)" = 0 ]; then
-    orbit_ssh=SSHD_INVALID
-    if /usr/sbin/sshd -t >/dev/null 2>&1; then orbit_ssh=VERIFIED; fi
-else
+elif [ "$(id -u)" != 0 ]; then
     orbit_ssh=SUDO_OR_SSHD_UNVERIFIED
     if {SUDO_VERIFY} >/dev/null 2>&1; then
         orbit_ssh=VERIFIED
+    elif [ "$?" = {ACCOUNT_CONFLICT} ]; then
+        orbit_ssh=OBSERVATION_ACCOUNT_CONFLICT
+    fi
+else
+    orbit_ssh=SSHD_INVALID
+    if {ROOT_VERIFY} >/dev/null 2>&1; then
+        orbit_ssh=VERIFIED
+    elif [ "$?" = {ACCOUNT_CONFLICT} ]; then
+        orbit_ssh=OBSERVATION_ACCOUNT_CONFLICT
     fi
 fi
 printf 'VPN_ORBIT_PREFLIGHT_V1 %s %s\\n' "$orbit_platform" "$orbit_ssh"
@@ -57,7 +69,8 @@ async def inspect_readiness(connection):
         raise Denied("SSH_PREFLIGHT_UNAVAILABLE", 502) from None
     if (status != 0 or marker != "VPN_ORBIT_PREFLIGHT_V1" or not output.endswith(b"\n")
             or platform not in ("UBUNTU_24_04", "UBUNTU_26_04", "DEBIAN_13", "UNSUPPORTED")
-            or ssh not in ("VERIFIED", "DEPENDENCIES_MISSING", "SSHD_INVALID", "SUDO_OR_SSHD_UNVERIFIED")):
+            or ssh not in ("VERIFIED", "DEPENDENCIES_MISSING", "SSHD_INVALID", "SUDO_OR_SSHD_UNVERIFIED",
+                           "OBSERVATION_ACCOUNT_CONFLICT")):
         raise Denied("SSH_PREFLIGHT_UNAVAILABLE", 502)
     return {"platform": platform, "ssh": ssh}
 
@@ -114,6 +127,8 @@ def verify_credentials(target, username, *, password, private_key, preflight=Fal
                             )
                             if status == 0 and reply == SUDO_MARKER:
                                 readiness["ssh"] = "VERIFIED"
+                            elif status == ACCOUNT_CONFLICT and not reply:
+                                readiness["ssh"] = "OBSERVATION_ACCOUNT_CONFLICT"
                             elif status != 1 or reply:
                                 raise Denied("SSH_PREFLIGHT_UNAVAILABLE", 502)
                         return readiness
