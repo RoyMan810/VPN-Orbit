@@ -535,6 +535,40 @@ test('shows imported Docker state and labels it historical when the sample expir
   await expect(detail.getByText('Historical container observation.', { exact: true })).toBeVisible()
 })
 
+test('shows verified Compose services per project from the selected VPS observation', async ({ page }) => {
+  const policyErrors: string[] = []
+  page.on('console', message => {
+    if (message.type() === 'error' && message.text().includes('Content Security Policy')) {
+      policyErrors.push(message.text())
+    }
+  })
+  await page.clock.install()
+  await signIn(page)
+  const mutations: string[] = []
+  page.on('request', request => {
+    if (new URL(request.url()).pathname.startsWith('/api/') && request.method() !== 'GET') {
+      mutations.push(request.url())
+    }
+  })
+  const projects = page.getByRole('region', { name: 'Compose projects' })
+  await expect(projects.getByRole('row')).toHaveCount(3)
+  await expect(projects.getByRole('row', { name: 'fixture web, worker' })).toBeVisible()
+  await expect(projects.getByRole('row', { name: 'another-project web' })).toBeVisible()
+  await expect(projects.getByText('unverified-project')).toHaveCount(0)
+  await expect(projects.getByText('missing')).toHaveCount(0)
+  await page.getByLabel('Language').selectOption('ru')
+  await page.getByLabel('Тема').selectOption('dark')
+  await expect(page.locator('html')).toHaveAttribute('data-mantine-color-scheme', 'dark')
+  const russianProjects = page.getByRole('region', { name: 'Проекты Compose' })
+  await expect(russianProjects.getByRole('columnheader', { name: 'Обнаруженные сервисы' })).toBeVisible()
+  await page.clock.fastForward(301_000)
+  await expect(russianProjects.getByText('Эти наблюдения проектов устарели.')).toBeVisible()
+  await page.getByRole('button', { name: new RegExp(stale) }).click()
+  await expect(russianProjects).toHaveCount(0)
+  expect(mutations).toEqual([])
+  expect(policyErrors).toEqual([])
+})
+
 test('shows Docker host bindings, unavailable data and historical observations in both languages', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 844 })
   await page.clock.install()
@@ -550,9 +584,12 @@ test('shows Docker host bindings, unavailable data and historical observations i
   await expect(worker.getByText('No published host ports', { exact: true })).toBeVisible()
   await expect(missing.getByText('Port bindings unavailable', { exact: true })).toBeVisible()
   await page.getByLabel('Language').selectOption('ru')
-  await expect(page.getByText('Опубликованные порты хоста', { exact: true }).first()).toBeVisible()
-  await expect(page.getByText('Нет опубликованных портов хоста', { exact: true })).toBeVisible()
-  await expect(page.getByText('Данные о привязках портов недоступны', { exact: true })).toBeVisible()
+  const russianDetail = page.getByRole('region', { name: copy.ru.detail })
+  await expect(russianDetail.getByText('Опубликованные порты хоста', { exact: true }).first()).toBeVisible()
+  await expect(russianDetail.getByRole('listitem').filter({ hasText: 'fixture / worker' })
+    .getByText('Нет опубликованных портов хоста', { exact: true })).toBeVisible()
+  await expect(russianDetail.getByRole('listitem').filter({ hasText: 'fixture / missing' })
+    .getByText('Данные о привязках портов недоступны', { exact: true })).toBeVisible()
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320)
   await page.clock.fastForward(301_000)
   await expect(page.getByText('Историческое наблюдение контейнеров.', { exact: true })).toBeVisible()
@@ -614,7 +651,7 @@ test('treats the missing Docker v3 port field as unavailable', async ({ page }) 
   })
   await signIn(page)
   const detail = page.getByRole('region', { name: 'VPS details' })
-  await expect(detail.getByText('Port bindings unavailable', { exact: true })).toHaveCount(3)
+  await expect(detail.getByText('Port bindings unavailable', { exact: true })).toHaveCount(5)
   await expect(detail.getByText('No published host ports', { exact: true })).toHaveCount(0)
 })
 

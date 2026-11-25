@@ -62,6 +62,10 @@ def fixture(directory):
                  "published_ports": []},
                 {"id": "c" * 64, "project": "fixture", "service": "missing", "state": "NOT_FOUND",
                  "published_ports": None},
+                {"id": "d" * 64, "project": "another-project", "service": "web", "state": "EXITED",
+                 "published_ports": []},
+                {"id": "e" * 64, "project": "unverified-project", "service": "web", "state": "UNKNOWN",
+                 "published_ports": None},
             ]}
         queue.finish(claim, "SUCCEEDED", "PROBE_VERIFIED", result=result)
 

@@ -1,6 +1,8 @@
 import { useCallback, useContext, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { createRoot } from 'react-dom/client'
+import { MantineProvider } from '@mantine/core'
+import { useMediaQuery } from '@mantine/hooks'
 import { apiErrorDetails, hasApiStatus, observationState, request } from './api'
 import type { InventoryPage, Presence, Resource, Session, Status } from './api'
 import { copy } from './copy'
@@ -13,6 +15,9 @@ import { readRestartHash, restartHash, RestartTimeline } from './restart-timelin
 import { TimeZone } from './time-zone'
 import { FirewallPlan } from './firewall-plan'
 import { ApplicationPlan } from './application-plan'
+import { ComposeInventory } from './compose-inventory'
+import '@mantine/core/styles/default-css-variables.layer.css'
+import '@mantine/core/styles/Table.layer.css'
 import './style.css'
 
 type Theme = 'system' | 'light' | 'dark'
@@ -223,6 +228,7 @@ function Detail({ resource, t, lang, now, expired, session }: {
         </dl>
       </> : <p>{t.noSoftware}</p>}
     </div>}
+    {docker?.status === 'OBSERVED' && <ComposeInventory docker={docker} historical={current.status !== 'REACHABLE'} t={t}/>}
     {docker && <div className="software">
       <h3>{t.dockerHeading}</h3>
       <p>{current.status === 'REACHABLE' ? t.dockerScope : t.dockerHistorical}</p>
@@ -388,6 +394,8 @@ function App() {
     const stored = preference('vpn-orbit.theme')
     return stored === 'light' || stored === 'dark' ? stored : 'system'
   })
+  const systemDark = useMediaQuery('(prefers-color-scheme: dark)')
+  const colorScheme = theme === 'system' ? (systemDark ? 'dark' : 'light') : theme
   const [session, setSession] = useState<Session | null>(null)
   const [restoring, setRestoring] = useState(true)
   const [sessionError, setSessionError] = useState<unknown>(null)
@@ -453,7 +461,8 @@ function App() {
     }
   }
 
-  return <TimeZone.Provider value={timeZone}>
+  return <MantineProvider withCssVariables={false} withGlobalClasses={false} forceColorScheme={colorScheme}>
+    <TimeZone.Provider value={timeZone}>
     <a className="skip" href="#main" onClick={event => {
       event.preventDefault()
       document.getElementById('main')?.focus()
@@ -516,7 +525,8 @@ function App() {
           <button onClick={() => setRetry(value => value + 1)}>{t.retry}</button>
         </div> : <Login t={t} onLogin={setSession}/>}
     </main>
-  </TimeZone.Provider>
+    </TimeZone.Provider>
+  </MantineProvider>
 }
 
 createRoot(document.getElementById('root')!).render(<App/>)
