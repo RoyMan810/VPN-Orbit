@@ -80,6 +80,46 @@ class PrepareVpsTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "fingerprint mismatch"):
                 prepare_vps.identify_host("192.0.2.20", 22, "SHA256:" + "A" * 43)
 
+    def test_check_uses_pinned_root_ssh_without_provisioning(self):
+        host_key = "ssh-ed25519 fixture"
+        fingerprint = "SHA256:" + "A" * 43
+        argv = ["prepare_vps.py", "--host", "192.0.2.20", "--user", "root", "--fingerprint", fingerprint, "--check"]
+
+        def run(command, **kwargs):
+            self.assertEqual(command[0], "ssh")
+            self.assertIn("StrictHostKeyChecking=yes", command)
+            self.assertIn("root@192.0.2.20", command)
+            path = next(arg.split("=", 1)[1] for arg in command if arg.startswith("UserKnownHostsFile="))
+            self.assertEqual(Path(path).read_text(), f"192.0.2.20 {host_key}\n")
+            self.assertTrue(command[-1].startswith("/bin/sh -c "))
+            self.assertIn("/usr/sbin/sshd -t", command[-1])
+            self.assertNotIn(prepare_vps.REMOTE_STATE, command[-1])
+            self.assertNotIn("useradd", command[-1])
+
+        with (patch("sys.argv", argv), patch("builtins.print"),
+              patch.object(prepare_vps, "identify_host", return_value=host_key) as identify,
+              patch.object(prepare_vps.subprocess, "run", side_effect=run) as runner,
+              patch.object(prepare_vps, "State") as state):
+            prepare_vps.main()
+        identify.assert_called_once_with("192.0.2.20", 22, fingerprint)
+        runner.assert_called_once()
+        state.assert_not_called()
+
+    def test_platform_guard_requires_a_supported_release_on_amd64(self):
+        guard = prepare_vps._platform_guard().replace(". /etc/os-release", '. "$1"')
+        guard = 'test_arch=$2\ndpkg() { printf "%s\\n" "$test_arch"; }\n' + guard
+        with tempfile.TemporaryDirectory() as directory:
+            release = Path(directory) / "os-release"
+            for distro, version, arch, supported in (
+                ("ubuntu", "24.04", "amd64", True), ("ubuntu", "26.04", "amd64", True),
+                ("debian", "13", "amd64", True), ("debian", "12", "amd64", False),
+                ("ubuntu", "24.04", "arm64", False), ("other", "13", "amd64", False),
+            ):
+                with self.subTest(distro=distro, version=version, arch=arch):
+                    release.write_text(f"ID={distro}\nVERSION_ID={version}\n")
+                    result = subprocess.run(["sh", "-c", guard, "platform", release, arch], capture_output=True)
+                    self.assertEqual(result.returncode == 0, supported, result.stderr)
+
     def test_both_login_methods_use_the_pin_and_generate_a_separate_probe_key(self):
         blob = b"test host key"
         encoded = base64.b64encode(blob).decode()

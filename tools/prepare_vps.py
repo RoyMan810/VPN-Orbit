@@ -1,4 +1,4 @@
-"""Prepare an Ubuntu VPS for VPN-Orbit with resumable, fault-tolerant phases.
+"""Prepare an Ubuntu or Debian VPS with resumable, fault-tolerant phases.
 
 The remote side is changed only through small, idempotent phases.  A durable
 local journal records the last completed phase, so an SSH disconnect, a failed
@@ -108,12 +108,20 @@ fi
             f'install -o root -g root -m {mode} "$work/file" {path}')
 
 
-def _preamble():
-    return f"""set -eu
+def _platform_guard():
+    return """set -eu
 umask 077
 . /etc/os-release
-test "$ID" = ubuntu
-test "$VERSION_ID" = 24.04
+case "${ID:-}:${VERSION_ID:-}" in
+    ubuntu:24.04|ubuntu:26.04|debian:13) ;;
+    *) printf '%s\\n' 'Use Ubuntu 24.04/26.04 or Debian 13.' >&2; exit 1 ;;
+esac
+test "$(dpkg --print-architecture)" = amd64
+"""
+
+
+def _state_directory():
+    return f"""\
 STATE={REMOTE_STATE}
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
     test -d "$STATE" && test ! -L "$STATE" && test "$(stat -c %u "$STATE")" = 0
@@ -123,6 +131,10 @@ fi
 """
 
 
+def _preamble():
+    return _platform_guard() + _state_directory()
+
+
 def _accounts(ctx):
     values = [(PROBE_ACCOUNT, PROBE_HOME)]
     if ctx["firewall"]:
@@ -130,7 +142,7 @@ def _accounts(ctx):
     return values
 
 
-def _phase_preflight(ctx):
+def _check_remote(ctx):
     checks = []
     for account, home in _accounts(ctx):
         checks.append(f"""if getent passwd {account} >/dev/null 2>&1; then
@@ -138,11 +150,17 @@ def _phase_preflight(ctx):
     test "$(passwd -S {account} | cut -d' ' -f2)" = L
     test "$(id -Gn {account})" = {account}
 fi""")
-    return _preamble() + f"""test "$(dpkg --print-architecture)" = amd64
-test -d /etc/ssh/sshd_config.d
+    return _platform_guard() + f"""test -d /etc/ssh/sshd_config.d
 test -x /usr/sbin/sshd
+test -x /usr/bin/sudo
+test -x /usr/sbin/visudo
 /usr/sbin/sshd -t
 {chr(10).join(checks)}
+"""
+
+
+def _phase_preflight(ctx):
+    return _check_remote(ctx) + _state_directory() + f"""\
 if [ ! -f "$STATE/preflight-done" ]; then
     if [ -e {SSH_CONFIG} ] || [ -L {SSH_CONFIG} ]; then
         test -f {SSH_CONFIG} && test ! -L {SSH_CONFIG}
@@ -537,7 +555,8 @@ def build_transport(ip, port, identity, user, host_key):
         auth = ["-i", str(identity), "-o", "IdentitiesOnly=yes", "-o", "PreferredAuthentications=publickey"]
 
     def run_remote(script):
-        remote = shlex.join(["sudo", "--", "/bin/sh", "-c", script, "vpn-orbit-provision"]) + ' "${SSH_CONNECTION%% *}"'
+        shell = ["/bin/sh", "-c", script, "vpn-orbit-provision"]
+        remote = shlex.join(shell if user == "root" else ["sudo", "--", *shell]) + ' "${SSH_CONNECTION%% *}"'
         subprocess.run([*base, "-T", *auth, f"{user}@{ip}", remote], check=True)
 
     def cleanup():
@@ -568,12 +587,14 @@ def make_probe(ip, port, key, known_hosts_path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", required=True, type=ipaddress.ip_address, help="Numeric VPS IP")
-    parser.add_argument("--user", required=True, help="Existing SSH administrator with sudo")
+    parser.add_argument("--user", required=True, help="Existing SSH administrator (root or sudo)")
     parser.add_argument("--port", default=22, type=int)
     parser.add_argument("--fingerprint", required=True, help="Ed25519 SHA256 fingerprint from the VPS console")
     parser.add_argument("--identity", type=Path, help="Administrator's SSH private key. Omit for an interactive password.")
-    parser.add_argument("--output", required=True, type=Path, help="Private directory for the managed key and Controller policy")
-    parser.add_argument("--cleanup", action="store_true", help="Remove remote and local provisioning artifacts, then exit")
+    parser.add_argument("--output", type=Path, help="Private directory for the managed key and Controller policy")
+    operation = parser.add_mutually_exclusive_group()
+    operation.add_argument("--check", action="store_true", help="Check host readiness without preparing it")
+    operation.add_argument("--cleanup", action="store_true", help="Remove remote and local provisioning artifacts, then exit")
     parser.add_argument("--cleanup-on-failure", action="store_true", help="Roll back when postcondition verification fails")
     parser.add_argument("--firewall", action="store_true",
                         help="Also provision the dedicated typed firewall account, key and capability")
@@ -585,9 +606,22 @@ def main():
         parser.error("Provide a non-loopback IPv4 address, SSH port, administrator and Ed25519 fingerprint")
     if args.identity is not None and not args.identity.is_file():
         parser.error("Administrator identity file does not exist")
+    if args.check and (args.output is not None or args.cleanup_on_failure):
+        parser.error("--check does not use --output or --cleanup-on-failure")
+    if not args.check and args.output is None:
+        parser.error("--output is required for preparation or cleanup")
     ip = str(args.host)
     os.umask(0o077)
     try:
+        if args.check:
+            host_key = identify_host(ip, args.port, args.fingerprint)
+            run_remote, cleanup_transport, _, _ = build_transport(ip, args.port, args.identity, args.user, host_key)
+            try:
+                run_remote(_check_remote({"firewall": args.firewall}))
+            finally:
+                cleanup_transport()
+            print("VPS passed the OS, package, SSH configuration and account checks for preparation.")
+            return
         fault = fault_spec()
         if args.output.exists():
             output_stat = args.output.lstat()

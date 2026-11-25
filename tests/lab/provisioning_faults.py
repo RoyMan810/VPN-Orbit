@@ -120,12 +120,13 @@ def setup_fixture(directory):
     return key, fingerprint
 
 
-def provision(directory, key, fingerprint, *, fault=None, cleanup_on_failure=False, cleanup=False):
+def provision(directory, key, fingerprint, *, fault=None, cleanup_on_failure=False, cleanup=False, check=False):
     environment = os.environ.copy()
     if fault:
         environment["VPN_ORBIT_PROVISION_FAULT"] = fault
     argv = [sys.executable, str(PREPARE), "--host", ADDRESS, "--port", str(PORT), "--user", ADMIN,
-            "--identity", str(key), "--fingerprint", fingerprint, "--output", str(directory / "output")]
+            "--identity", str(key), "--fingerprint", fingerprint]
+    argv += ["--check"] if check else ["--output", str(directory / "output")]
     if cleanup_on_failure:
         argv.append("--cleanup-on-failure")
     if cleanup:
@@ -166,6 +167,13 @@ def main():
     directory = Path(tempfile.mkdtemp(prefix="vpn-orbit-provision-lab-"))
     try:
         key, fingerprint = setup_fixture(directory)
+
+        readiness = provision(directory, key, fingerprint, check=True)
+        expect(readiness.returncode == 0, "Readiness must pass over the pinned administrator SSH connection", readiness)
+        expect(not (directory / "output").exists(), "Readiness must leave no provisioning state")
+        expect(subprocess.run(["getent", "passwd", SERVICE], capture_output=True).returncode != 0,
+               "Readiness must not create the service account")
+        expect(not Path("/var/lib/vpn-orbit-provision").exists(), "Readiness must leave no remote provisioning state")
 
         first = provision(directory, key, fingerprint,
                           fault="phase=account,when=after,kind=disconnect")
