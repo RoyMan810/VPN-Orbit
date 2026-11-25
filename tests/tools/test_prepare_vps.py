@@ -324,6 +324,13 @@ class PrepareVpsTests(unittest.TestCase):
         self.assertNotIn(f"rm -f -- {preparation.AUTHORIZED} {preparation.SUDOERS}", cleanup)
         self.assertIn("dir-libexec", cleanup)
 
+    def test_unavailable_account_lookup_is_not_an_empty_lookup(self):
+        for lookup, expected in ((2, 0), (3, 1), (127, 1)):
+            with self.subTest(lookup=lookup):
+                script = f"getent() {{ return {lookup}; }}\n" + preparation.check_account_conflicts()
+                result = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+                self.assertEqual(result.returncode, expected)
+
     def test_failed_userdel_leaves_cleanup_unconfirmed(self):
         script = "id() { return 0; }; pkill() { return 0; }; userdel() { return 1; }; sleep() { return 0; }\n"
         script += preparation.REMOVE_ACCOUNT + 'remove_account fixture || exit 1\nprintf "cleanup completed\\n"\n'

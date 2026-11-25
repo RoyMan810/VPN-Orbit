@@ -242,6 +242,29 @@ def verify_cleanup_binding(directory):
         mismatch = subprocess.run(["/bin/sh", "-c", preparation.cleanup_script(b"different key")],
                                   capture_output=True, text=True)
         expect(mismatch.returncode != 0, "A different preparation must not own an existing journal", mismatch)
+        account_marker = bound_state / f"account-created-{SERVICE}"
+        account_marker.write_text("408\n")
+        account_marker.chmod(0o600)
+        fake_account = f"""
+id() {{
+    case "$1" in
+        -u) printf '%s\\n' 408 ;;
+        -Gn) printf '%s\\n' {SERVICE} ;;
+    esac
+}}
+getent() {{ printf '%s\\n' '{SERVICE}:x:408:408::/changed-home:/bin/sh'; }}
+passwd() {{ printf '%s\\n' '{SERVICE} L'; }}
+pkill() {{ printf '%s\\n' unexpected-pkill; }}
+userdel() {{ printf '%s\\n' unexpected-userdel; }}
+"""
+        isolated_cleanup = preparation.cleanup_script(key)
+        for path in ("/etc", "/usr/local", "/var/lib"):
+            isolated_cleanup = isolated_cleanup.replace(path, str(directory) + path)
+        conflict = subprocess.run(["/bin/sh", "-c", fake_account + isolated_cleanup],
+                                  capture_output=True, text=True)
+        expect(conflict.returncode == preparation.ACCOUNT_CONFLICT and not conflict.stdout
+               and account_marker.read_text() == "408\n", "Cleanup must stop before deleting a conflicting account", conflict)
+        account_marker.unlink()
         (bound_state / "unrelated").write_text("existing fixture\n")
         unknown = subprocess.run(["/bin/sh", "-c", preparation.cleanup_script(key)], capture_output=True, text=True)
         expect(unknown.returncode != 0 and (bound_state / "unrelated").is_file(),

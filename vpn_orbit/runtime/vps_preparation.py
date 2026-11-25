@@ -179,11 +179,13 @@ def _accounts(ctx):
 
 
 def _account_checks(account, home):
-    return f'''uid=$(id -u "{account}") &&
-test "$uid" -gt 0 &&
-test "$(getent passwd "{account}" | cut -d: -f6,7)" = "{home}:/bin/sh" &&
-test "$(passwd -S "{account}" | cut -d' ' -f2)" = L &&
-test "$(id -Gn "{account}")" = "{account}"'''
+    return f'''(
+    uid=$(id -u "{account}") &&
+    test "$uid" -gt 0 &&
+    test "$(getent passwd "{account}" | cut -d: -f6,7)" = "{home}:/bin/sh" &&
+    test "$(passwd -S "{account}" | cut -d' ' -f2)" = L &&
+    test "$(id -Gn "{account}")" = "{account}"
+) || exit {ACCOUNT_CONFLICT}'''
 
 
 def check_account_conflicts(*, firewall=False):
@@ -196,6 +198,9 @@ def check_account_conflicts(*, firewall=False):
         printf '%s\\n' 'Conflicting provisioning account: {account}' >&2
         exit {ACCOUNT_CONFLICT}
     fi
+elif [ "$?" -ne 2 ]; then
+    printf '%s\\n' 'Could not look up provisioning account: {account}' >&2
+    exit 1
 fi
 """)
     return "".join(checks)
