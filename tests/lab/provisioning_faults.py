@@ -2,6 +2,7 @@
 """Disposable-VM provisioning fault injection over a real SSH network namespace."""
 
 import argparse
+import asyncio
 import fcntl
 import json
 import os
@@ -15,9 +16,15 @@ import tempfile
 import time
 from unittest.mock import patch
 
+import asyncssh
+
 from tools import prepare_vps
+from vpn_orbit.database import identifier
+from vpn_orbit.errors import Denied
 from vpn_orbit.runtime import vps_preparation as preparation
+from vpn_orbit.runtime.policy import Target
 from vpn_orbit.runtime.ssh_enrollment import verify_credentials
+from vpn_orbit.runtime.ssh_preparation import PreparationSSH
 
 REPO = Path(__file__).resolve().parents[2]
 PREPARE = REPO / "tools/prepare_vps.py"
@@ -277,6 +284,88 @@ def expect(condition, message, result=None):
         raise AssertionError(message + detail)
 
 
+async def verify_preparation_transport(key, password):
+    target = Target.parse({
+        "id": identifier(), "ip": ADDRESS, "port": PORT, "allowed_cidrs": [ADDRESS + "/32"],
+        "host_key": " ".join((LAB / "host.pub").read_text().split()[:2]), "secret_ref": identifier() + ":v1",
+        "policy_revision": 1, "dependencies": [], "capabilities": ["host.probe"],
+    })
+    observation = asyncssh.generate_private_key("ssh-ed25519")
+    managed_key = observation.export_private_key("openssh")
+    with_password = PreparationSSH(target, ADMIN, password=password, private_key=None, observation_key=managed_key)
+    with_key = PreparationSSH(target, ADMIN, password=None, private_key=key.read_text(), observation_key=managed_key)
+    sudoers = ADMIN_SUDOERS.read_text()
+    try:
+        ADMIN_SUDOERS.write_text(f"{ADMIN} ALL=(root) PASSWD: ALL\n")
+        expect(await with_password.phase("preflight", inspect=True) == "INCOMPLETE", "Readback must find missing state")
+        expect(not Path(preparation.REMOTE_STATE).exists(), "Readback must leave the missing journal untouched")
+        try:
+            await with_key.phase("preflight", inspect=False)
+        except Denied as error:
+            expect(error.code == "VPS_PREPARATION_REPLY_UNCONFIRMED", "Sudo exit must not be read as a phase reply")
+        else:
+            raise AssertionError("An SSH key must not bypass password-protected sudo")
+        expect(await with_password.phase("preflight", inspect=False) == "APPLIED", "Password-based preflight must apply")
+    finally:
+        ADMIN_SUDOERS.write_text(sudoers)
+
+    state = Path(preparation.REMOTE_STATE)
+    lock = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        expect(await with_key.phase("account", inspect=True) == "BUSY", "Readback must report a held phase lock")
+    finally:
+        os.close(lock)
+    try:
+        expect(await with_key.phase("account", inspect=False) == "APPLIED", "SSH-key administration must create the account")
+        expect(await with_key.phase("account", inspect=True) == "VERIFIED", "Readback must verify the existing account")
+        expect(await with_key.phase("helpers", inspect=True) == "INCOMPLETE", "Readback must detect missing helpers")
+
+        command = with_key._command
+
+        async def lose_reply(script):
+            expect(await command(script) == 0, "The remote helpers must have been installed")
+            raise TimeoutError
+
+        with patch.object(with_key, "_command", lose_reply):
+            try:
+                await with_key.phase("helpers", inspect=False)
+            except Denied as error:
+                expect(error.code == "VPS_PREPARATION_SSH_UNCONFIRMED", "Lost SSH reply must stay unconfirmed")
+            else:
+                raise AssertionError("A lost phase reply cannot announce success")
+        gateway = Path(preparation.LIBEXEC) / "ssh-gateway"
+        original = gateway.read_bytes()
+        gateway.write_bytes(original + b"\n# changed lab fixture\n")
+        expect(await with_key.phase("helpers", inspect=True) == "CONFLICT", "Readback must reject a changed helper")
+        gateway.write_bytes(original)
+        expect(await with_key.phase("helpers", inspect=True) == "VERIFIED", "A complete phase can be verified after reply loss")
+        for name in ("keys", "sudoers", "sshd"):
+            expect(await with_key.phase(name, inspect=False) == "APPLIED", f"{name} must apply")
+        expect(await with_key.phase("sshd", inspect=True) == "VERIFIED", "Readback must verify the live observation key")
+        await with_key.verify_access()
+
+        admin_authorized = Path("/home") / ADMIN / ".ssh/authorized_keys"
+        original_key = admin_authorized.read_bytes()
+        try:
+            admin_authorized.write_bytes(b'command="/bin/true" ' + original_key)
+            try:
+                await with_key.verify_access()
+            except Denied as error:
+                expect(error.code == "SSH_ADMIN_ACCESS_UNCONFIRMED", "A forced command must not prove administrator access")
+            else:
+                raise AssertionError("A restricted administrative key cannot verify preparation")
+        finally:
+            admin_authorized.write_bytes(original_key)
+        await with_key.verify_access()
+    finally:
+        run_remote, release, _, _ = prepare_vps.build_transport(ADDRESS, PORT, key, ADMIN, target.value["host_key"])
+        try:
+            run_remote(preparation.cleanup_script(observation.export_public_key("openssh")))
+        finally:
+            release()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--isolated-vm", action="store_true")
@@ -414,6 +503,7 @@ def main():
         expect(retried.returncode == 0 and state(directory)["status"] == "VERIFIED",
                "A restored administrator session must verify without reapplying the SSH profile", retried)
         provision(directory, key, fingerprint, cleanup=True)
+        asyncio.run(verify_preparation_transport(key, password))
         for path in NAMESPACES[:-1]:
             expect(not Path(path).exists(), f"Fixture artifact remains: {path}")
         expect(PROFILE.read_text() == preparation.SSH_PROFILE, "Cleanup must preserve the pre-existing SSH profile")
@@ -421,7 +511,8 @@ def main():
                "Preparation and cleanup must preserve the existing SSH profile inode and contents")
         print(json.dumps({"status": "PASSED", "scenarios": [
             "disconnect-account", "retry-repair", "partial-helpers", "local-interruption",
-            "verify-rollback", "sudo-password", "account-conflict", "admin-access-recovery", "cleanup"]}, sort_keys=True))
+            "verify-rollback", "sudo-password", "account-conflict", "admin-access-recovery",
+            "controller-ssh-preparation", "cleanup"]}, sort_keys=True))
     finally:
         subprocess.run(["ip", "netns", "del", NAMESPACE], stderr=subprocess.DEVNULL)
         subprocess.run(["ip", "link", "del", "vpnprobe0"], stderr=subprocess.DEVNULL)

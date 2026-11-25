@@ -50,7 +50,7 @@ async def connect(target, key, known_hosts, username):
     return await asyncssh.connect(
         target.value["ip"], port=target.value["port"], username=username,
         client_keys=[key], agent_path=None, config=None,
-        known_hosts=str(known_hosts), host_key_alias=f"vpn-orbit-{target.id}",
+        known_hosts=os.fspath(known_hosts), host_key_alias=f"vpn-orbit-{target.id}",
         x509_trusted_certs=None, x509_trusted_cert_paths=[],
         preferred_auth=["publickey"], password_auth=False, kbdint_auth=False,
         gss_auth=False, gss_kex=False, host_based_auth=False, server_host_key_algs=["ssh-ed25519"],
