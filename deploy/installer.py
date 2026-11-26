@@ -471,7 +471,8 @@ def install(args):
         # systemd gives just this UID a private copy of the OS credential.
         command("/usr/bin/systemd-run", "--unit=vpn-orbit-vault-initialize", "--quiet", "--wait", "--collect", "--property=User=vpn-orbit-broker",
                 "--property=Group=vpn-orbit-broker", "--property=SupplementaryGroups=vpn-orbit-gate-rpc",
-                "--property=UMask=0077", "--property=LoadCredentialEncrypted=broker-dek:" + cfg["vault_credential"],
+                "--property=PrivateMounts=yes", "--property=UMask=0077",
+                "--property=LoadCredentialEncrypted=broker-dek:" + cfg["vault_credential"],
                 runtime, "--config", CONFIG / "runtime.json", "initialize-broker")
         if args.web_enrollment:
             cfg["enrollment_catalog"] = json.loads(command(runtime, "--config", CONFIG / "runtime.json",

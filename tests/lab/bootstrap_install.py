@@ -15,8 +15,9 @@ import installation
 def main():
     if os.geteuid() != 0 or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted":
         raise SystemExit("This fixture requires a disposable GitHub-hosted VM.")
-    for name in ("vpn-orbit-compose.service", "vpn-orbit-broker.socket", "vpn-orbit-supervisor.socket",
-                 "vpn-orbit-web.service"):
+    subprocess.run(["systemctl", "start", "vpn-orbit-broker.service"], check=True, timeout=15)
+    for name in ("vpn-orbit-compose.service", "vpn-orbit-broker.socket", "vpn-orbit-broker.service",
+                 "vpn-orbit-supervisor.socket", "vpn-orbit-web.service"):
         subprocess.run(["systemctl", "is-active", "--quiet", name], check=True, timeout=10)
 
     installation.PASSWORD = secrets.token_urlsafe(32)
