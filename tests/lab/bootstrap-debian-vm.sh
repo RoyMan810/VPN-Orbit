@@ -32,6 +32,12 @@ root="$scratch/root"
 mkdir "$root"
 docker export "$container" | sudo tar --numeric-owner -xf - -C "$root"
 
+# systemd must see a VM when it configures mount propagation for credentials.
+if [[ -e "$root/.dockerenv" ]]; then
+    printf 'Removing Docker container marker from the VM filesystem.\n'
+fi
+sudo rm -f -- "$root/.dockerenv" "$root/usr/sbin/policy-rc.d"
+
 # Provision a one-use SSH identity and a pinned host key before the VM boots.
 ssh-keygen -q -t ed25519 -N '' -f "$scratch/id"
 ssh-keygen -q -t ed25519 -N '' -f "$scratch/host"
@@ -97,6 +103,12 @@ set -euo pipefail
 test "$(dpkg --print-architecture)" = amd64
 . /etc/os-release
 test "$ID:$VERSION_ID:$VERSION_CODENAME" = debian:13:trixie
+systemd-detect-virt --vm
+if systemd-detect-virt --container; then
+    printf 'The Debian guest identifies as a container.\n' >&2
+    exit 1
+fi
+nsenter -t 1 -m findmnt -n -T /run -o TARGET,PROPAGATION
 test ! -e /usr/bin/docker
 test ! -S /run/dbus/system_bus_socket
 mkdir -m 0700 /root/source

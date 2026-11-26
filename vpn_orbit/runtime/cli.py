@@ -11,7 +11,6 @@ import signal
 import sqlite3
 import sys
 from threading import Event
-from traceback import extract_tb
 import warnings
 
 from ..admission import Admission
@@ -317,13 +316,6 @@ def main(argv=None):
         run(configuration(args.config), args.command, once=getattr(args, "once", False), import_args=args)
     except (Denied, OSError, RuntimeError, ValueError, sqlite3.Error, TypeError, KeyError) as error:
         print(error.code if isinstance(error, Denied) else "RUNTIME_UNAVAILABLE", file=sys.stderr)
-        if args.command == "initialize-broker" and not isinstance(error, Denied):
-            # Keep exception text, paths and secret values out of the service journal.
-            runtime_directory = Path(__file__).parent
-            sites = ",".join(f"{Path(frame.filename).name}:{frame.lineno}"
-                             for frame in extract_tb(error.__traceback__)
-                             if Path(frame.filename).parent == runtime_directory)
-            print(f"failure_site={sites} error_type={type(error).__name__}", file=sys.stderr)
         return 1
     return 0
 

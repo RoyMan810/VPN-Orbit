@@ -15,10 +15,13 @@ import installation
 def main():
     if os.geteuid() != 0 or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted":
         raise SystemExit("This fixture requires a disposable GitHub-hosted VM.")
-    subprocess.run(["systemctl", "start", "vpn-orbit-broker.service"], check=True, timeout=15)
-    for name in ("vpn-orbit-compose.service", "vpn-orbit-broker.socket", "vpn-orbit-broker.service",
-                 "vpn-orbit-supervisor.socket", "vpn-orbit-web.service"):
+    for name in ("vpn-orbit-compose.service", "vpn-orbit-broker.socket", "vpn-orbit-supervisor.socket",
+                 "vpn-orbit-web.service"):
         subprocess.run(["systemctl", "is-active", "--quiet", name], check=True, timeout=10)
+    reached = json.loads(installation.docker("unix:///run/docker.sock", "compose", "--project-name", "vpn-orbit",
+                                             "--file", "/etc/vpn-orbit/compose.json", "exec", "-T", "worker",
+                                             "python", "-c", installation.PEER_PROBE, timeout=30))
+    assert reached == {"gate_socket": "ATTEMPT_NOT_FOUND", "broker_socket": "RECEIPT_NOT_TERMINAL"}
 
     installation.PASSWORD = secrets.token_urlsafe(32)
     installation.owner_create()
