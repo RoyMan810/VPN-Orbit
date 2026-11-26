@@ -213,6 +213,17 @@ jobs:
             GITHUB_ACTIONS=true "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" \
             "$(command -v python)" tests/lab/provisioning_faults.py --isolated-vm
 
+  debian-preparation:
+    name: Web preparation / Debian 13 OpenSSH
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - *checkout
+      - *setup_python
+      - *setup_docker
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m tests.lab.debian_preparation --isolated-vm
+
   firewall-faults:
     name: Firewall faults / disposable nftables and SSH namespace
     runs-on: ubuntu-24.04

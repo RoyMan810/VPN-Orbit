@@ -13,6 +13,7 @@ from .protocol import MAX_FRAME, canonical, decode, fields
 
 _CREDENTIALS = struct.Struct("=iII")
 _LENGTH = struct.Struct("!I")
+_MAX_PROGRESS_FRAMES = 20
 
 
 @dataclass(frozen=True)
@@ -57,7 +58,7 @@ class Client:
     def __init__(self, path, *, server_uids, timeout=20):
         self.path, self.server_uids, self.timeout = str(path), frozenset(server_uids), timeout
 
-    def call(self, operation, payload):
+    def call(self, operation, payload, *, progress=None):
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
                 connection.settimeout(self.timeout)
@@ -66,7 +67,21 @@ class Client:
                     raise Denied("RPC_SERVER_IDENTITY")
                 send(connection, {"v": 1, "operation": operation, "payload": payload})
                 connection.shutdown(socket.SHUT_WR)
-                response = receive(connection)
+                deadline = time.monotonic() + self.timeout
+                for _ in range(_MAX_PROGRESS_FRAMES + 1):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError
+                    connection.settimeout(remaining)
+                    response = receive(connection)
+                    if not isinstance(response, dict) or "progress" not in response:
+                        break
+                    fields(response, ("v", "progress"))
+                    if type(response["v"]) is not int or response["v"] != 1 or progress is None:
+                        raise Denied("RPC_INVALID_RESPONSE", 503)
+                    progress(response["progress"])
+                else:
+                    raise Denied("RPC_INVALID_RESPONSE", 503)
         except OSError:
             raise Denied("RPC_UNAVAILABLE", 503) from None
         if not isinstance(response, dict) or response.get("v") != 1 or type(response.get("ok")) is not bool:
@@ -79,7 +94,7 @@ class Client:
         return response["result"]
 
 
-def handle(connection, handler, identities):
+def handle(connection, handler, identities, *, progress_operation=None):
     connection.settimeout(3)
     try:
         identity = peer(connection)
@@ -94,7 +109,21 @@ def handle(connection, handler, identities):
         request = fields(receive(connection, eof=True), ("v", "operation", "payload"))
         if type(request["v"]) is not int or request["v"] != 1:
             raise Denied("RPC_VERSION")
-        response = {"v": 1, "ok": True, "result": handler(role, identity, request["operation"], request["payload"])}
+        if request["operation"] == progress_operation and progress_operation is not None:
+            progress_open = True
+
+            def report(value):
+                nonlocal progress_open
+                if progress_open:
+                    try:
+                        send(connection, {"v": 1, "progress": value})
+                    except OSError:
+                        progress_open = False
+
+            result = handler(role, identity, request["operation"], request["payload"], progress=report)
+        else:
+            result = handler(role, identity, request["operation"], request["payload"])
+        response = {"v": 1, "ok": True, "result": result}
     except Denied as error:
         response = {"v": 1, "ok": False, "code": error.code}
     except Exception:
@@ -106,7 +135,7 @@ def handle(connection, handler, identities):
         pass
 
 
-def serve(listener, handler, identities, *, poll=None):
+def serve(listener, handler, identities, *, poll=None, progress_operation=None):
     next_poll = 0
     if poll is not None:
         listener.settimeout(30)
@@ -119,7 +148,7 @@ def serve(listener, handler, identities, *, poll=None):
         except TimeoutError:
             continue
         with connection:
-            handle(connection, handler, identities)
+            handle(connection, handler, identities, progress_operation=progress_operation)
 
 
 def activated_socket(path):

@@ -9,6 +9,7 @@ import time
 from .auth import AuthService, Role, etag
 from .database import Store, identifier
 from .errors import Denied
+from .runtime.preparation_progress import preparation_position
 from .runtime.protocol import SHA256, ULID, canonical, checksum, integer, preparation_digest, text
 
 
@@ -210,7 +211,7 @@ class JobQueue:
                               ON allowed.key=jobs.resource_id AND allowed.value=jobs.scope_digest
                               WHERE jobs.action='host.prepare' AND jobs.actor_id=?
                               ORDER BY jobs.created_at DESC,jobs.rowid DESC LIMIT 1""", (canonical(scopes).decode(), actor["id"])).fetchone()
-            return self._public(row) if row is not None else None
+            return self._public(row, progress=self._latest_preparation_progress(db, row)) if row is not None else None
 
     def _check_preparation_pin(self, db, actor, identity, target, fingerprint, correlation):
         if secrets.compare_digest(target["fingerprint"], fingerprint):
@@ -240,7 +241,8 @@ class JobQueue:
                 return None
             if previous["payload_hash"] != payload_hash:
                 raise Denied("IDEMPOTENCY_CONFLICT", 409)
-            return self._public(db.execute("SELECT * FROM jobs WHERE id=?", (previous["job_id"],)).fetchone())
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (previous["job_id"],)).fetchone()
+            return self._public(row, progress=self._latest_preparation_progress(db, row))
 
         with self.store.write() as db:
             actor = self._web_preparation_owner(db, auth, token, csrf)
@@ -308,10 +310,39 @@ class JobQueue:
             return self._public(updated)
 
     @staticmethod
-    def _public(row):
+    def _public(row, *, progress=None):
         return {**{key: row[key] for key in ("id", "resource_id", "action", "status", "revision", "reason", "created_at", "updated_at")},
+                **({"preparation": progress} if row["action"] == "host.prepare" else {}),
                 "observed_at": json.loads(row["result"]).get("observed_at") if row["result"] else None,
                 "result": json.loads(row["result"]) if row["result"] else None}
+
+    @staticmethod
+    def _latest_preparation_progress(db, row):
+        if row["action"] != "host.prepare":
+            return None
+        event = db.execute("""SELECT details FROM audit WHERE target_id=? AND correlation_id=?
+                              AND event='job.preparation_phase' ORDER BY seq DESC LIMIT 1""",
+                           (row["resource_id"], row["id"])).fetchone()
+        if event is None:
+            return None
+        try:
+            value = json.loads(event["details"])
+            preparation_position(value)
+            return value
+        except (Denied, ValueError, TypeError):
+            return None
+
+    def record_preparation_progress(self, claim, value):
+        position = preparation_position(value)
+        with self.store.write(kind="dispatch") as db:
+            row = self._claimed(db, claim)
+            if row["action"] != "host.prepare" or row["status"] != "DISPATCHING":
+                raise Denied("JOB_TRANSITION_DENIED")
+            previous = self._latest_preparation_progress(db, row)
+            if previous is not None and position <= preparation_position(previous):
+                return
+            self.store.event(db, at=int(self.clock()), actor=row["actor_id"], kind="job.preparation_phase",
+                             target=row["resource_id"], outcome=value["stage"], correlation=row["id"], details=value)
 
     def enqueue_probe(self, auth, token, csrf, resource, request_key):
         text(resource, ULID, "RESOURCE_NOT_FOUND")
@@ -357,7 +388,7 @@ class JobQueue:
     def get(self, auth, token, job_id):
         with self.store.read() as db:
             row = self._read_job(db, auth, token, job_id)
-            public = self._public(row)
+            public = self._public(row, progress=self._latest_preparation_progress(db, row))
             return public, etag(public, row["revision"])
 
     def timeline(self, auth, token, job_id):

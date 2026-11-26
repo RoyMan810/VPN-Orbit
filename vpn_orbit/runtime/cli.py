@@ -223,7 +223,7 @@ def run(config, command, *, once=False, listener=None, import_args=None):
                     web_preparation_targets=preparation.keys())
     with process_lock(Path(config["broker_directory"]) / "broker.lock"):
         broker.recover()
-        serve(listener or activated_socket(config["broker_socket"]), broker.dispatch, identities)
+        serve(listener or activated_socket(config["broker_socket"]), broker.dispatch, identities, progress_operation="prepare.run")
 
 
 def prepare_observation(config, policy, queue, command, args):

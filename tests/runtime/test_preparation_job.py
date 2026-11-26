@@ -1,5 +1,9 @@
+from concurrent.futures import ThreadPoolExecutor
+import os
 from pathlib import Path
+import socket
 import tempfile
+from threading import Event
 import time
 import unittest
 from unittest.mock import Mock, patch
@@ -9,7 +13,7 @@ from vpn_orbit.errors import Denied
 from vpn_orbit.queue import JobQueue
 from vpn_orbit.runtime.authority import Authority
 from vpn_orbit.runtime.broker import Broker
-from vpn_orbit.runtime.ipc import Peer
+from vpn_orbit.runtime.ipc import Client, Peer, handle
 from vpn_orbit.runtime.storage import new_private_file
 from vpn_orbit.runtime.vault import Vault
 from vpn_orbit.runtime.vps_preparation import PHASES
@@ -17,11 +21,12 @@ from vpn_orbit.worker import Worker
 from .fixtures import ACTOR, BROKER_UID, TARGET, WORKER_UID, policy, private_key, trusted_time
 
 
-def preparation_runtime(directory, approved_policy, actor, observation_key, *, clock=time.time):
-    store = Store.initialize(directory / "app/controller.sqlite3")
-    with store.write() as db:
-        db.execute("""INSERT INTO users(id,username,password_hash,password_profile,role,created_at,updated_at)
-                      VALUES(?,'owner','unused',1,'Owner',0,0)""", (actor,))
+def preparation_runtime(directory, approved_policy, actor, observation_key, *, clock=time.time, store=None):
+    if store is None:
+        store = Store.initialize(directory / "app/controller.sqlite3")
+        with store.write() as db:
+            db.execute("""INSERT INTO users(id,username,password_hash,password_profile,role,created_at,updated_at)
+                          VALUES(?,'owner','unused',1,'Owner',0,0)""", (actor,))
     queue = JobQueue(store, clock=clock)
     authority = Authority.initialize(directory / "gate", approved_policy, clock=clock,
                                      time_health=trusted_time(directory / "time", clock))
@@ -37,7 +42,7 @@ def preparation_runtime(directory, approved_policy, actor, observation_key, *, c
                     worker_uid=WORKER_UID, clock=clock)
     worker = Worker(queue, Mock(call=lambda op, data: authority.dispatch(
         "worker", Peer(1, WORKER_UID, WORKER_UID), op, data)),
-        Mock(call=lambda op, data: broker.dispatch("worker", Peer(1, WORKER_UID, WORKER_UID), op, data)),
+        Mock(call=lambda op, data, **options: broker.dispatch("worker", Peer(1, WORKER_UID, WORKER_UID), op, data, **options)),
         secret_refs={target.id: target.value["secret_ref"]})
     return queue, authority, broker, worker
 
@@ -74,11 +79,18 @@ class PreparationJobTests(unittest.TestCase):
         with self.assertRaisesRegex(Denied, "ALREADY_PENDING"):
             self.queue.enqueue_preparation(identifier(), ACTOR, self.target)
         effects = set()
+        auth = Mock(_session=lambda db, token: db.execute("SELECT * FROM users WHERE id=?", (ACTOR,)).fetchone())
+        jobs = []
 
         async def phase(name, *, inspect):
             self.assertEqual(self.authority.status(self.job)["state"], "DISPATCHING")
+            progress, current_etag = self.queue.get(auth, "fixture", self.job)
+            jobs.append((progress["revision"], current_etag))
+            self.assertEqual(progress["status"], "DISPATCHING")
+            self.assertEqual(progress["preparation"]["phase"], name)
             if inspect:
                 return "VERIFIED" if name in effects else "INCOMPLETE"
+            self.assertEqual(progress["preparation"]["stage"], "DISPATCHING")
             with self.broker.journal.connect() as db:
                 mark = db.execute("SELECT phase,stage FROM preparation_phases WHERE job_id=?", (self.job,)).fetchone()
                 self.assertEqual(tuple(mark), (name, "DISPATCHING"))
@@ -91,11 +103,46 @@ class PreparationJobTests(unittest.TestCase):
             self.assertTrue(self.worker.run_one())
             ssh.return_value.verify_access.assert_awaited_once()
         self.assertEqual(effects, set(PHASES))
+        self.assertEqual({revision for revision, _ in jobs}, {3})
+        self.assertEqual(len({tag for _, tag in jobs}), len(PHASES) * 2)
         self.assertEqual(self.state(), ("SUCCEEDED", "VPS_PREPARATION_VERIFIED", 1))
+        job, _ = self.queue.get(auth, "fixture", self.job)
+        self.assertEqual(job["preparation"], {"phase": "access", "stage": "VERIFIED"})
+        self.assertEqual(self.queue.timeline(auth, "fixture", self.job)["items"][-1]["status"], "SUCCEEDED")
         self.assertEqual(self.authority.status(self.job)["state"], "SUCCEEDED")
         self.assertEqual(self.broker._preparation_credentials, {})
         for path in self.root.rglob("*.sqlite3*"):
             self.assertNotIn(b"lab-credential-canary", path.read_bytes())
+
+    def test_unix_rpc_reports_a_phase_before_the_final_reply(self):
+        seen = Event()
+        phase = {"phase": "preflight", "stage": "CHECKING"}
+
+        def dispatch(role, peer, operation, payload, *, progress):
+            self.assertEqual((role, operation), ("worker", "prepare.run"))
+            progress(phase)
+            self.assertTrue(seen.wait(2))
+            return {"outcome": "SUCCEEDED"}
+
+        def observe(value):
+            self.assertEqual(value, phase)
+            seen.set()
+
+        class ConnectedSocket(socket.socket):
+            def connect(self, _):
+                pass
+
+        client, server_peer = socket.socketpair()
+        with client, server_peer, ThreadPoolExecutor(max_workers=1) as pool:
+            def server():
+                handle(server_peer, dispatch, {(os.geteuid(), os.getegid()): "worker"}, progress_operation="prepare.run")
+
+            connection = ConnectedSocket(fileno=client.detach())
+            done = pool.submit(server)
+            with patch("vpn_orbit.runtime.ipc.socket.socket", return_value=connection):
+                result = Client("/unused", server_uids={os.geteuid()}, timeout=4).call("prepare.run", {}, progress=observe)
+            self.assertEqual(result, {"outcome": "SUCCEEDED"})
+            done.result(4)
 
     def test_lost_reply_holds_authority_until_readback_proves_all_phases(self):
         self.submit()
@@ -191,7 +238,7 @@ class PreparationJobTests(unittest.TestCase):
         with self.assertRaisesRegex(Denied, "CAPABILITY_DISABLED"):
             self.broker.dispatch(role, web_peer, "prepare.credentials", self.credentials)
         self.broker.web_preparation_targets = frozenset({TARGET})
-        for operation in ("prepare.reconcile", "use_for_scoped_ssh", "receipt.get", "apps.reconcile", "firewall.status"):
+        for operation in ("prepare.reconcile", "prepare.run", "use_for_scoped_ssh", "receipt.get", "apps.reconcile", "firewall.status"):
             with self.subTest(operation=operation), self.assertRaisesRegex(Denied, "RPC_OPERATION_DENIED"):
                 self.broker.dispatch(role, web_peer, operation, {})
         with self.assertRaisesRegex(Denied, "STALE_SCOPE"):

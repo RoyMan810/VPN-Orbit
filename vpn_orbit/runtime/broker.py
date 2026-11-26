@@ -85,17 +85,19 @@ class Broker:
         self._persist(claims["job_id"], outcome, response)
         return response
 
-    def use(self, request, peer):
+    def use(self, request, peer, *, progress=None):
         by_policy = isinstance(request, dict) and "policy_ref" in request
         ref_field = "policy_ref" if by_policy else "secret_ref"
         fields(request, ("permit", ref_field))
         claims = verify_permit(request["permit"], self.verify_key, now=int(self.clock()))
         target = self.policy.target(claims["target"], claims["capability"], claims["scope_digest"])
         capability = claims["capability"]
+        if progress is not None and capability != "host.prepare":
+            raise Denied("BROKER_SCOPE_DENIED")
         if capability == "host.prepare" and claims["mutating"]:
             if not by_policy or request[ref_field] != target.value["secret_ref"]:
                 raise Denied("BROKER_SCOPE_DENIED")
-            return self._dispatch_key(request, claims, target, None)
+            return self._dispatch_key(request, claims, target, None, progress=progress)
         if capability == "host.probe" and not claims["mutating"]:
             anchor = target.value["secret_ref"]
         elif capability == "docker.restart" and claims["mutating"]:
@@ -119,7 +121,7 @@ class Broker:
                                             exact_ref=None if by_policy else request[ref_field])
             return self._dispatch_key(request, claims, target, key)
 
-    def _dispatch_key(self, request, claims, target, key):
+    def _dispatch_key(self, request, claims, target, key, *, progress=None):
         with self.journal.write() as db:
             if db.execute("SELECT 1 FROM receipts WHERE job_id=? OR nonce=?", (claims["job_id"], claims["nonce"])).fetchone():
                 raise Denied("PERMIT_REPLAY")
@@ -128,7 +130,7 @@ class Broker:
         with self.journal.write() as db:
             db.execute("UPDATE receipts SET state='DISPATCHING' WHERE job_id=?", (claims["job_id"],))
         if claims["capability"] == "host.prepare":
-            return self._dispatch_preparation(request["permit"], target)
+            return self._dispatch_preparation(request["permit"], target, progress=progress)
         if claims["capability"] in ("docker.restart", "firewall.apply", "apps.lifecycle"):
             execute, payload_key = {
                 "docker.restart": (self.execute_restart, "restart"),
@@ -202,17 +204,23 @@ class Broker:
                           ON CONFLICT(job_id) DO UPDATE SET phase=excluded.phase,stage=excluded.stage""",
                        (job_id, phase, stage))
 
-    def _dispatch_preparation(self, permit, target):
+    def _dispatch_preparation(self, permit, target, *, progress):
         claims = permit["claims"]
         dispatched = False
+
+        def report(phase, stage):
+            if progress is not None:
+                progress({"phase": phase, "stage": stage})
 
         async def execute(transport):
             nonlocal dispatched
             async with asyncio.timeout(_PREPARATION_TIMEOUT):
                 for phase in PHASES:
+                    report(phase, "CHECKING")
                     status = await transport.phase(phase, inspect=True)
                     if status == "INCOMPLETE":
                         self._checkpoint(claims["job_id"], phase, "DISPATCHING")
+                        report(phase, "DISPATCHING")
                         dispatched = True
                         await transport.phase(phase, inspect=False)
                         status = await transport.phase(phase, inspect=True)
@@ -220,7 +228,10 @@ class Broker:
                         raise Denied({"CONFLICT": "VPS_PREPARATION_CONFLICT", "BUSY": "VPS_PREPARATION_BUSY"}.get(
                             status, "VPS_PREPARATION_PHASE_UNCONFIRMED"))
                     self._checkpoint(claims["job_id"], phase, "VERIFIED")
+                    report(phase, "VERIFIED")
+                report("access", "CHECKING")
                 await transport.verify_access()
+                report("access", "VERIFIED")
 
         try:
             with self.vault.key_lock(target.value["secret_ref"], shared=True):
@@ -302,7 +313,7 @@ class Broker:
                                                 "state": remote["state"]})
         return remote
 
-    def dispatch(self, role, peer, operation, payload):
+    def dispatch(self, role, peer, operation, payload, *, progress=None):
         if role == "preparation-api":
             if operation == "prepare.credentials":
                 return self._supply_preparation(payload, web=True)
@@ -316,6 +327,8 @@ class Broker:
             raise Denied("RPC_PEER_DENIED")
         if operation == "use_for_scoped_ssh":
             return self.use(payload, peer)
+        if operation == "prepare.run" and progress is not None:
+            return self.use(payload, peer, progress=progress)
         if operation == "firewall.status":
             return self.remote_firewall_status(payload, peer)
         if operation == "apps.reconcile":
