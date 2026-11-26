@@ -276,6 +276,20 @@ class PreparationJobTests(unittest.TestCase):
         self.assertEqual(self.authority.status(successor)["result_code"], "VPS_PREPARATION_RESUME_DRIFT")
         self.assertEqual(self.state(), ("FAILED", PARTIAL_PREPARATION, 0))
 
+        restarted = Broker(self.broker.directory, self.policy, self.broker.vault, self.broker.gate,
+                           self.broker.verify_key, worker_uid=WORKER_UID, clock=self.broker.clock)
+        self.worker.broker.call = lambda op, data, **options: restarted.dispatch(
+            "worker", Peer(1, WORKER_UID, WORKER_UID), op, data, **options)
+        new_job = identifier()
+        restarted.dispatch("local-root", self.root_peer, "prepare.credentials", {**self.credentials, "job_id": new_job})
+        self.queue.enqueue_preparation(new_job, ACTOR, self.target)
+        with patch("vpn_orbit.runtime.broker.PreparationSSH", autospec=True) as ssh:
+            ssh.return_value.phase.return_value = "INCOMPLETE"
+            self.assertTrue(self.worker.run_one())
+            ssh.return_value.phase.assert_awaited_once_with("preflight", inspect=True)
+        self.assertEqual(self.authority.status(new_job)["result_code"], "VPS_PREPARATION_RESUME_DRIFT")
+        self.assertEqual(self.state(), ("FAILED", PARTIAL_PREPARATION, 0))
+
     def test_worker_restart_after_dispatch_commit_cancels_unconsumed_permit(self):
         for restart_authority in (False, True):
             with self.subTest(restart_authority=restart_authority):

@@ -22,6 +22,10 @@ CREATE TABLE receipts(job_id TEXT PRIMARY KEY, nonce TEXT NOT NULL UNIQUE, state
 _PREPARATION_PHASES = """CREATE TABLE IF NOT EXISTS preparation_phases (
     job_id TEXT PRIMARY KEY REFERENCES receipts(job_id), phase TEXT NOT NULL,
     stage TEXT NOT NULL CHECK(stage IN ('DISPATCHING','VERIFIED')))"""
+_PREPARATION_GUARDS = f"""CREATE TABLE IF NOT EXISTS preparation_guards (
+    target TEXT NOT NULL, scope_digest TEXT NOT NULL,
+    verified_through INTEGER NOT NULL CHECK(verified_through BETWEEN 0 AND {len(PHASES) - 1}),
+    PRIMARY KEY(target,scope_digest)) STRICT"""
 _PREPARATION_TIMEOUT = 115
 _CREDENTIAL_TTL = 180
 
@@ -173,14 +177,14 @@ class Broker:
         self._reserve_preparation(job_id, payload["actor_id"], target, credentials)
         return {"job_id": job_id}
 
-    def _reserve_preparation(self, job_id, actor, target, credentials, *, through=None):
+    def _reserve_preparation(self, job_id, actor, target, credentials):
         with self._credentials_lock:
             if job_id in self._preparation_credentials or len(self._preparation_credentials) >= 8:
                 raise Denied("VPS_PREPARATION_CREDENTIALS_BUSY")
             timer = Timer(_CREDENTIAL_TTL, self._expire_credentials, (job_id,))
             timer.daemon = True
             self._preparation_credentials[job_id] = (
-                actor, target.id, target.scope_digest, time.monotonic() + _CREDENTIAL_TTL, credentials, timer, through,
+                actor, target.id, target.scope_digest, time.monotonic() + _CREDENTIAL_TTL, credentials, timer,
             )
             timer.start()
 
@@ -189,11 +193,11 @@ class Broker:
             entry = self._preparation_credentials.pop(claims["job_id"], None)
         if entry is None:
             raise Denied("VPS_PREPARATION_CREDENTIALS_EXPIRED")
-        actor, target, scope, expiry, credentials, timer, through = entry
+        actor, target, scope, expiry, credentials, timer = entry
         timer.cancel()
         if (actor, target, scope) != (claims["actor_id"], claims["target"], claims["scope_digest"]) or time.monotonic() >= expiry:
             raise Denied("VPS_PREPARATION_CREDENTIALS_EXPIRED")
-        return credentials, through
+        return credentials
 
     def _preparation_key(self, target):
         ref = target.value["secret_ref"]
@@ -206,6 +210,22 @@ class Broker:
             db.execute("""INSERT INTO preparation_phases VALUES(?,?,?)
                           ON CONFLICT(job_id) DO UPDATE SET phase=excluded.phase,stage=excluded.stage""",
                        (job_id, phase, stage))
+
+    def _guard_preparation(self, target, through):
+        with self.journal.write(kind="dispatch") as db:
+            db.execute(_PREPARATION_GUARDS)
+            db.execute("""INSERT INTO preparation_guards VALUES(?,?,?)
+                          ON CONFLICT(target,scope_digest) DO UPDATE
+                          SET verified_through=max(verified_through,excluded.verified_through)""",
+                       (target.id, target.scope_digest, through))
+
+    def _guarded_preparation_prefix(self, target):
+        with self.journal.connect() as db:
+            if not db.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='preparation_guards'").fetchone():
+                return None
+            row = db.execute("SELECT verified_through FROM preparation_guards WHERE target=? AND scope_digest=?",
+                             (target.id, target.scope_digest)).fetchone()
+            return None if row is None else row["verified_through"]
 
     def _dispatch_preparation(self, permit, target, *, progress):
         claims = permit["claims"]
@@ -240,7 +260,8 @@ class Broker:
 
         try:
             with self.vault.key_lock(target.value["secret_ref"], shared=True):
-                (username, password, private_key), through = self._take_credentials(claims)
+                username, password, private_key = self._take_credentials(claims)
+                through = self._guarded_preparation_prefix(target)
                 transport = PreparationSSH(target, username, password=password, private_key=private_key,
                                            observation_key=self._preparation_key(target))
                 asyncio.run(execute(transport, through))
@@ -299,9 +320,14 @@ class Broker:
         through = None
         if resume and receipt["state"] in ("UNKNOWN_OUTCOME", "RECONCILED_FAILED"):
             through = self._resume_checkpoint(claims["job_id"])
+            guarded = self._guarded_preparation_prefix(target)
+            if guarded is not None:
+                through = max(through, guarded)
         if receipt["state"] == "RECONCILED_FAILED" and receipt["result_code"] == PARTIAL_PREPARATION:
             if resume:
-                self._reserve_preparation(successor, claims["actor_id"], target, (username, password, private_key), through=through)
+                if guarded is None or guarded < through:
+                    raise Denied("VPS_PREPARATION_RESUME_UNCONFIRMED")
+                self._reserve_preparation(successor, claims["actor_id"], target, (username, password, private_key))
             return receipt
         with self.vault.key_lock(target.value["secret_ref"], shared=True):
             transport = PreparationSSH(target, username, password=password, private_key=private_key,
@@ -311,7 +337,9 @@ class Broker:
             except TimeoutError:
                 raise Denied("VPS_PREPARATION_RECONCILIATION_UNVERIFIED") from None
             if partial:
-                self._reserve_preparation(successor, claims["actor_id"], target, (username, password, private_key), through=through)
+                # The guard must survive a crash before the Authority incident is resolved.
+                self._guard_preparation(target, through)
+                self._reserve_preparation(successor, claims["actor_id"], target, (username, password, private_key))
             receipt = self.gate.call("prepare.partial" if partial else "prepare.reconcile", request)
             self._persist(claims["job_id"], receipt["state"], {
                 "outcome": "FAILED" if partial else "SUCCEEDED", "code": receipt["result_code"],
