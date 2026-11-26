@@ -45,7 +45,7 @@ printf '[127.0.0.1]:%s %s\n' "$port" "$(cat "$scratch/host.pub")" > "$scratch/kn
 
 # QEMU supplies IPv4 DHCP and a DNS forwarder on the guest-private network.
 sudo install -d "$root/etc/systemd/network"
-printf '[Match]\nName=eth0\n[Network]\nDHCP=ipv4\n' |
+printf '[Match]\nDriver=virtio_net\n[Network]\nDHCP=ipv4\n' |
     sudo tee "$root/etc/systemd/network/10-ci.network" >/dev/null
 sudo rm -f "$root/etc/resolv.conf"
 printf 'nameserver 10.0.2.3\n' | sudo tee "$root/etc/resolv.conf" >/dev/null
@@ -63,9 +63,10 @@ acceleration=(-accel tcg,thread=multi -cpu max)
 if [[ -r /dev/kvm && -w /dev/kvm ]]; then
     acceleration=(-accel kvm -cpu host)
 fi
+printf "QEMU acceleration: %s\n" "${acceleration[1]}"
 qemu-system-x86_64 "${acceleration[@]}" -m 4096 -smp 4 -display none -monitor none \
     -serial "file:$scratch/serial.log" -kernel "$scratch/kernel" -initrd "$scratch/initrd" \
-    -append 'root=/dev/vda rw console=ttyS0 net.ifnames=0' \
+    -append 'root=/dev/vda rw console=ttyS0' \
     -drive "file=$scratch/disk.img,format=raw,if=virtio" \
     -netdev "user,id=network,hostfwd=tcp:127.0.0.1:$port-:22" -device virtio-net-pci,netdev=network &
 vm_pid=$!
@@ -80,9 +81,14 @@ timeout=240
 deadline=$(( SECONDS + timeout ))
 until ssh_vm 'systemctl is-active --quiet systemd-networkd.service' 2>/dev/null; do
     kill -0 "$vm_pid"
-    (( SECONDS < deadline ))
+    if (( SECONDS >= deadline )); then
+        ssh_vm 'systemctl is-active systemd-networkd.service' || true
+        printf 'Timed out waiting for the Debian VM SSH connection.\n' >&2
+        exit 1
+    fi
     sleep 2
 done
+printf 'Debian VM is reachable over the pinned SSH connection.\n'
 
 git bundle create "$scratch/source.bundle" HEAD
 scp "${options[@]}" -P "$port" "$scratch/source.bundle" "$guest:/root/source.bundle"
