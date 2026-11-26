@@ -16,6 +16,7 @@ for (const lang of ['en', 'ru'] as const) {
       user: { id: planId, username: 'fixture-owner', role: 'Owner' }, csrf_token: 'fixture',
     } }))
     await page.route('**/api/v1/enrollment/candidates', route => route.fulfill({ json: { items: [] } }))
+    await page.route('**/api/v1/enrollment/preparation', route => route.fulfill({ json: { available: false, job: null } }))
     await page.route('**/api/v1/resources?*', route => route.fulfill({ json: { items: [], next_after: null } }))
     await page.route('**/api/v1/audit?*', route => route.fulfill({ json: { items: [
       { seq: 17, event: { event: 'change_plan.draft_saved', outcome: 'SUCCEEDED', at: 1700000000,

@@ -228,10 +228,13 @@ def compose_document(config, image, port):
     mounts = [bind(CONFIG / "runtime.json", CONFIG / "runtime.json"),
               bind(config["writer_directory"], config["writer_directory"]),
               bind(DATA / "app", DATA / "app", read_only=False)]
+    preparation = ({"group_add": [str(config["broker_rpc_gid"])], "ulimits": {"core": 0},
+                    "volumes": [*mounts, bind(RUN / "broker", RUN / "broker")]}
+                   if config.get("preparation_catalog") else {"volumes": mounts})
     return {"name": "vpn-orbit", "services": {
         "api": {**common, "user": f"{config['app_uid']}:{config['app_gid']}", "command": ["api"],
                 "networks": ["api"], "ports": [{"target": 8000, "published": str(port), "host_ip": "127.0.0.1", "protocol": "tcp"}],
-                "volumes": mounts,
+                **preparation,
                 "healthcheck": {"test": ["CMD", "python", "-c", "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:8000/healthz', timeout=2).status==200"],
                                 "interval": "10s", "timeout": "3s", "retries": 6, "start_period": "10s"}},
         "worker": {**common, "user": f"{config['worker_uid']}:{config['worker_gid']}", "command": ["worker"],
@@ -455,6 +458,10 @@ def install(args):
         if args.web_enrollment:
             cfg["enrollment_catalog"] = json.loads(command(runtime, "--config", CONFIG / "runtime.json",
                                                            "enrollment-catalog", "--ssh-endpoints"))
+            preparation = json.loads(command(runtime, "--config", CONFIG / "runtime.json",
+                                             "enrollment-catalog", "--ssh-endpoints", "--preparation"))
+            if preparation:
+                cfg["preparation_catalog"] = preparation
         else:
             command(runtime, "--config", CONFIG / "runtime.json", "register-observations")
         compose = compose_document(cfg, image, args.port)

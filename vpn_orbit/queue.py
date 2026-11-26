@@ -173,20 +173,100 @@ class JobQueue:
         with self.store.write() as db:
             self._schema(db)
             self._preparation_owner(db, actor)
-            resource = db.execute("SELECT * FROM resources WHERE id=?", (target.id,)).fetchone()
-            if resource is None:
-                now = int(self.clock())
-                db.execute("INSERT INTO resources VALUES(?,?,?,1,0,?,?)",
-                           (target.id, target.scope_digest, target.revision, now, now))
-            elif (resource["enabled"] or resource["scope_digest"] != target.scope_digest
-                  or resource["policy_revision"] != target.revision):
-                raise Denied("VPS_PREPARATION_RESOURCE_NOT_PENDING", 409)
-            if db.execute("""SELECT 1 FROM jobs WHERE resource_id=? AND action='host.prepare'
-                             AND status NOT IN ('FAILED','CANCELLED_SAFE')""", (target.id,)).fetchone():
-                raise Denied("VPS_PREPARATION_ALREADY_PENDING", 409)
-            self._enqueue_mutation(db, job_id, actor, target.id, target.scope_digest, target.revision,
-                                   preparation_digest(job_id, actor, target.id, target.scope_digest), "host.prepare")
-            return self._public(db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
+            return self._insert_preparation(db, job_id, actor, target.id, target.scope_digest, target.revision)
+
+    def _available_preparation(self, db, identity, scope, revision):
+        resource = db.execute("SELECT enabled,scope_digest,policy_revision FROM resources WHERE id=?", (identity,)).fetchone()
+        if resource is not None and (resource["enabled"] or tuple(resource)[1:] != (scope, revision)):
+            raise Denied("VPS_PREPARATION_RESOURCE_NOT_PENDING", 409)
+        if db.execute("""SELECT 1 FROM jobs WHERE resource_id=? AND action='host.prepare'
+                         AND status NOT IN ('FAILED','CANCELLED_SAFE')""", (identity,)).fetchone():
+            raise Denied("VPS_PREPARATION_ALREADY_PENDING", 409)
+        return resource is None
+
+    def _insert_preparation(self, db, job_id, actor, identity, scope, revision):
+        if self._available_preparation(db, identity, scope, revision):
+            now = int(self.clock())
+            db.execute("INSERT INTO resources VALUES(?,?,?,1,0,?,?)", (identity, scope, revision, now, now))
+        self._enqueue_mutation(db, job_id, actor, identity, scope, revision,
+                               preparation_digest(job_id, actor, identity, scope), "host.prepare")
+        return self._public(db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
+
+    def _web_preparation_owner(self, db, auth, token, csrf):
+        self._schema(db)
+        actor = auth._session(db, token, csrf=csrf, mutating=True)
+        if actor["role"] != Role.OWNER:
+            raise Denied("FORBIDDEN")
+        return actor["id"]
+
+    def latest_preparation(self, auth, token, catalog):
+        with self.store.read() as db:
+            self._schema(db)
+            actor = auth._session(db, token)
+            if actor["role"] != Role.OWNER:
+                raise Denied("FORBIDDEN")
+            scopes = {identity: target["scope_digest"] for identity, target in catalog.items()}
+            row = db.execute("""SELECT jobs.* FROM jobs JOIN json_each(?) AS allowed
+                              ON allowed.key=jobs.resource_id AND allowed.value=jobs.scope_digest
+                              WHERE jobs.action='host.prepare' AND jobs.actor_id=?
+                              ORDER BY jobs.created_at DESC,jobs.rowid DESC LIMIT 1""", (canonical(scopes).decode(), actor["id"])).fetchone()
+            return self._public(row) if row is not None else None
+
+    def _check_preparation_pin(self, db, actor, identity, target, fingerprint, correlation):
+        if secrets.compare_digest(target["fingerprint"], fingerprint):
+            return True
+        self.store.event(db, at=int(self.clock()), actor=actor, kind="resource.fingerprint_mismatch",
+                         target=identity, outcome="DENIED", correlation=correlation)
+        return False
+
+    def check_preparation_readiness(self, auth, token, csrf, identity, target, fingerprint, correlation):
+        with self.store.write() as db:
+            actor = self._web_preparation_owner(db, auth, token, csrf)
+            if self._check_preparation_pin(db, actor, identity, target, fingerprint, correlation):
+                self._available_preparation(db, identity, target["scope_digest"], target["policy_revision"])
+                return target
+        raise Denied("HOST_FINGERPRINT_MISMATCH", 412)
+
+    def request_preparation(self, auth, token, csrf, identity, target, fingerprint, correlation, *, request_key, intent, supply):
+        if not isinstance(request_key, str) or re.fullmatch(r"[A-Za-z0-9_-]{16,128}", request_key) is None:
+            raise Denied("IDEMPOTENCY_KEY_REQUIRED", 400)
+        scope, revision = target["scope_digest"], target["policy_revision"]
+        payload_hash = checksum({"target": identity, "scope": scope, "fingerprint": fingerprint, **intent})
+
+        def existing(db, actor):
+            previous = db.execute("""SELECT * FROM request_keys WHERE actor_id=? AND namespace='host.prepare'
+                                  AND request_key=? AND expires_at>?""", (actor, request_key, int(self.clock()))).fetchone()
+            if previous is None:
+                return None
+            if previous["payload_hash"] != payload_hash:
+                raise Denied("IDEMPOTENCY_CONFLICT", 409)
+            return self._public(db.execute("SELECT * FROM jobs WHERE id=?", (previous["job_id"],)).fetchone())
+
+        with self.store.write() as db:
+            actor = self._web_preparation_owner(db, auth, token, csrf)
+            pinned = self._check_preparation_pin(db, actor, identity, target, fingerprint, correlation)
+            if pinned:
+                reused = existing(db, actor)
+                if reused is not None:
+                    return reused
+                self._available_preparation(db, identity, scope, revision)
+        if not pinned:
+            raise Denied("HOST_FINGERPRINT_MISMATCH", 412)
+
+        job = identifier()
+        supply(job, actor)
+        with self.store.write() as db:
+            if self._web_preparation_owner(db, auth, token, csrf) != actor:
+                raise Denied("ACTOR_REVOKED")
+            reused = existing(db, actor)
+            if reused is not None:
+                return reused
+            result = self._insert_preparation(db, job, actor, identity, scope, revision)
+            db.execute("""INSERT INTO request_keys VALUES(?,'host.prepare',?,?,?,?)
+                          ON CONFLICT(actor_id,namespace,request_key) DO UPDATE SET
+                          payload_hash=excluded.payload_hash,job_id=excluded.job_id,expires_at=excluded.expires_at""",
+                       (actor, request_key, payload_hash, job, int(self.clock()) + 86400))
+            return result
 
     @staticmethod
     def _check_preparation_target(target):

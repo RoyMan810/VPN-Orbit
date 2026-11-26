@@ -36,6 +36,7 @@ REPO = Path(__file__).resolve().parents[2]
 UID_API, UID_WORKER, UID_BROKER, UID_STRANGER = 23101, 23102, 23103, 23105
 GID_APP, GID_BROKER_RPC, GID_GATE_RPC = 23201, 23202, 23203
 TARGET, SECRET = "01JCYQZ4T9V8MNVYEH3D2M7Q1A", "01JCYQZ4T9V8MNVYEH3D2M7Q1C"
+PREPARATION_TARGET = "01JCYQZ4T9V8MNVYEH3D2M7Q1D"
 ORIGIN = "https://vpn-orbit.test"
 
 
@@ -149,6 +150,7 @@ def main():
             item.chmod(0o755 if item.is_dir() else 0o644)
         def role_options(role):
             return {"api": dict(user=UID_API, group=GID_APP, extra_groups=[]),
+                    "preparation-api": dict(user=UID_API, group=GID_APP, extra_groups=[GID_BROKER_RPC]),
                     "worker": dict(user=UID_WORKER, group=UID_WORKER, extra_groups=[GID_APP, GID_BROKER_RPC, GID_GATE_RPC]),
                     "broker": dict(user=UID_BROKER, group=UID_BROKER, extra_groups=[GID_GATE_RPC]),
                     "stranger": dict(user=UID_STRANGER, group=UID_STRANGER, extra_groups=[GID_BROKER_RPC]),
@@ -156,7 +158,8 @@ def main():
         config_path = lab / "runtime.json"
         def service_env(role):
             # A foreign launcher HOME must not enable implicit SSH trust/key discovery in Broker.
-            name = {"api": "vpn-orbit-api", "worker": "vpn-orbit-worker", "broker": "vpn-orbit-broker", "root": "root", "stranger": "nobody"}[role]
+            name = {"api": "vpn-orbit-api", "preparation-api": "vpn-orbit-api", "worker": "vpn-orbit-worker",
+                    "broker": "vpn-orbit-broker", "root": "root", "stranger": "nobody"}[role]
             return {**os.environ, "PYTHONPATH": str(code), "HOME": "/root" if role in ("root", "broker") else "/nonexistent",
                     "USER": name, "LOGNAME": name}
         def invoke(mode, role, *extra, input=None):
@@ -284,6 +287,8 @@ Match User {account}
             targets = {"v": 1, "targets": [{"id": TARGET, "ip": "10.222.0.2", "port": 2222, "allowed_cidrs": ["10.222.0.0/30"],
                        "host_key": " ".join((lab / "host.pub").read_text().split()[:2]), "secret_ref": SECRET + ":v1",
                        "policy_revision": 1, "dependencies": [], "capabilities": ["host.probe"]}]}
+            targets["targets"].append({**targets["targets"][0], "id": PREPARATION_TARGET, "port": 2223,
+                                       "secret_ref": identifier() + ":v1", "capabilities": ["host.prepare", "host.probe"]})
             (lab / "targets.json").write_bytes(canonical(targets))
             (lab / "targets.json").chmod(0o644)
             with socket.socket() as reservation:
@@ -296,6 +301,7 @@ Match User {account}
                       "supervisor_directory": str(lab / "gate"), "broker_directory": str(lab / "broker"), "vault_directory": str(lab / "vault"),
                       "vault_credential": str(lab / "broker-credential"), "public_verify_key": str(lab / "gate.pub"),
                       "gate_socket": str(lab / "sockets" / "gate" / "gate.sock"), "broker_socket": str(lab / "sockets" / "broker" / "broker.sock")}
+            config["preparation_catalog"] = Policy(targets["targets"]).enrollment_catalog(ssh_endpoints=True, preparation=True)
             config_path.write_bytes(canonical(config))
             config_path.chmod(0o644)
             store = Store.initialize(Path(config["database"]), access=DataAccess(UID_API, GID_APP))
@@ -318,7 +324,7 @@ Match User {account}
                 listeners.append(listener)
             gate_process = spawn("supervisor", "root", listener=listeners[0])
             broker_process = spawn("broker", "broker", listener=listeners[1])
-            api_process = spawn("api", "api")
+            api_process = spawn("api", "preparation-api")
             for listener in listeners:
                 listener.close()
             client = httpx.Client(base_url=f"http://127.0.0.1:{api_port}", timeout=15,
@@ -355,12 +361,16 @@ Match User {account}
             assert inventory.json()["observation"]["last_success"]["docker"] == docker_summary
             print("Distinct API and Worker UIDs committed one verified SSH observation through Broker and host authority.", flush=True)
             print("The restricted v4 helper returned software metadata and a fail-closed Docker scope through the inventory API.", flush=True)
-            for role in ("api", "worker"):
+            for role in ("api", "preparation-api", "worker"):
                 blocked = json.loads(invoke("access", role).stdout)
                 for name in ("vault", "gate_journal", "credential"):
                     assert blocked[name] == errno.EACCES, (role, name, blocked)
                 if role == "api":
                     assert blocked["gate"] == blocked["broker"] == errno.EACCES
+                if role == "preparation-api":
+                    assert blocked["gate"] == errno.EACCES and blocked["broker"] == 0
+                    for operation in ("use_for_scoped_ssh", "prepare.reconcile", "receipt.get"):
+                        assert rpc(role, "broker", operation, {}) == {"ok": False, "code": "RPC_OPERATION_DENIED"}
             denied = rpc("stranger", "broker", "use_for_scoped_ssh", {"consumer_kind": "worker"})
             assert denied == {"ok": False, "code": "RPC_PEER_DENIED"}, denied
             denied = rpc("worker", "gate", "update.quiesce", {"kind": "application"})
@@ -418,6 +428,15 @@ Match User {account}
             assert job(mismatch)["reason"] == "SSH_HOST_KEY_MISMATCH", job(mismatch)
             store.verify_audit()
             print("Real SSH host-key replacement was denied and the failed observation was committed with audit/outbox.", flush=True)
+            preparation = client.post("/api/v1/enrollment/preparation", headers={"Idempotency-Key": secrets.token_urlsafe(20)},
+                                      json={"ip": "10.222.0.2", "port": 2223, "username": "root", "password": secrets.token_urlsafe(20),
+                                            "fingerprint": config["preparation_catalog"][PREPARATION_TARGET]["fingerprint"]})
+            assert preparation.status_code == 202, preparation.text
+            queued = preparation.json()
+            assert (queued["resource_id"], queued["action"], queued["status"]) == (PREPARATION_TARGET, "host.prepare", "QUEUED")
+            assert client.get("/api/v1/enrollment/preparation").json()["job"] == queued
+            assert client.get(f"/api/v1/resources/{PREPARATION_TARGET}").json()["enabled"] is False
+            print("Real API peer supplied temporary preparation credentials while SSH execution and reconciliation stayed denied.", flush=True)
             client.close()
         except BaseException:
             # Print only daemon startup diagnostics; never dump request bodies, key files or Vault data.

@@ -9,11 +9,13 @@ const never = '01JCYQZ4T9V8MNVYEH3D2M7Q1C'
 const password = 'VPN-Orbit fixture password!'
 
 let clientNumber = 0
-test.beforeEach(async ({ context }, { workerIndex }) => {
+test.beforeEach(async ({ context, request }, { workerIndex }) => {
   // The loopback Controller fixture trusts the forwarded client IP.
   // Give each browser context its own login-rate bucket.
   const address = `2001:db8::${workerIndex.toString(16)}:${(++clientNumber).toString(16)}`
   await context.setExtraHTTPHeaders({ 'X-Forwarded-For': address })
+  // Each scenario starts with a fresh request budget for the shared Owner.
+  expect((await request.post('/__fixture__/reset-api-budget')).status()).toBe(204)
 })
 
 async function signIn(page: Page, username = 'fixture-owner') {
@@ -1027,6 +1029,47 @@ test('owner can check readiness before registration and see a localized result',
   await expect(page.getByText('Debian 13 (amd64)', { exact: true })).toHaveCount(0)
   expect(checks).toBe(1)
   expect(registrations).toBe(0)
+})
+
+test('owner can submit preparation and recover its status after a lost reply and reload', async ({ page }) => {
+  const id = '01JCYQZ4T9V8MNVYEH3D2M7Q1T'
+  const fingerprint = 'SHA256:' + 'A'.repeat(43)
+  let accepted = false
+  let finished = false
+  const job = () => ({ id, resource_id: never, action: 'host.prepare', status: finished ? 'SUCCEEDED' : 'QUEUED',
+    reason: finished ? 'VPS_PREPARATION_VERIFIED' : null, revision: finished ? 6 : 1 })
+  await page.route('**/api/v1/enrollment/preparation', route => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, job: accepted ? job() : null } })
+    expect(route.request().headers()['idempotency-key']).toMatch(/^[0-9a-f-]{36}$/)
+    expect(route.request().postDataJSON()).toEqual({ ip: '192.0.2.8', port: 22, username: 'ubuntu', fingerprint, password: 'disposable' })
+    accepted = true
+    return route.abort('failed')
+  })
+  await page.route('**/api/v1/jobs/' + id, route => route.fulfill({ json: job() }))
+  await page.route('**/api/v1/jobs/' + id + '/timeline', route => route.fulfill({ json: { items: [
+    { seq: 1, at: 1_800_000_000, status: 'QUEUED', reason: null },
+    { seq: 6, at: 1_800_000_001, status: 'SUCCEEDED', reason: 'VPS_PREPARATION_VERIFIED' },
+  ] } }))
+  await signIn(page)
+  await page.getByText('Connect a VPS', { exact: true }).click()
+  await page.getByLabel('VPS IP address').fill('192.0.2.8')
+  await page.getByLabel('SSH username').fill('ubuntu')
+  await page.getByLabel('SSH fingerprint from the VPS console').fill(fingerprint)
+  const credential = page.getByLabel('SSH password', { exact: true })
+  await credential.fill('disposable')
+  await page.getByRole('button', { name: 'Prepare VPS', exact: true }).click()
+  const progress = page.getByRole('region', { name: 'VPS preparation' })
+  await expect(progress.getByText('Queued', { exact: true })).toBeVisible()
+  await expect(credential).toHaveValue('')
+  await page.reload()
+  await page.getByText('Connect a VPS', { exact: true }).click()
+  await expect(progress.getByText(id, { exact: true })).toBeVisible()
+  finished = true
+  await expect(progress.getByText('VPS is ready')).toBeVisible()
+  await progress.getByRole('button', { name: 'Show job history' }).click()
+  await expect(progress.locator('ol li')).toHaveCount(2)
+  await page.getByLabel('Language').selectOption('ru')
+  await expect(page.getByRole('region', { name: 'Подготовка VPS' }).getByText('VPS готова')).toBeVisible()
 })
 
 test('first-run help and device time settings are keyboard accessible', async ({ page }) => {

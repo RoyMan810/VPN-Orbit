@@ -420,6 +420,14 @@ class InstallationTests(unittest.TestCase):
                 self.assertNotIn("docker.sock", volume["source"])
         self.assertFalse(any("/run/vpn-orbit/" in p["source"] for p in api["volumes"]))
 
+        configured = compose_document({**cfg, "preparation_catalog": {"target": {}}}, "vpn-orbit/controller:fixture", 18080)
+        api = configured["services"]["api"]
+        self.assertEqual(api["group_add"], ["23202"])
+        self.assertEqual(api["ulimits"], {"core": 0})
+        extra_mount, = [mount for mount in api["volumes"] if mount["source"].startswith("/run/vpn-orbit/")]
+        self.assertEqual(extra_mount["source"], "/run/vpn-orbit/broker")
+        self.assertTrue(extra_mount["read_only"])
+
     def test_fresh_empty_policy_has_no_capability_and_origin_must_remain_https(self):
         policy = Policy([])
         self.assertEqual(policy.targets, {})
