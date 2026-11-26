@@ -184,3 +184,23 @@ class PreparationJobTests(unittest.TestCase):
             self.assertTrue(self.worker.run_one())
             ssh.assert_not_called()
         self.assertEqual(self.state(), ("FAILED", "VPS_PREPARATION_CREDENTIALS_EXPIRED", 0))
+
+    def test_web_api_can_only_supply_credentials_for_configured_targets(self):
+        web_peer = Peer(1, 11003, 11004)
+        role = "preparation-api"
+        with self.assertRaisesRegex(Denied, "CAPABILITY_DISABLED"):
+            self.broker.dispatch(role, web_peer, "prepare.credentials", self.credentials)
+        self.broker.web_preparation_targets = frozenset({TARGET})
+        for operation in ("prepare.reconcile", "use_for_scoped_ssh", "receipt.get", "apps.reconcile", "firewall.status"):
+            with self.subTest(operation=operation), self.assertRaisesRegex(Denied, "RPC_OPERATION_DENIED"):
+                self.broker.dispatch(role, web_peer, operation, {})
+        with self.assertRaisesRegex(Denied, "STALE_SCOPE"):
+            self.broker.dispatch(role, web_peer, "prepare.credentials", {**self.credentials, "scope_digest": "a" * 64})
+        self.assertEqual(self.broker.dispatch(role, web_peer, "prepare.credentials", self.credentials), {"job_id": self.job})
+        with self.broker.journal.connect() as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM receipts").fetchone())
+        self.queue.enqueue_preparation(self.job, ACTOR, self.target)
+        with patch("vpn_orbit.runtime.broker.PreparationSSH", autospec=True) as ssh:
+            ssh.return_value.phase.return_value = "VERIFIED"
+            self.assertTrue(self.worker.run_one())
+        self.assertEqual(self.state(), ("SUCCEEDED", "VPS_PREPARATION_VERIFIED", 1))

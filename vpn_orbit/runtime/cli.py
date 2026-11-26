@@ -47,7 +47,8 @@ def configuration(path):
     fields(value, ("v", "database", "app_uid", "app_gid", "worker_uid", "worker_gid", "broker_uid", "broker_gid",
                    "broker_rpc_gid", "gate_rpc_gid", "public_origin", "trusted_proxies", "api_port", "targets",
                    "supervisor_directory", "broker_directory", "vault_directory", "vault_credential", "public_verify_key",
-                   "gate_socket", "broker_socket", *(name for name in ("api_bind", "writer_directory", "enrollment_catalog") if name in value)))
+                   "gate_socket", "broker_socket", *(name for name in ("api_bind", "writer_directory", "enrollment_catalog",
+                                                                       "preparation_catalog") if name in value)))
     if type(value["v"]) is not int or value["v"] != 1:
         raise Denied("RUNTIME_CONFIG_INVALID")
     for key in ("app_uid", "app_gid", "worker_uid", "worker_gid", "broker_uid", "broker_gid", "broker_rpc_gid", "gate_rpc_gid"):
@@ -103,11 +104,16 @@ def run(config, command, *, once=False, listener=None, import_args=None):
             pass
         settings = Settings(Path(config["database"]), config["public_origin"], tuple(config["trusted_proxies"]), access.owner_uid,
                             access.shared_gid, Path(config["writer_directory"]) if writers else None)
-        uvicorn.run(create_app(settings, enrollment_catalog=config.get("enrollment_catalog")), host=config.get("api_bind", "127.0.0.1"), port=config["api_port"], proxy_headers=False, access_log=False)
+        preparation = config.get("preparation_catalog")
+        client = Client(config["broker_socket"], server_uids={0, config["broker_uid"]}, timeout=5) if preparation else None
+        uvicorn.run(create_app(settings, enrollment_catalog=config.get("enrollment_catalog"),
+                               preparation_catalog=preparation, preparation_broker=client), host=config.get("api_bind", "127.0.0.1"),
+                    port=config["api_port"], proxy_headers=False, access_log=False)
         return
     policy = Policy.load(config["targets"], owner=0)
     if command == "enrollment-catalog":
-        print(json.dumps(policy.enrollment_catalog(ssh_endpoints=getattr(import_args, "ssh_endpoints", False))))
+        print(json.dumps(policy.enrollment_catalog(ssh_endpoints=getattr(import_args, "ssh_endpoints", False),
+                                                   preparation=getattr(import_args, "preparation", False))))
         return
     if command == "initialize-time-health":
         with Authority(config["supervisor_directory"], policy).journal.connect():
@@ -209,11 +215,15 @@ def run(config, command, *, once=False, listener=None, import_args=None):
     from .broker import Broker
     gate = Client(config["gate_socket"], server_uids={0})
     verify_key = protected_bytes(config["public_verify_key"], owner=0, maximum=32)
-    broker = Broker(config["broker_directory"], policy, vault, gate, verify_key, worker_uid=config["worker_uid"], writers=writers)
+    identities = {(config["worker_uid"], config["worker_gid"]): "worker", (0, 0): "local-root"}
+    preparation = config.get("preparation_catalog") or {}
+    if preparation:
+        identities[config["app_uid"], config["app_gid"]] = "preparation-api"
+    broker = Broker(config["broker_directory"], policy, vault, gate, verify_key, worker_uid=config["worker_uid"], writers=writers,
+                    web_preparation_targets=preparation.keys())
     with process_lock(Path(config["broker_directory"]) / "broker.lock"):
         broker.recover()
-        serve(listener or activated_socket(config["broker_socket"]), broker.dispatch,
-              {(config["worker_uid"], config["worker_gid"]): "worker", (0, 0): "local-root"})
+        serve(listener or activated_socket(config["broker_socket"]), broker.dispatch, identities)
 
 
 def prepare_observation(config, policy, queue, command, args):
@@ -257,6 +267,7 @@ def main(argv=None):
         commands.add_parser(name)
     catalog = commands.add_parser("enrollment-catalog")
     catalog.add_argument("--ssh-endpoints", action="store_true")
+    catalog.add_argument("--preparation", action="store_true")
     worker = commands.add_parser("worker")
     worker.add_argument("--once", action="store_true")
     for name in ("prepare-observation", "reconcile-preparation"):

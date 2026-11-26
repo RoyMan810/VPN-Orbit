@@ -120,10 +120,11 @@ class Policy:
             raise Denied("TARGET_POLICY_INVALID")
         return cls(value["targets"])
 
-    def enrollment_catalog(self, *, ssh_endpoints=False):
+    def enrollment_catalog(self, *, ssh_endpoints=False, preparation=False):
         catalog = {}
         for target in self.targets.values():
-            if "host.probe" in target.value["capabilities"] and "host.prepare" not in target.value["capabilities"]:
+            capabilities = target.value["capabilities"]
+            if "host.probe" in capabilities and ("host.prepare" in capabilities) == preparation:
                 catalog[target.id] = {"fingerprint": target.fingerprint, "scope_digest": target.scope_digest,
                                       "policy_revision": target.revision}
                 if ssh_endpoints:

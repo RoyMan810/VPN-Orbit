@@ -290,6 +290,7 @@ function Inventory({ t, lang, expired, session }: { t: Copy; lang: Language; exp
   const [now, setNow] = useState(Date.now)
   const after = cursors[cursors.length - 1]
   const reload = useCallback(() => refresh(value => value + 1), [])
+  const selectEnrollment = useCallback((id: string) => { setEnrolled(id); reload() }, [reload])
   const current = page && detail?.id === selected ? detail : null
 
   useEffect(() => {
@@ -343,8 +344,8 @@ function Inventory({ t, lang, expired, session }: { t: Copy; lang: Language; exp
         <span aria-hidden="true">↻</span> {t.refresh}
       </button>
     </div>
-    {session.user.role === 'Owner' && <Enrollment t={t} session={session} expired={expired} firstVps={page?.items.length === 0 && cursors.length === 1}
-      onEnroll={id => { setEnrolled(id); reload() }}/>}
+    {session.user.role === 'Owner' && <Enrollment t={t} lang={lang} session={session} expired={expired}
+      firstVps={page?.items.length === 0 && cursors.length === 1} onEnroll={selectEnrollment}/>}
     <div className="columns">
       <section className="panel hosts" aria-labelledby="host-heading">
         <div className="panel-heading">

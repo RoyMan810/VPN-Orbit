@@ -32,6 +32,7 @@ from .release_info import ReleaseLookup
 from .restart_requests import request_reconciliation, request_restart, restart_timeline
 from .runtime.protocol import ULID
 from .runtime.ssh_enrollment import verify_credentials
+from .runtime.ssh_preparation import validate_administrator
 
 
 def failure(code, status, correlation, *, retry_after=None, details=None):
@@ -225,7 +226,8 @@ class ApplicationDraft(Input):
     action: Literal["install", "start", "remove"]
 
 
-def create_app(settings: Settings, *, auth: AuthService | None = None, enrollment_catalog=None):
+def create_app(settings: Settings, *, auth: AuthService | None = None, enrollment_catalog=None,
+               preparation_catalog=None, preparation_broker=None):
     import os
     access = DataAccess(settings.database_owner_uid if settings.database_owner_uid is not None else os.geteuid(), settings.database_gid)
     service = auth or AuthService(Store(settings.database, access=access,
@@ -235,6 +237,7 @@ def create_app(settings: Settings, *, auth: AuthService | None = None, enrollmen
     audit_scan = Lock()
     releases = ReleaseLookup(__version__)
     ssh_enrollment = Lock()
+    preparations = (preparation_catalog or {}) if preparation_broker is not None else {}
     app = FastAPI(title="VPN-Orbit API", version=__version__, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.auth = service
     app.add_middleware(SecurityBoundary, settings=settings, auth=service)
@@ -396,36 +399,48 @@ def create_app(settings: Settings, *, auth: AuthService | None = None, enrollmen
         response.headers["Location"] = f'/api/v1/resources/{result["id"]}'
         return result
 
-    def ssh_enrollment_request(body, request, actor, *, preflight):
-        if actor.role != Role.OWNER:
-            raise Denied("FORBIDDEN")
+    def enrollment_credentials(body):
         if (body.password is None) == (body.private_key is None):
             raise Denied("SSH_CREDENTIAL_REQUIRED", 422)
+        return {"password": body.password.get_secret_value() if body.password is not None else None,
+                "private_key": body.private_key.get_secret_value() if body.private_key is not None else None}
+
+    def match_enrollment_target(body, catalog):
         try:
             address = ipaddress.ip_address(body.ip)
             if address.is_loopback or address.is_link_local or address.is_multicast or address.is_unspecified or "%" in body.ip:
                 raise ValueError
         except ValueError:
             raise Denied("SSH_ENDPOINT_INVALID", 422) from None
-        catalog = enrollment_catalog or {}
         matches = [identity for identity, target in catalog.items()
                    if (target.get("ip"), target.get("port")) == (str(address), body.port)]
         if not matches:
             raise Denied("ENROLLMENT_TARGET_UNAVAILABLE", 404)
         if len(matches) != 1:
             raise Denied("ENROLLMENT_TARGET_AMBIGUOUS", 409)
+        return matches[0]
+
+    def ssh_enrollment_request(body, request, actor, *, preflight):
+        if actor.role != Role.OWNER:
+            raise Denied("FORBIDDEN")
+        credentials = enrollment_credentials(body)
+        catalog = enrollment_catalog or {}
+        if preflight:
+            catalog = {**catalog, **preparations}
+        identity = match_enrollment_target(body, catalog)
         if not ssh_enrollment.acquire(blocking=False):
             raise Denied("SSH_ENROLLMENT_BUSY", 503, retry_after=2)
         try:
-            args = (service, token(request), csrf(request), matches[0], body.fingerprint, catalog, request.state.correlation_id)
-            target = queue.check_ssh_enrollment(*args)
-            readiness = verify_credentials(target, body.username,
-                                           password=body.password.get_secret_value() if body.password is not None else None,
-                                           private_key=body.private_key.get_secret_value() if body.private_key is not None else None,
-                                           preflight=preflight)
+            access = (service, token(request), csrf(request), identity)
+            correlation = request.state.correlation_id
+            if preflight and identity in preparations:
+                target = queue.check_preparation_readiness(*access, preparations[identity], body.fingerprint, correlation)
+            else:
+                target = queue.check_ssh_enrollment(*access, body.fingerprint, catalog, correlation)
+            readiness = verify_credentials(target, body.username, preflight=preflight, **credentials)
             if preflight:
                 return readiness
-            return queue.enroll(*args)
+            return queue.enroll(*access, body.fingerprint, catalog, correlation)
         finally:
             ssh_enrollment.release()
 
@@ -437,6 +452,41 @@ def create_app(settings: Settings, *, auth: AuthService | None = None, enrollmen
     def enroll_ssh(body: EnrollSSH, request: Request, response: Response, actor=Depends(principal)):
         result = ssh_enrollment_request(body, request, actor, preflight=False)
         response.headers["Location"] = f'/api/v1/resources/{result["id"]}'
+        return result
+
+    @app.get("/api/v1/enrollment/preparation")
+    def preparation_available(request: Request, actor=Depends(principal)):
+        if actor.role != Role.OWNER:
+            raise Denied("FORBIDDEN")
+        return {"available": bool(preparations), "job": queue.latest_preparation(service, token(request), preparations) if preparations else None}
+
+    @app.post("/api/v1/enrollment/preparation", status_code=202)
+    def prepare_ssh(body: EnrollSSH, request: Request, response: Response, actor=Depends(principal)):
+        if actor.role != Role.OWNER:
+            raise Denied("FORBIDDEN")
+        credentials = enrollment_credentials(body)
+        validate_administrator(body.username, **credentials)
+        identity = match_enrollment_target(body, preparations)
+        target = preparations[identity]
+
+        def supply(job, owner):
+            try:
+                receipt = preparation_broker.call("prepare.credentials", {
+                    "job_id": job, "actor_id": owner, "target": identity, "scope_digest": target["scope_digest"],
+                    "username": body.username, **credentials,
+                })
+            except Denied as error:
+                if error.code.startswith("RPC_") or error.code == "VPS_PREPARATION_CREDENTIALS_BUSY":
+                    raise Denied(error.code, 503, retry_after=2) from None
+                raise
+            if receipt != {"job_id": job}:
+                raise Denied("RPC_INVALID_RESPONSE", 503)
+
+        auth_kind = "password" if body.password is not None else "private_key"
+        result = queue.request_preparation(service, token(request), csrf(request), identity, target, body.fingerprint,
+                                           request.state.correlation_id, request_key=request.headers.get("idempotency-key"),
+                                           intent={"username": body.username, "auth_kind": auth_kind}, supply=supply)
+        response.headers["Location"] = f'/api/v1/jobs/{result["id"]}'
         return result
 
     @app.get("/api/v1/resources")

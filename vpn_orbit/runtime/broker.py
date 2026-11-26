@@ -28,7 +28,8 @@ _CREDENTIAL_TTL = 180
 
 class Broker:
     def __init__(self, directory, policy, vault, gate, verify_key, *, worker_uid, execute=probe, execute_restart=restart,
-                 execute_firewall=apply_firewall, execute_application=application, clock=time.time, writers=None):
+                 execute_firewall=apply_firewall, execute_application=application, clock=time.time, writers=None,
+                 web_preparation_targets=()):
         self.directory, self.policy = Path(directory), policy
         self.vault, self.gate, self.verify_key = vault, gate, verify_key
         self.worker_uid, self.execute, self.clock = worker_uid, execute, clock
@@ -38,6 +39,7 @@ class Broker:
         self.firewall_status = firewall_status
         self._preparation_credentials = {}
         self._credentials_lock = Lock()
+        self.web_preparation_targets = frozenset(web_preparation_targets)
         self.journal = Journal(self.directory / "receipts.sqlite3", writers=writers)
         verify_known_hosts(self.directory / "known_hosts", policy)
 
@@ -161,8 +163,10 @@ class Broker:
         validate_administrator(username, password, private_key)
         return target, (username, password, private_key)
 
-    def _supply_preparation(self, payload):
+    def _supply_preparation(self, payload, *, web=False):
         target, credentials = self._preparation_request(payload)
+        if web and target.id not in self.web_preparation_targets:
+            raise Denied("CAPABILITY_DISABLED")
         job_id = payload["job_id"]
         with self._credentials_lock:
             if job_id in self._preparation_credentials or len(self._preparation_credentials) >= 8:
@@ -299,6 +303,10 @@ class Broker:
         return remote
 
     def dispatch(self, role, peer, operation, payload):
+        if role == "preparation-api":
+            if operation == "prepare.credentials":
+                return self._supply_preparation(payload, web=True)
+            raise Denied("RPC_OPERATION_DENIED")
         if role == "local-root" and (peer.uid, peer.gid) == (0, 0):
             if operation == "prepare.credentials":
                 return self._supply_preparation(payload)
