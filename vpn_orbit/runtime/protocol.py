@@ -10,6 +10,7 @@ from ..errors import Denied
 
 
 MAX_FRAME = 16384
+PARTIAL_PREPARATION = "VPS_PREPARATION_PARTIAL_VERIFIED"
 ULID = r"[0-7][0-9A-HJKMNP-TV-Z]{25}"
 SHA256 = r"[0-9a-f]{64}"
 BOOT_ID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"

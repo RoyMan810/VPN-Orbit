@@ -22,7 +22,7 @@ from ..worker import Worker
 from .authority import Authority, verify_host_time
 from .ipc import Client, activated_socket, serve
 from .policy import Policy
-from .protocol import ULID, checksum, fields, integer, text, decode
+from .protocol import PARTIAL_PREPARATION, ULID, checksum, fields, integer, text, decode
 from .storage import new_private_file, process_lock, protected_bytes
 from .vault import Vault
 from .timehealth import TimeHealth
@@ -78,7 +78,7 @@ def run(config, command, *, once=False, listener=None, import_args=None):
                  "import-application-key": config["broker_uid"],
                 "enrollment-catalog": 0, "register-observations": 0, "initialize-time-health": 0, "time-health": 0,
                 "initialize-credential": 0, "initialize-writers": 0,
-                "prepare-observation": 0, "reconcile-preparation": 0}[command]
+                "prepare-observation": 0, "reconcile-preparation": 0, "resume-preparation": 0}[command]
     if os.geteuid() != expected:
         raise Denied("LOCAL_SERVICE_IDENTITY_INVALID")
     access = DataAccess(config["app_uid"], config["app_gid"])
@@ -148,7 +148,7 @@ def run(config, command, *, once=False, listener=None, import_args=None):
             if "host.prepare" not in target.value["capabilities"]:
                 queue.register_resource(target.id, target.scope_digest, target.revision)
         return
-    if command in ("prepare-observation", "reconcile-preparation"):
+    if command in ("prepare-observation", "reconcile-preparation", "resume-preparation"):
         queue = JobQueue(Store(config["database"], access=access, writers=writers))
         prepare_observation(config, policy, queue, command, import_args)
         return
@@ -232,6 +232,12 @@ def prepare_observation(config, policy, queue, command, args):
         raise Denied("CAPABILITY_DISABLED")
     if command == "prepare-observation":
         job_id, actor = identifier(), queue.preparation_owner()
+    elif command == "resume-preparation":
+        job_id = args.job
+        actor, previous = queue.preparation_resume_request(job_id, target)
+        if previous is not None:
+            print(json.dumps(previous))
+            return
     else:
         job_id = args.job
         actor = queue.preparation_incident(job_id, target)["actor_id"]
@@ -252,6 +258,13 @@ def prepare_observation(config, policy, queue, command, args):
     if command == "prepare-observation":
         broker.call("prepare.credentials", payload)
         result = queue.enqueue_preparation(job_id, actor, target)
+    elif command == "resume-preparation":
+        successor = identifier()
+        receipt = broker.call("prepare.resume", {**payload, "successor_id": successor})
+        if receipt["result_code"] == PARTIAL_PREPARATION:
+            result = queue.resume_preparation(job_id, target, receipt, successor)
+        else:
+            result = queue.reconcile_preparation(job_id, target, receipt)
     else:
         receipt = broker.call("prepare.reconcile", payload)
         result = queue.reconcile_preparation(job_id, target, receipt)
@@ -270,12 +283,12 @@ def main(argv=None):
     catalog.add_argument("--preparation", action="store_true")
     worker = commands.add_parser("worker")
     worker.add_argument("--once", action="store_true")
-    for name in ("prepare-observation", "reconcile-preparation"):
+    for name in ("prepare-observation", "reconcile-preparation", "resume-preparation"):
         preparation = commands.add_parser(name)
         preparation.add_argument("--target", required=True)
         preparation.add_argument("--user", required=True)
         preparation.add_argument("--admin-key-file", type=Path)
-        if name == "reconcile-preparation":
+        if name != "prepare-observation":
             preparation.add_argument("--job", required=True)
     key = commands.add_parser("import-key")
     key.add_argument("--key-file", type=Path, required=True)

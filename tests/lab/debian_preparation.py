@@ -7,7 +7,7 @@ import secrets
 import subprocess
 import tempfile
 import time
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import asyncssh
 from fastapi.testclient import TestClient
@@ -17,9 +17,12 @@ from vpn_orbit.api import create_app
 from vpn_orbit.auth import AuthService
 from vpn_orbit.config import Settings
 from vpn_orbit.database import Store, identifier
+from vpn_orbit.errors import Denied
 from vpn_orbit.runtime.ipc import Peer
 from vpn_orbit.runtime.policy import Policy
 from vpn_orbit.runtime.preparation_progress import PREPARATION_STEPS
+from vpn_orbit.runtime.protocol import PARTIAL_PREPARATION
+from vpn_orbit.runtime.ssh_preparation import PreparationSSH
 
 
 ORIGIN = "https://vpn-orbit.test"
@@ -60,9 +63,31 @@ def verify_preparation(root, name, ip, password):
             assert preflight.json() == {"platform": "DEBIAN_13", "ssh": "VERIFIED"}, preflight.text
             queued = client.post("/api/v1/enrollment/preparation", json=body, headers=headers)
             assert queued.status_code == 202, queued.text
-            job_id = queued.json()["id"]
+            original_id = queued.json()["id"]
+            real_phase = PreparationSSH.phase
+
+            async def lost_reply(transport, phase, *, inspect):
+                result = await real_phase(transport, phase, inspect=inspect)
+                if phase == "helpers":
+                    assert inspect and result == "INCOMPLETE"
+                    raise Denied("VPS_PREPARATION_SSH_UNCONFIRMED")
+                return result
+
+            with patch.object(PreparationSSH, "phase", lost_reply):
+                assert worker.run_one()
+            assert authority.status(original_id)["state"] == "UNKNOWN_OUTCOME"
+            assert client.get(queued.headers["location"]).json()["preparation"] == {"phase": "helpers", "stage": "CHECKING"}
+            job_id = identifier()
+            receipt = broker.dispatch("local-root", Peer(1, 0, 0), "prepare.resume", {
+                "job_id": original_id, "successor_id": job_id, "target": target.id, "actor_id": owner,
+                "scope_digest": target.scope_digest, "username": "fixtureadmin", "password": password, "private_key": None,
+            })
+            assert receipt["result_code"] == PARTIAL_PREPARATION, receipt
+            resumed = queue.resume_preparation(original_id, target, receipt, job_id)
+            assert resumed["status"] == "QUEUED" and resumed["id"] == job_id
+            assert not client.get(f"/api/v1/resources/{target.id}").json()["enabled"]
             assert worker.run_one()
-            current = client.get(queued.headers["location"])
+            current = client.get(f"/api/v1/jobs/{job_id}")
             assert current.status_code == 200, current.text
             assert current.json()["status"] == "SUCCEEDED", current.text
             assert current.json()["preparation"] == {"phase": "access", "stage": "VERIFIED"}, current.text
@@ -105,7 +130,7 @@ def main():
         docker("exec", "-i", name, "chpasswd", input=f"fixtureadmin:{password}\n")
         with tempfile.TemporaryDirectory(prefix="vpn-orbit-debian-") as temp:
             verify_preparation(Path(temp), name, ip, password)
-        print("Debian 13: Web preflight, Worker and Authority, all preparation steps and both SSH logins passed.")
+        print("Debian 13: Web preflight, partial preparation, verified resume and both SSH logins passed.")
     except Exception:
         subprocess.run(["docker", "logs", "--tail", "45", name], timeout=15, check=False)
         raise
