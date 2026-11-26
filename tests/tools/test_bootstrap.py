@@ -76,10 +76,19 @@ class BootstrapTests(unittest.TestCase):
               patch.object(bootstrap, "apt") as apt,
               patch.object(bootstrap, "install_docker") as install_docker):
             with self.assertRaisesRegex(ValueError, "git fetch --unshallow"):
-                bootstrap.install("admin", None, "noble", bootstrap.WebEndpoint())
+                bootstrap.install("admin", None, ("ubuntu", "noble"), bootstrap.WebEndpoint())
             self.assertEqual(capture.call_args.args[-2:], ("rev-parse", "--is-shallow-repository"))
             apt.assert_not_called()
             install_docker.assert_not_called()
+
+    def test_docker_repository_requires_an_exact_distribution_suite(self):
+        for distribution, version, suite in (("ubuntu", "24.04", "noble"), ("ubuntu", "26.04", "resolute"),
+                                             ("debian", "13", "trixie")):
+            release = {"ID": distribution, "VERSION_ID": version, "VERSION_CODENAME": suite}
+            with self.subTest(release=release):
+                self.assertEqual(bootstrap.docker_suite(release), (distribution, suite))
+                with self.assertRaises(ValueError):
+                    bootstrap.docker_suite({**release, "VERSION_CODENAME": "sid"})
 
     def test_download_rejects_archive_with_wrong_digest(self):
         with tempfile.TemporaryDirectory() as location:

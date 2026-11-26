@@ -22,7 +22,8 @@ from vpn_orbit.runtime.storage import _credential_permissions
 DEPLOY = Path(__file__).resolve().parents[2] / "deploy"
 sys.path.insert(0, str(DEPLOY))
 from artifact import AGE_FILE, AGE_SHA256, ArtifactError, FIXED_FILES, canonical, manifest, snapshot, trusted_key
-from installer import (check_buildx, advise_capacity, check_update_bundle, compose_document, discover_release, install, origin,
+from installer import (check_buildx, advise_capacity, check_update_bundle, compose_document, discover_release,
+                       host_bundle_platform, install, origin,
                        supported_compose, supported_ubuntu, verify_image)
 
 
@@ -110,7 +111,7 @@ class InstallationTests(unittest.TestCase):
             return value, args.manifest_sha256
 
         with (patch("installer.os.umask"), patch("installer.preflight"),
-              patch("installer.snapshot", side_effect=stage_bundle),
+              patch("installer.snapshot", side_effect=stage_bundle), patch("installer.check_bundle_platform"),
               patch("installer.docker", side_effect=subprocess.TimeoutExpired("docker", 600)) as docker,
               patch("installer.folder") as folder,
               self.assertRaisesRegex(ArtifactError, "^INSTALL_BASE_IMAGE_PULL_TIMED_OUT$")):
@@ -124,6 +125,13 @@ class InstallationTests(unittest.TestCase):
         for release in ({"ID": "ubuntu", "VERSION_ID": "22.04"}, {"ID": "ubuntu", "VERSION_ID": "24.03"},
                         {"ID": "ubuntu", "VERSION_ID": "24.04-extra"}, {"ID": "debian", "VERSION_ID": "26.04"}, {}):
             self.assertFalse(supported_ubuntu(release))
+
+    def test_host_bundle_platform_requires_a_supported_amd64_distribution(self):
+        trixie = {"ID": "debian", "VERSION_ID": "13", "VERSION_CODENAME": "trixie"}
+        self.assertEqual(host_bundle_platform(trixie, "x86_64"), "debian-13-amd64")
+        self.assertIsNone(host_bundle_platform(trixie, "aarch64"))
+        self.assertIsNone(host_bundle_platform({**trixie, "VERSION_CODENAME": "bookworm"}, "x86_64"))
+        self.assertEqual(host_bundle_platform({"ID": "ubuntu", "VERSION_ID": "26.04"}, "x86_64"), "ubuntu-24.04-amd64")
 
     def test_compose_version_is_bounded(self):
         for version in ("2.39.4", "v2.39.4", "5.7.0", "v5.7.0", "2.40.3+ds1-0ubuntu1", "2.24.6+ds1-0ubuntu1~24.04.1"):
@@ -244,6 +252,19 @@ class InstallationTests(unittest.TestCase):
             self.sign()
             with self.assertRaisesRegex(ArtifactError, "BUNDLE_CONTRACT_UNSUPPORTED"):
                 manifest(self.bundle, self.key, allow_development=True)
+
+    def test_debian_bundle_is_authenticated_and_cannot_install_on_ubuntu(self):
+        self.value.update(platform="debian-13-amd64", python=f"{sys.version_info.major}.{sys.version_info.minor}")
+        self.sign()
+        self.assertEqual(manifest(self.bundle, self.key, allow_development=True)[0]["platform"], "debian-13-amd64")
+        args = SimpleNamespace(bundle=self.bundle, trust_key=self.private_seed, manifest_sha256=None, development=True)
+        with (patch("installer.os.umask"), patch("installer.preflight"), patch("installer.trusted_key", return_value=self.key),
+              patch("installer.platform.freedesktop_os_release", return_value={"ID": "ubuntu", "VERSION_ID": "24.04"}),
+              patch("installer.platform.machine", return_value="x86_64"),
+              patch("installer.docker") as docker,
+              self.assertRaisesRegex(ArtifactError, "HOST_BUNDLE_PLATFORM_MISMATCH")):
+            install(args)
+        docker.assert_not_called()
 
     def test_installer_refuses_bundle_with_different_host_python(self):
         args = SimpleNamespace(bundle=self.bundle, trust_key=self.directory / "external.pub",

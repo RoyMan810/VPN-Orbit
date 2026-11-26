@@ -18,6 +18,9 @@ FIXED_FILES = {
         "vpn-orbit-broker.service", "vpn-orbit-broker.socket",
         "vpn-orbit-supervisor.service", "vpn-orbit-supervisor.socket")),
 }
+UBUNTU_AMD64 = "ubuntu-24.04-amd64"
+DEBIAN_AMD64 = "debian-13-amd64"
+PLATFORMS = (UBUNTU_AMD64, DEBIAN_AMD64)
 IMAGE = r"docker\.io/library/python@sha256:[0-9a-f]{64}"
 MAX_FILE = 64 * 1024 * 1024
 WEB_INDEX = "web/index.html"
@@ -159,7 +162,7 @@ def manifest(bundle, key=None, *, expected_sha256=None, allow_development=False)
     channel = "development" if allow_development else "release"
     if (not isinstance(value, dict) or value.keys() != expected
             or bundle_channel(value.get("version")) != channel or value.get("channel") != channel
-            or value.get("application") != "VPN-Orbit" or value.get("platform") != "ubuntu-24.04-amd64"
+            or value.get("application") != "VPN-Orbit" or value.get("platform") not in PLATFORMS
             or value.get("python") not in ("3.13", "3.15") or value.get("sqlite_schema") != 6
             or value.get("remote_mutation_enabled") is not False
             or not isinstance(value.get("source_commit"), str)

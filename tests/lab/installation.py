@@ -35,6 +35,20 @@ ORIGIN = "https://127.0.0.1:19449"
 PORT = 18080
 PASSWORD = "Fixture-Owner-password-117!"
 FAKE_JOB = "01JCYQZ4T9V8MNVYEH3D2M7Q1A"
+PEER_PROBE = """import json
+from vpn_orbit.runtime.ipc import Client
+from vpn_orbit.errors import Denied
+with open("/etc/vpn-orbit/runtime.json") as stream:
+    config = json.load(stream)
+result = {}
+for name, operation in (("gate_socket", "attempt.status"), ("broker_socket", "receipt.get")):
+    try:
+        Client(config[name], server_uids={0, config["broker_uid"]}).call(
+            operation, {"job_id": "01JCYQZ4T9V8MNVYEH3D2M7Q1A"})
+    except Denied as error:
+        result[name] = error.code
+print(json.dumps(result))
+"""
 
 
 def run(*args, check=True, input=None, timeout=60):
@@ -617,20 +631,10 @@ def main():
                 if run("/usr/bin/systemctl", "is-active", service).stdout.strip() != b"active":
                     raise RuntimeError("Installed systemd service is inactive")
             print("Real systemd Broker/supervisor and isolated API/Worker containers started; foreign port 443 stayed untouched.", flush=True)
-            code = """import json
-from vpn_orbit.runtime.ipc import Client
-from vpn_orbit.errors import Denied
-c=json.load(open('/etc/vpn-orbit/runtime.json'))
-out={}
-for name,operation in [('gate_socket','attempt.status'),('broker_socket','receipt.get')]:
- try: Client(c[name],server_uids={0,c['broker_uid']}).call(operation,{'job_id':'01JCYQZ4T9V8MNVYEH3D2M7Q1A'})
- except Denied as e: out[name]=e.code
-print(json.dumps(out))
-"""
-            reached = json.loads(docker(args.docker_host, "exec", ids["worker"], "python", "-c", code))
+            reached = json.loads(docker(args.docker_host, "exec", ids["worker"], "python", "-c", PEER_PROBE))
             if reached != {"gate_socket": "ATTEMPT_NOT_FOUND", "broker_socket": "RECEIPT_NOT_TERMINAL"}:
                 raise RuntimeError("Worker did not authenticate with its actual container peer credentials")
-            denied = json.loads(docker(args.docker_host, "exec", ids["api"], "python", "-c", code))
+            denied = json.loads(docker(args.docker_host, "exec", ids["api"], "python", "-c", PEER_PROBE))
             if denied != {"gate_socket": "RPC_UNAVAILABLE", "broker_socket": "RPC_UNAVAILABLE"}:
                 raise RuntimeError("Backend reached a host privilege socket")
             key_path = Path("/etc/vpn-orbit/credentials/broker-dek.cred")
