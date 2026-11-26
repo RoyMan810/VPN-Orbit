@@ -10,7 +10,7 @@ import asyncssh
 
 from ..errors import Denied
 from .ssh import bounded_read
-from .vps_preparation import ACCOUNT_CONFLICT, check_account_conflicts
+from .vps_preparation import ACCOUNT_CONFLICT, check_account_conflicts, inspect_host_readiness
 
 
 CHECK_SSHD = """exec </dev/null
@@ -45,7 +45,9 @@ else
         orbit_ssh=OBSERVATION_ACCOUNT_CONFLICT
     fi
 fi
-printf 'VPN_ORBIT_PREFLIGHT_V1 %s %s\\n' "$orbit_platform" "$orbit_ssh"
+""" + inspect_host_readiness() + """
+printf 'VPN_ORBIT_PREFLIGHT_V2 %s %s %s %s %s %s\\n' "$orbit_platform" "$orbit_ssh" \\
+    "$orbit_ipv4" "$orbit_ipv6" "$orbit_docker" "$orbit_compose"
 """))
 
 
@@ -65,15 +67,18 @@ async def _read_reply(connection, command, *, input_data=b""):
 async def inspect_readiness(connection):
     status, output = await _read_reply(connection, PREFLIGHT_COMMAND)
     try:
-        marker, platform, ssh = output.decode("ascii").removesuffix("\n").split(" ")
+        marker, platform, ssh, ipv4, ipv6, docker, compose = output.decode("ascii").removesuffix("\n").split(" ")
     except (UnicodeError, ValueError):
         raise Denied("SSH_PREFLIGHT_UNAVAILABLE", 502) from None
-    if (status != 0 or marker != "VPN_ORBIT_PREFLIGHT_V1" or not output.endswith(b"\n")
+    if (status != 0 or marker != "VPN_ORBIT_PREFLIGHT_V2" or not output.endswith(b"\n")
             or platform not in ("UBUNTU_24_04", "UBUNTU_26_04", "DEBIAN_13", "UNSUPPORTED")
             or ssh not in ("VERIFIED", "DEPENDENCIES_MISSING", "SSHD_INVALID", "SUDO_OR_SSHD_UNVERIFIED",
-                           "OBSERVATION_ACCOUNT_CONFLICT")):
+                           "OBSERVATION_ACCOUNT_CONFLICT")
+            or any(route not in ("PRESENT", "ABSENT", "UNKNOWN") for route in (ipv4, ipv6))
+            or any(tool not in ("PRESENT", "NOT_DETECTED") for tool in (docker, compose))):
         raise Denied("SSH_PREFLIGHT_UNAVAILABLE", 502)
-    return {"platform": platform, "ssh": ssh}
+    return {"platform": platform, "ssh": ssh, "network": {"ipv4_default": ipv4, "ipv6_default": ipv6},
+            "docker": docker, "compose": compose}
 
 
 class EnrollmentClient(asyncssh.SSHClient):

@@ -1018,13 +1018,19 @@ test('owner can check readiness before registration and see a localized result',
   await page.route('**/api/v1/enrollment/ssh/preflight', route => {
     checks++
     expect(route.request().postDataJSON()).toEqual({ ip, port: 22, username: 'root', fingerprint, password: 'disposable' })
-    return route.fulfill({ json: { platform: 'DEBIAN_13', ssh: 'VERIFIED' } })
+    return route.fulfill({ json: { platform: 'DEBIAN_13', ssh: 'VERIFIED',
+      network: { ipv4_default: 'PRESENT', ipv6_default: 'ABSENT' }, docker: 'PRESENT', compose: 'NOT_DETECTED' } })
   })
   await page.getByRole('button', { name: 'Check VPS readiness' }).click()
   await expect(page.getByText('Debian 13 (amd64)', { exact: true })).toBeVisible()
+  const readiness = page.locator('.enrollment-readiness')
+  await expect(readiness.locator('div').filter({ hasText: 'IPv4 default route' }).locator('dd')).toHaveText('Detected')
+  await expect(readiness.locator('div').filter({ hasText: 'IPv6 default route' }).locator('dd')).toHaveText('Absent')
+  await expect(readiness.locator('div').filter({ hasText: 'Docker CLI' }).locator('dd')).toHaveText('Detected')
   await expect(secret).toHaveValue('')
   await page.getByLabel('Language').selectOption('ru')
   await expect(page.getByText('Конфигурация OpenSSH проверена с правами администратора.')).toBeVisible()
+  await expect(readiness.locator('div').filter({ hasText: 'Системный плагин Docker Compose' }).locator('dd')).toHaveText('Не обнаружен')
   await page.getByLabel('IP-адрес VPS').fill('192.0.2.11')
   await expect(page.getByText('Debian 13 (amd64)', { exact: true })).toHaveCount(0)
   expect(checks).toBe(1)

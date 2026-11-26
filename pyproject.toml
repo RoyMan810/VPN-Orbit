@@ -22,7 +22,7 @@ include = ["vpn_orbit*"]
 
 [tool.setuptools.package-data]
 vpn_orbit = ["release-manifest.json"]
-"vpn_orbit.runtime" = ["vps-platform.sh", "vps_helpers/*"]
+"vpn_orbit.runtime" = ["vps-platform.sh", "vps-readiness.sh", "vps_helpers/*"]
 
 [tool.ruff]
 required-version = "==0.17.5"
