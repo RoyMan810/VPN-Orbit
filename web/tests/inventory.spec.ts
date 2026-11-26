@@ -9,11 +9,13 @@ const never = '01JCYQZ4T9V8MNVYEH3D2M7Q1C'
 const password = 'VPN-Orbit fixture password!'
 
 let clientNumber = 0
-test.beforeEach(async ({ context }, { workerIndex }) => {
+test.beforeEach(async ({ context, request }, { workerIndex }) => {
   // The loopback Controller fixture trusts the forwarded client IP.
   // Give each browser context its own login-rate bucket.
   const address = `2001:db8::${workerIndex.toString(16)}:${(++clientNumber).toString(16)}`
   await context.setExtraHTTPHeaders({ 'X-Forwarded-For': address })
+  // Each scenario starts with a fresh request budget for the shared Owner.
+  expect((await request.post('/__fixture__/reset-api-budget')).status()).toBe(204)
 })
 
 async function signIn(page: Page, username = 'fixture-owner') {

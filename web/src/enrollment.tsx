@@ -44,10 +44,11 @@ export function Enrollment({ t, lang, session, expired, onEnroll, firstVps }: {
   }, [expired, t])
 
   useEffect(() => {
+    if (!expanded && !firstVps) return
     const abort = new AbortController()
     void loadPreparation(abort.signal)
     return () => abort.abort()
-  }, [loadPreparation])
+  }, [expanded, firstVps, loadPreparation])
 
   useEffect(() => {
     if (!preparation || preparationDone(preparation) || pollFailed) return
