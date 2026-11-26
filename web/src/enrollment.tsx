@@ -4,8 +4,10 @@ import type { Copy, Language } from './copy'
 import { JobTimeline } from './job-timeline'
 
 type Readiness = { platform: keyof Copy['enrollmentPlatforms']; ssh: keyof Copy['enrollmentSshChecks'] }
+type PreparationPhase = keyof Copy['preparationPhases']
+type PreparationStage = 'CHECKING' | 'DISPATCHING' | 'VERIFIED'
 type PreparationJob = { id: string; resource_id: string; action: 'host.prepare'; status: keyof Copy['probeStatus'];
-  revision: number; reason: string | null }
+  revision: number; reason: string | null; preparation?: { phase: PreparationPhase; stage: PreparationStage } | null }
 type PreparationInfo = { available: boolean; job: PreparationJob | null }
 const preparationDone = (job: PreparationJob) => ['SUCCEEDED', 'FAILED', 'UNKNOWN_OUTCOME', 'CANCELLED_SAFE'].includes(job.status)
 
@@ -13,7 +15,26 @@ function checkedPreparation(job: PreparationJob, t: Copy) {
   if (!isUlid(job.id) || !isUlid(job.resource_id) || job.action !== 'host.prepare' || !Object.hasOwn(t.probeStatus, job.status)
       || !Number.isSafeInteger(job.revision) || job.revision < 1
       || (job.reason !== null && !/^[A-Z][A-Z0-9_]{1,63}$/.test(job.reason))) throw new Error('Invalid preparation job')
+  if (job.preparation && (!Object.hasOwn(t.preparationPhases, job.preparation.phase) ||
+      !['CHECKING', 'DISPATCHING', 'VERIFIED'].includes(job.preparation.stage))) throw new Error('Invalid preparation progress')
   return job
+}
+
+function PreparationProgress({ job, t }: { job: PreparationJob; t: Copy }) {
+  if (!job.preparation && job.status !== 'SUCCEEDED') return null
+  const phases = Object.keys(t.preparationPhases) as PreparationPhase[]
+  const current = job.preparation ? phases.indexOf(job.preparation.phase) : -1
+  return <ol className="preparation-phases" aria-label={t.preparationSteps}>
+    {phases.map((phase, index) => {
+      const verified = job.status === 'SUCCEEDED' || index < current || (index === current && job.preparation?.stage === 'VERIFIED')
+      const active = index === current && !verified
+      return <li key={phase} aria-current={active ? 'step' : undefined}>
+        <span>{t.preparationPhases[phase]}</span>
+        <span>{verified ? t.preparationStage.VERIFIED : active && job.preparation
+          ? t.preparationStage[job.preparation.stage] : t.preparationStage.PENDING}</span>
+      </li>
+    })}
+  </ol>
 }
 
 export function Enrollment({ t, lang, session, expired, onEnroll, firstVps }: {
@@ -193,6 +214,7 @@ export function Enrollment({ t, lang, session, expired, onEnroll, firstVps }: {
       <p role="status">{t.preparationStates[preparation.status as keyof Copy['preparationStates']] ?? t.probeStatus[preparation.status]}
         {preparation.reason && <> <code>{preparation.reason}</code></>}</p>
       <p>{t.probeJob} <code>{preparation.id}</code></p>
+      <PreparationProgress job={preparation} t={t}/>
       {preparation.status === 'UNKNOWN_OUTCOME' && <p>{t.preparationUnknown}</p>}
       {preparation.status === 'UNKNOWN_OUTCOME' && <button type="button" onClick={() => void loadPreparation()}>{t.probeResume}</button>}
       {pollFailed && <button type="button" onClick={() => setPollFailed(false)}>{t.probeResume}</button>}

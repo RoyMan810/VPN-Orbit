@@ -84,6 +84,9 @@ code { font-family: ui-monospace, "Cascadia Code", monospace; overflow-wrap: any
 .enrollment form { display: grid; gap: 12px; max-width: 34rem; margin-top: 14px; }
 .enrollment button { justify-self: start; }
 .enrollment-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.preparation-phases { display: grid; gap: 6px; list-style-position: inside; max-width: 34rem; padding-left: 0; }
+.preparation-phases li span + span { margin-inline-start: 0.65em; color: var(--muted); }
+.preparation-phases li[aria-current] { font-weight: 650; }
 .audit-export summary, .enrollment summary { cursor: pointer; font-weight: 650; }
 .audit-export label { display: grid; gap: 6px; margin-top: 12px; width: fit-content; max-width: 100%; }
 .audit-export select { max-width: 100%; }

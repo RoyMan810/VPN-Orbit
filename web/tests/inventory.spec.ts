@@ -1036,8 +1036,10 @@ test('owner can submit preparation and recover its status after a lost reply and
   const fingerprint = 'SHA256:' + 'A'.repeat(43)
   let accepted = false
   let finished = false
-  const job = () => ({ id, resource_id: never, action: 'host.prepare', status: finished ? 'SUCCEEDED' : 'QUEUED',
-    reason: finished ? 'VPS_PREPARATION_VERIFIED' : null, revision: finished ? 6 : 1 })
+  let applying = false
+  const job = () => ({ id, resource_id: never, action: 'host.prepare', status: finished ? 'SUCCEEDED' : applying ? 'DISPATCHING' : 'QUEUED',
+    reason: finished ? 'VPS_PREPARATION_VERIFIED' : null, revision: finished ? 6 : applying ? 3 : 1,
+    preparation: finished ? { phase: 'access', stage: 'VERIFIED' } : applying ? { phase: 'helpers', stage: 'DISPATCHING' } : null })
   await page.route('**/api/v1/enrollment/preparation', route => {
     if (route.request().method() === 'GET') return route.fulfill({ json: { available: true, job: accepted ? job() : null } })
     expect(route.request().headers()['idempotency-key']).toMatch(/^[0-9a-f-]{36}$/)
@@ -1061,13 +1063,20 @@ test('owner can submit preparation and recover its status after a lost reply and
   const progress = page.getByRole('region', { name: 'VPS preparation' })
   await expect(progress.getByText('Queued', { exact: true })).toBeVisible()
   await expect(credential).toHaveValue('')
+  applying = true
+  const steps = progress.getByRole('list', { name: 'Preparation steps' })
+  await expect(steps.locator('[aria-current=step]')).toContainText('SSH helpers')
+  await expect(steps.locator('[aria-current=step]').getByText('Applying', { exact: true })).toBeVisible()
+  await expect(steps.getByText('Verified', { exact: true })).toHaveCount(2)
   await page.reload()
   await page.getByText('Connect a VPS', { exact: true }).click()
   await expect(progress.getByText(id, { exact: true })).toBeVisible()
+  await expect(steps.locator('[aria-current=step]')).toContainText('SSH helpers')
   finished = true
   await expect(progress.getByText('VPS is ready')).toBeVisible()
+  await expect(steps.getByText('Verified', { exact: true })).toHaveCount(7)
   await progress.getByRole('button', { name: 'Show job history' }).click()
-  await expect(progress.locator('ol li')).toHaveCount(2)
+  await expect(progress.locator('.probe-timeline ol li')).toHaveCount(2)
   await page.getByLabel('Language').selectOption('ru')
   await expect(page.getByRole('region', { name: 'Подготовка VPS' }).getByText('VPS готова')).toBeVisible()
 })

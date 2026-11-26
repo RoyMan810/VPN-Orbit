@@ -1,6 +1,7 @@
 """One process owns a durable queue claim. All SSH use goes through protected local IPC."""
 
 import json
+import sqlite3
 from threading import Event
 
 from .database import identifier
@@ -94,7 +95,11 @@ class Worker:
             self.queue.advance(claim, "DISPATCHING", validate=revalidate)
             sent = True
             self.observe("DISPATCHING")
-            response = self.broker.call("use_for_scoped_ssh", {"permit": permit, "policy_ref": secret_ref})
+            request = {"permit": permit, "policy_ref": secret_ref}
+            if preparation:
+                response = self.broker.call("prepare.run", request, progress=lambda value: self._preparation_progress(claim, value))
+            else:
+                response = self.broker.call("use_for_scoped_ssh", request)
             self.queue.advance(claim, "EXECUTING")
             self.queue.advance(claim, "VERIFYING")
             self.observe("VERIFYING")
@@ -169,6 +174,12 @@ class Worker:
             # A lost reply after dispatch never becomes success and never causes an automatic retry.
             self.queue.finish(claim, "UNKNOWN_OUTCOME" if sent else "CANCELLED_SAFE", error.code)
         return True
+
+    def _preparation_progress(self, claim, value):
+        try:
+            self.queue.record_preparation_progress(claim, value)
+        except (Denied, OSError, RuntimeError, sqlite3.Error):
+            pass  # A phase update never substitutes for the terminal Authority receipt.
 
     def _preparation_failure(self, job_id, nonce):
         try:
