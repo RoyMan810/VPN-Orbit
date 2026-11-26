@@ -98,13 +98,14 @@ test "$(dpkg --print-architecture)" = amd64
 . /etc/os-release
 test "$ID:$VERSION_ID:$VERSION_CODENAME" = debian:13:trixie
 test ! -e /usr/bin/docker
+test ! -S /run/dbus/system_bus_socket
 mkdir -m 0700 /root/source
 cd /root/source
 git init -q
 git fetch -q /root/source.bundle HEAD
 git checkout -q --detach FETCH_HEAD
 test "$(git rev-parse HEAD)" = "$1"
-trap 'journalctl --no-pager -n 60 -u vpn-orbit-compose -u vpn-orbit-web -u vpn-orbit-broker -u vpn-orbit-supervisor' ERR
+trap 'journalctl --no-pager -n 60 -u vpn-orbit-compose -u vpn-orbit-web -u vpn-orbit-broker -u vpn-orbit-supervisor -u vpn-orbit-vault-initialize -u dbus' ERR
 ./install
 RUNNER_ENVIRONMENT=github-hosted python3 tests/lab/bootstrap_install.py
 GUEST

@@ -161,6 +161,8 @@ def preflight(args):
         raise ArtifactError("PLATFORM_UNSUPPORTED")
     if sys.version_info[:2] not in ((3, 13), (3, 15)) or sqlite3.sqlite_version_info < (3, 45):
         raise ArtifactError("HOST_PYTHON_SQLITE_UNSUPPORTED")
+    if not Path("/run/dbus/system_bus_socket").is_socket():
+        raise ArtifactError("SYSTEM_DBUS_REQUIRED")
     # A root-owned child can still be replaced when its permanent parent is
     # writable by another account. Refuse; never chmod/chown foreign host dirs.
     for base in (APP.parent, CONFIG.parent, DATA.parent, RUN.parent):

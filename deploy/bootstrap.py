@@ -456,6 +456,9 @@ def install(owner, targets, target, endpoint):
             "openssl", "xz-utils", "build-essential", "pkg-config", "libssl-dev", "zlib1g-dev",
             "libsqlite3-dev", "libffi-dev", "libbz2-dev", "liblzma-dev", "libzstd-dev",
             "libcrypt1", "libpcre2-8-0")
+        if not Path("/run/dbus/system_bus_socket").is_socket():
+            apt("install", "-y", "--no-remove", "--no-install-recommends", "dbus")
+            run("systemctl", "start", "dbus.socket")
         install_docker(distribution, suite, private)
         identity = build_identity()
         work = temporary / "build"
