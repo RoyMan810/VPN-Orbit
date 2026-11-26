@@ -216,6 +216,10 @@ command -v flock >/dev/null
 """ + check_account_conflicts(firewall=firewall)
 
 
+def inspect_host_readiness():
+    return (ASSETS / "vps-readiness.sh").read_text(encoding="ascii")
+
+
 def _phase_preflight(ctx, *, inspect=False):
     return check_remote(firewall=ctx["firewall"]) + _state_directory(ctx["probe_public_key"], create=not inspect, inspect=inspect)
 

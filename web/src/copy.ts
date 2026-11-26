@@ -39,6 +39,8 @@ export const copy = {
     enrollmentSubmit: 'Connect and check SSH',
     enrollmentPreflight: 'Check VPS readiness',
     enrollmentPreflightUnavailable: 'SSH login succeeded, but the server did not return a readiness result.',
+    enrollmentChecks: { ipv4: 'IPv4 default route', ipv6: 'IPv6 default route', docker: 'Docker CLI', compose: 'System Docker Compose plugin' },
+    enrollmentCheckStates: { PRESENT: 'Detected', ABSENT: 'Absent', UNKNOWN: 'Unavailable', NOT_DETECTED: 'Not detected' },
     enrollmentPlatforms: {
       UBUNTU_24_04: 'Ubuntu 24.04 (amd64)', UBUNTU_26_04: 'Ubuntu 26.04 (amd64)',
       DEBIAN_13: 'Debian 13 (amd64)', UNSUPPORTED: 'Unsupported operating system or architecture.',
@@ -306,6 +308,9 @@ export const copy = {
     enrollmentSubmit: 'Подключить и проверить SSH',
     enrollmentPreflight: 'Проверить готовность VPS',
     enrollmentPreflightUnavailable: 'Вход по SSH выполнен, но сервер не вернул результат проверки готовности.',
+    enrollmentChecks: { ipv4: 'Маршрут IPv4 по умолчанию', ipv6: 'Маршрут IPv6 по умолчанию',
+      docker: 'Docker CLI', compose: 'Системный плагин Docker Compose' },
+    enrollmentCheckStates: { PRESENT: 'Обнаружен', ABSENT: 'Отсутствует', UNKNOWN: 'Проверка недоступна', NOT_DETECTED: 'Не обнаружен' },
     enrollmentPlatforms: {
       UBUNTU_24_04: 'Ubuntu 24.04 (amd64)', UBUNTU_26_04: 'Ubuntu 26.04 (amd64)',
       DEBIAN_13: 'Debian 13 (amd64)', UNSUPPORTED: 'Операционная система или архитектура не поддерживается.',

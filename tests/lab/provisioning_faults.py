@@ -421,7 +421,7 @@ def main():
         expect(readiness.returncode == 0, "Readiness must pass over the pinned administrator SSH connection", readiness)
         web_readiness = verify_credentials({"ip": ADDRESS, "port": PORT, "fingerprint": fingerprint}, ADMIN,
                                            password=None, private_key=key.read_text(), preflight=True)
-        expect(web_readiness == {"platform": "UBUNTU_24_04", "ssh": "VERIFIED"},
+        expect((web_readiness["platform"], web_readiness["ssh"]) == ("UBUNTU_24_04", "VERIFIED"),
                f"WebUI readiness must execute sshd -t through non-interactive sudo: {web_readiness}")
         sudoers = ADMIN_SUDOERS.read_text()
         try:
@@ -431,7 +431,7 @@ def main():
             expect(key_only["ssh"] == "SUDO_OR_SSHD_UNVERIFIED",
                    f"SSH key alone must not pass password-protected sudo: {key_only}")
             with_password = verify_credentials(target, ADMIN, password=password, private_key=None, preflight=True)
-            expect(with_password == {"platform": "UBUNTU_24_04", "ssh": "VERIFIED"},
+            expect(with_password == web_readiness,
                    f"WebUI readiness must verify password-protected sudo: {with_password}")
         finally:
             ADMIN_SUDOERS.write_text(sudoers)

@@ -19,6 +19,9 @@ from .test_auth_api import Fixture, ORIGIN, OTHER, SCOPE
 
 PASSWORD = "ssh-enrollment-password-canary"
 IP, OTHER_IP = "192.0.2.8", "192.0.2.9"
+READINESS_TAIL = b" PRESENT UNKNOWN PRESENT NOT_DETECTED\n"
+READINESS = {"platform": "DEBIAN_13", "network": {"ipv4_default": "PRESENT", "ipv6_default": "UNKNOWN"},
+             "docker": "PRESENT", "compose": "NOT_DETECTED"}
 
 
 class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
@@ -30,7 +33,7 @@ class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
         self.host_pin = host.get_fingerprint()
         self.other_pin = different_host.get_fingerprint()
         self.dials, self.auth_methods, self.sessions = [], [], []
-        self.output = b"VPN_ORBIT_PREFLIGHT_V1 DEBIAN_13 VERIFIED\n"
+        self.output = b"VPN_ORBIT_PREFLIGHT_V2 DEBIAN_13 VERIFIED" + READINESS_TAIL
         self.sudo_output = None
         self.sudo_status = 0
         self.stderr = b""
@@ -167,7 +170,7 @@ class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
         self.stderr = b"private-remote-diagnostic"
         result = await self.enroll(preflight=True, password=PASSWORD)
         self.assertEqual(result.status_code, 200, result.text)
-        self.assertEqual(result.json(), {"platform": "DEBIAN_13", "ssh": "VERIFIED"})
+        self.assertEqual(result.json(), {**READINESS, "ssh": "VERIFIED"})
         self.assertEqual(result.headers["cache-control"], "no-store")
         self.assertEqual(self.sessions, [(PREFLIGHT_COMMAND, b"")])
         self.assertEqual(self.client.get("/api/v1/resources").json()["items"], [])
@@ -175,13 +178,13 @@ class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(PASSWORD, str(self.store.events_after(0)))
 
     async def test_preflight_checks_password_protected_sudo_only_with_password_authentication(self):
-        self.output = b"VPN_ORBIT_PREFLIGHT_V1 DEBIAN_13 SUDO_OR_SSHD_UNVERIFIED\n"
+        self.output = b"VPN_ORBIT_PREFLIGHT_V2 DEBIAN_13 SUDO_OR_SSHD_UNVERIFIED" + READINESS_TAIL
         self.sudo_output = SUDO_MARKER
         self.stderr = PASSWORD.encode()
         key_only = await self.enroll(preflight=True, private_key=self.private_key)
-        self.assertEqual(key_only.json(), {"platform": "DEBIAN_13", "ssh": "SUDO_OR_SSHD_UNVERIFIED"})
+        self.assertEqual(key_only.json(), {**READINESS, "ssh": "SUDO_OR_SSHD_UNVERIFIED"})
         result = await self.enroll(preflight=True, password=PASSWORD)
-        self.assertEqual(result.json(), {"platform": "DEBIAN_13", "ssh": "VERIFIED"})
+        self.assertEqual(result.json(), {**READINESS, "ssh": "VERIFIED"})
         self.assertEqual(self.sessions, [(PREFLIGHT_COMMAND, b""), (PREFLIGHT_COMMAND, b""),
                                          (PREFLIGHT_SUDO_COMMAND, PASSWORD.encode() + b"\n")])
         self.assertNotIn(PASSWORD, PREFLIGHT_SUDO_COMMAND)
@@ -189,7 +192,9 @@ class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.get("/api/v1/resources").json()["items"], [])
 
     async def test_preflight_rejects_nonprotocol_output_without_exposing_it(self):
-        for output in (b"VPN_ORBIT_PREFLIGHT_V1 DEBIAN_13 VERIFIED\nremote-canary\n", b"x" * 129):
+        reply = b"VPN_ORBIT_PREFLIGHT_V2 DEBIAN_13 VERIFIED" + READINESS_TAIL
+        for output in (reply + b"remote-canary\n", reply.replace(b"UNKNOWN", b"remote-canary"),
+                       reply.replace(b"NOT_DETECTED", b"UNKNOWN"), b"x" * 129):
             with self.subTest(output=output[:17]):
                 self.output = output
                 result = await self.enroll(preflight=True, private_key=self.private_key)
@@ -199,12 +204,12 @@ class SSHEnrollmentTests(Fixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.get("/api/v1/resources").json()["items"], [])
 
     async def test_preflight_reports_a_conflicting_observation_account_without_registration(self):
-        self.output = b"VPN_ORBIT_PREFLIGHT_V1 DEBIAN_13 OBSERVATION_ACCOUNT_CONFLICT\n"
+        self.output = b"VPN_ORBIT_PREFLIGHT_V2 DEBIAN_13 OBSERVATION_ACCOUNT_CONFLICT" + READINESS_TAIL
         direct = await self.enroll(preflight=True, password=PASSWORD)
-        self.assertEqual(direct.json(), {"platform": "DEBIAN_13", "ssh": "OBSERVATION_ACCOUNT_CONFLICT"})
+        self.assertEqual(direct.json(), {**READINESS, "ssh": "OBSERVATION_ACCOUNT_CONFLICT"})
         self.assertEqual(self.sessions, [(PREFLIGHT_COMMAND, b"")])
 
-        self.output = b"VPN_ORBIT_PREFLIGHT_V1 DEBIAN_13 SUDO_OR_SSHD_UNVERIFIED\n"
+        self.output = b"VPN_ORBIT_PREFLIGHT_V2 DEBIAN_13 SUDO_OR_SSHD_UNVERIFIED" + READINESS_TAIL
         self.sudo_output = b""
         self.sudo_status = ACCOUNT_CONFLICT
         elevated = await self.enroll(preflight=True, password=PASSWORD)

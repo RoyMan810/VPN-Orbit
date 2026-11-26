@@ -3,7 +3,10 @@ import { ApiError, hasApiStatus, isUlid, request, type Session } from './api'
 import type { Copy, Language } from './copy'
 import { JobTimeline } from './job-timeline'
 
-type Readiness = { platform: keyof Copy['enrollmentPlatforms']; ssh: keyof Copy['enrollmentSshChecks'] }
+type RouteStatus = 'PRESENT' | 'ABSENT' | 'UNKNOWN'
+type ToolStatus = 'PRESENT' | 'NOT_DETECTED'
+type Readiness = { platform: keyof Copy['enrollmentPlatforms']; ssh: keyof Copy['enrollmentSshChecks'];
+  network?: { ipv4_default: RouteStatus; ipv6_default: RouteStatus }; docker?: ToolStatus; compose?: ToolStatus }
 type PreparationPhase = keyof Copy['preparationPhases']
 type PreparationStage = 'CHECKING' | 'DISPATCHING' | 'VERIFIED'
 type PreparationJob = { id: string; resource_id: string; action: 'host.prepare'; status: keyof Copy['probeStatus'];
@@ -205,6 +208,12 @@ export function Enrollment({ t, lang, session, expired, onEnroll, firstVps }: {
       {readiness && <div role="status">
         <p>{t.enrollmentPlatforms[readiness.platform]}</p>
         <p>{t.enrollmentSshChecks[readiness.ssh]}</p>
+        {readiness.network && readiness.docker && readiness.compose && <dl className="enrollment-readiness">
+          <div><dt>{t.enrollmentChecks.ipv4}</dt><dd>{t.enrollmentCheckStates[readiness.network.ipv4_default]}</dd></div>
+          <div><dt>{t.enrollmentChecks.ipv6}</dt><dd>{t.enrollmentCheckStates[readiness.network.ipv6_default]}</dd></div>
+          <div><dt>{t.enrollmentChecks.docker}</dt><dd>{t.enrollmentCheckStates[readiness.docker]}</dd></div>
+          <div><dt>{t.enrollmentChecks.compose}</dt><dd>{t.enrollmentCheckStates[readiness.compose]}</dd></div>
+        </dl>}
       </div>}
       <button type="button" className="quiet" disabled={busy} onClick={() => { setById(!byId); setStatus(null); setReadiness(null) }}>
         {byId ? t.enrollmentUseSsh : t.enrollmentUseId}

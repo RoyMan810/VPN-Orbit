@@ -60,7 +60,25 @@ def verify_preparation(root, name, ip, password):
             headers = {"Origin": ORIGIN, "X-CSRF-Token": login.json()["csrf_token"], "Idempotency-Key": identifier()}
             preflight = client.post("/api/v1/enrollment/ssh/preflight", json=body, headers=headers)
             assert preflight.status_code == 200, preflight.text
-            assert preflight.json() == {"platform": "DEBIAN_13", "ssh": "VERIFIED"}, preflight.text
+            ready = preflight.json()
+            assert (ready["platform"], ready["ssh"]) == ("DEBIAN_13", "VERIFIED"), preflight.text
+            assert ready["network"]["ipv4_default"] == "ABSENT", ready
+            assert (ready["docker"], ready["compose"]) == ("NOT_DETECTED", "NOT_DETECTED"), ready
+
+            docker("exec", name, "/bin/sh", "-ec", """
+ip -4 route replace default dev eth0
+install -d /usr/local/lib/docker/cli-plugins
+for path in /usr/local/bin/docker /usr/local/lib/docker/cli-plugins/docker-compose; do
+    printf '#!/bin/sh\ntouch /tmp/readiness-executed-docker\n' > "$path"
+    chmod 0755 "$path"
+done
+""")
+            checked = client.post("/api/v1/enrollment/ssh/preflight", json=body, headers=headers)
+            assert checked.status_code == 200, checked.text
+            ready = checked.json()
+            assert ready["network"]["ipv4_default"] == "PRESENT", ready
+            assert (ready["docker"], ready["compose"]) == ("PRESENT", "PRESENT"), ready
+            docker("exec", name, "test", "!", "-e", "/tmp/readiness-executed-docker")
             queued = client.post("/api/v1/enrollment/preparation", json=body, headers=headers)
             assert queued.status_code == 202, queued.text
             original_id = queued.json()["id"]
@@ -130,7 +148,7 @@ def main():
         docker("exec", "-i", name, "chpasswd", input=f"fixtureadmin:{password}\n")
         with tempfile.TemporaryDirectory(prefix="vpn-orbit-debian-") as temp:
             verify_preparation(Path(temp), name, ip, password)
-        print("Debian 13: Web preflight, partial preparation, verified resume and both SSH logins passed.")
+        print("Debian 13: route and Docker/Compose readiness, partial preparation, verified resume and both SSH logins passed.")
     except Exception:
         subprocess.run(["docker", "logs", "--tail", "45", name], timeout=15, check=False)
         raise

@@ -407,7 +407,10 @@ def main():
             host_key = identify_host(ip, args.port, args.fingerprint)
             run_remote, cleanup_transport, _, _ = build_transport(ip, args.port, args.identity, args.user, host_key)
             try:
-                run_remote(preparation.check_remote(firewall=args.firewall))
+                run_remote(preparation.check_remote(firewall=args.firewall) + preparation.inspect_host_readiness() + """
+printf 'Default route: IPv4 %s, IPv6 %s\\nDocker CLI: %s\\nSystem Compose plugin: %s\\n' \\
+    "$orbit_ipv4" "$orbit_ipv6" "$orbit_docker" "$orbit_compose"
+""")
             finally:
                 cleanup_transport()
             print("VPS passed the OS, package, SSH configuration and account checks for preparation.")
