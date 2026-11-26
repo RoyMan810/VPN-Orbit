@@ -58,15 +58,19 @@ jobs:
   debian-bootstrap:
     name: Fresh Debian 13 / bootstrap install and HTTPS
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 65
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Install QEMU
+      - name: Install QEMU and enable hardware acceleration if available
         run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86
+          sudo apt-get install -y --no-install-recommends acl qemu-system-x86
+          if [[ -c /dev/kvm ]] && [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+            sudo setfacl -m "u:$(id -u):rw" /dev/kvm
+          fi
       - name: Boot a fresh Debian VM, install Controller and verify HTTPS
         run: bash tests/lab/bootstrap-debian-vm.sh
