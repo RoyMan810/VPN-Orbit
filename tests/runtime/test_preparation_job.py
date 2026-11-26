@@ -1,4 +1,6 @@
+from argparse import Namespace
 from concurrent.futures import ThreadPoolExecutor
+import json
 import os
 from pathlib import Path
 import socket
@@ -13,7 +15,9 @@ from vpn_orbit.errors import Denied
 from vpn_orbit.queue import JobQueue
 from vpn_orbit.runtime.authority import Authority
 from vpn_orbit.runtime.broker import Broker
+from vpn_orbit.runtime.cli import prepare_observation
 from vpn_orbit.runtime.ipc import Client, Peer, handle
+from vpn_orbit.runtime.protocol import PARTIAL_PREPARATION
 from vpn_orbit.runtime.storage import new_private_file
 from vpn_orbit.runtime.vault import Vault
 from vpn_orbit.runtime.vps_preparation import PHASES
@@ -169,6 +173,10 @@ class PreparationJobTests(unittest.TestCase):
             self.assertEqual(self.state(), ("UNKNOWN_OUTCOME", "VPS_PREPARATION_SSH_UNCONFIRMED", 0))
             with self.assertRaisesRegex(Denied, "RECONCILIATION_UNVERIFIED"):
                 self.broker.dispatch("local-root", self.root_peer, "prepare.reconcile", self.credentials)
+            ssh.reset_mock()
+            with self.assertRaisesRegex(Denied, "RESUME_UNCONFIRMED"):
+                self.broker.dispatch("local-root", self.root_peer, "prepare.resume", {**self.credentials, "successor_id": identifier()})
+            ssh.assert_not_called()
             self.assertEqual(self.authority.status(self.job)["state"], "UNKNOWN_OUTCOME")
             ssh.return_value.phase.reset_mock(side_effect=True, return_value=True)
             ssh.return_value.phase.return_value = "VERIFIED"
@@ -182,6 +190,105 @@ class PreparationJobTests(unittest.TestCase):
         self.assertEqual(timeline[-1]["reason"], "VPS_PREPARATION_RECONCILED")
         with self.authority.journal.connect() as db:
             self.assertIsNone(db.execute("SELECT 1 FROM incidents").fetchone())
+
+    def _partially_prepared(self):
+        self.submit()
+        applied = set()
+
+        async def phase(name, *, inspect):
+            if name == "helpers":
+                self.assertTrue(inspect)
+                raise Denied("VPS_PREPARATION_SSH_UNCONFIRMED")
+            if inspect:
+                return "VERIFIED" if name in applied else "INCOMPLETE"
+            applied.add(name)
+            return "APPLIED"
+
+        with patch("vpn_orbit.runtime.broker.PreparationSSH", autospec=True) as ssh:
+            ssh.return_value.phase.side_effect = phase
+            self.assertTrue(self.worker.run_one())
+        self.assertEqual(applied, {"preflight", "account"})
+        self.assertEqual(self.authority.status(self.job)["state"], "UNKNOWN_OUTCOME")
+        return applied
+
+    def test_resume_after_lost_reply_creates_one_successor_with_a_fresh_permit(self):
+        applied = self._partially_prepared()
+        original = self.authority.status(self.job)
+
+        async def phase(name, *, inspect):
+            if inspect:
+                return "VERIFIED" if name in applied else "INCOMPLETE"
+            self.assertNotIn(name, applied)
+            applied.add(name)
+            return "APPLIED"
+
+        with patch("vpn_orbit.runtime.broker.PreparationSSH", autospec=True) as ssh:
+            ssh.return_value.phase.side_effect = phase
+            # Simulate loss of the CLI reply after Authority committed the partial resolution.
+            receipt = self.broker.dispatch("local-root", self.root_peer, "prepare.resume", {
+                **self.credentials, "successor_id": identifier(),
+            })
+            self.assertEqual((receipt["state"], receipt["result_code"]), ("RECONCILED_FAILED", PARTIAL_PREPARATION))
+            self.assertTrue(all(call.kwargs == {"inspect": True} for call in ssh.return_value.phase.await_args_list))
+            self.assertEqual(self.state()[0], "UNKNOWN_OUTCOME")
+            ssh.reset_mock()
+            args = Namespace(target=TARGET, job=self.job, user="root", admin_key_file=None)
+            call = Mock(side_effect=lambda op, data: self.broker.dispatch("local-root", self.root_peer, op, data))
+            cfg = {"broker_socket": "/unused", "broker_uid": BROKER_UID}
+            with patch("vpn_orbit.runtime.cli.Client", return_value=Mock(call=call)), \
+                    patch("vpn_orbit.runtime.cli.getpass", return_value=self.credentials["password"]) as prompt, \
+                    patch("vpn_orbit.runtime.cli.resource.setrlimit"), patch("builtins.print") as output:
+                prepare_observation(cfg, self.policy, self.queue, "resume-preparation", args)
+                successor = json.loads(output.call_args.args[0])
+                prepare_observation(cfg, self.policy, self.queue, "resume-preparation", args)
+                self.assertEqual(json.loads(output.call_args.args[0]), successor)
+                call.assert_called_once()
+                prompt.assert_called_once()
+            ssh.assert_not_called()
+            self.assertEqual(self.state(), ("FAILED", PARTIAL_PREPARATION, 0))
+            self.assertEqual(successor["status"], "QUEUED")
+            self.assertTrue(self.worker.run_one())
+        current = self.authority.status(successor["id"])
+        self.assertEqual(current["state"], "SUCCEEDED")
+        self.assertNotEqual(current["nonce"], original["nonce"])
+        self.assertEqual(applied, set(PHASES))
+        session = Mock(_session=lambda db, token: db.execute("SELECT * FROM users WHERE id=?", (ACTOR,)).fetchone())
+        self.assertEqual(self.queue.timeline(session, "test-token", self.job)["items"][-1]["reason"], PARTIAL_PREPARATION)
+        self.assertEqual(self.state(), ("FAILED", PARTIAL_PREPARATION, 1))
+
+    def test_resume_keeps_a_conflict_open_and_rejects_later_drift_before_writes(self):
+        applied = self._partially_prepared()
+        successor = identifier()
+        payload = {**self.credentials, "successor_id": successor}
+        with patch("vpn_orbit.runtime.broker.PreparationSSH", autospec=True) as ssh:
+            ssh.return_value.phase.side_effect = lambda name, inspect: "CONFLICT" if name == "keys" else (
+                "VERIFIED" if name in applied else "INCOMPLETE")
+            with self.assertRaisesRegex(Denied, "RECONCILIATION_UNVERIFIED"):
+                self.broker.dispatch("local-root", self.root_peer, "prepare.resume", payload)
+            self.assertEqual(self.authority.status(self.job)["state"], "UNKNOWN_OUTCOME")
+            ssh.return_value.phase.side_effect = lambda name, inspect: "VERIFIED" if name in applied else "INCOMPLETE"
+            receipt = self.broker.dispatch("local-root", self.root_peer, "prepare.resume", payload)
+            self.queue.resume_preparation(self.job, self.target, receipt, successor)
+            ssh.return_value.phase.reset_mock(side_effect=True, return_value=True)
+            ssh.return_value.phase.return_value = "INCOMPLETE"
+            self.assertTrue(self.worker.run_one())
+            ssh.return_value.phase.assert_awaited_once_with("preflight", inspect=True)
+        self.assertEqual(self.authority.status(successor)["result_code"], "VPS_PREPARATION_RESUME_DRIFT")
+        self.assertEqual(self.state(), ("FAILED", PARTIAL_PREPARATION, 0))
+
+        restarted = Broker(self.broker.directory, self.policy, self.broker.vault, self.broker.gate,
+                           self.broker.verify_key, worker_uid=WORKER_UID, clock=self.broker.clock)
+        self.worker.broker.call = lambda op, data, **options: restarted.dispatch(
+            "worker", Peer(1, WORKER_UID, WORKER_UID), op, data, **options)
+        new_job = identifier()
+        restarted.dispatch("local-root", self.root_peer, "prepare.credentials", {**self.credentials, "job_id": new_job})
+        self.queue.enqueue_preparation(new_job, ACTOR, self.target)
+        with patch("vpn_orbit.runtime.broker.PreparationSSH", autospec=True) as ssh:
+            ssh.return_value.phase.return_value = "INCOMPLETE"
+            self.assertTrue(self.worker.run_one())
+            ssh.return_value.phase.assert_awaited_once_with("preflight", inspect=True)
+        self.assertEqual(self.authority.status(new_job)["result_code"], "VPS_PREPARATION_RESUME_DRIFT")
+        self.assertEqual(self.state(), ("FAILED", PARTIAL_PREPARATION, 0))
 
     def test_worker_restart_after_dispatch_commit_cancels_unconsumed_permit(self):
         for restart_authority in (False, True):
@@ -249,7 +356,7 @@ class PreparationJobTests(unittest.TestCase):
         with self.assertRaisesRegex(Denied, "CAPABILITY_DISABLED"):
             self.broker.dispatch(role, web_peer, "prepare.credentials", self.credentials)
         self.broker.web_preparation_targets = frozenset({TARGET})
-        for operation in ("prepare.reconcile", "prepare.run", "use_for_scoped_ssh", "receipt.get", "apps.reconcile", "firewall.status"):
+        for operation in ("prepare.reconcile", "prepare.resume", "prepare.run", "use_for_scoped_ssh", "receipt.get", "apps.reconcile", "firewall.status"):
             with self.subTest(operation=operation), self.assertRaisesRegex(Denied, "RPC_OPERATION_DENIED"):
                 self.broker.dispatch(role, web_peer, operation, {})
         with self.assertRaisesRegex(Denied, "STALE_SCOPE"):

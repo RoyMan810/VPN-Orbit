@@ -8,7 +8,7 @@ import time
 
 from ..errors import Denied
 from .authority import verify_permit
-from .protocol import SHA256, ULID, canonical, checksum, decode, fields, text
+from .protocol import PARTIAL_PREPARATION, SHA256, ULID, canonical, checksum, decode, fields, text
 from .ssh import application, apply_firewall, firewall_status, probe, provision_known_hosts, restart, verify_known_hosts
 from .ssh_preparation import PreparationSSH, validate_administrator
 from .storage import Journal
@@ -22,6 +22,10 @@ CREATE TABLE receipts(job_id TEXT PRIMARY KEY, nonce TEXT NOT NULL UNIQUE, state
 _PREPARATION_PHASES = """CREATE TABLE IF NOT EXISTS preparation_phases (
     job_id TEXT PRIMARY KEY REFERENCES receipts(job_id), phase TEXT NOT NULL,
     stage TEXT NOT NULL CHECK(stage IN ('DISPATCHING','VERIFIED')))"""
+_PREPARATION_GUARDS = f"""CREATE TABLE IF NOT EXISTS preparation_guards (
+    target TEXT NOT NULL, scope_digest TEXT NOT NULL,
+    verified_through INTEGER NOT NULL CHECK(verified_through BETWEEN 0 AND {len(PHASES) - 1}),
+    PRIMARY KEY(target,scope_digest)) STRICT"""
 _PREPARATION_TIMEOUT = 115
 _CREDENTIAL_TTL = 180
 
@@ -170,16 +174,19 @@ class Broker:
         if web and target.id not in self.web_preparation_targets:
             raise Denied("CAPABILITY_DISABLED")
         job_id = payload["job_id"]
+        self._reserve_preparation(job_id, payload["actor_id"], target, credentials)
+        return {"job_id": job_id}
+
+    def _reserve_preparation(self, job_id, actor, target, credentials):
         with self._credentials_lock:
             if job_id in self._preparation_credentials or len(self._preparation_credentials) >= 8:
                 raise Denied("VPS_PREPARATION_CREDENTIALS_BUSY")
             timer = Timer(_CREDENTIAL_TTL, self._expire_credentials, (job_id,))
             timer.daemon = True
             self._preparation_credentials[job_id] = (
-                payload["actor_id"], target.id, target.scope_digest, time.monotonic() + _CREDENTIAL_TTL, credentials, timer,
+                actor, target.id, target.scope_digest, time.monotonic() + _CREDENTIAL_TTL, credentials, timer,
             )
             timer.start()
-        return {"job_id": job_id}
 
     def _take_credentials(self, claims):
         with self._credentials_lock:
@@ -204,6 +211,22 @@ class Broker:
                           ON CONFLICT(job_id) DO UPDATE SET phase=excluded.phase,stage=excluded.stage""",
                        (job_id, phase, stage))
 
+    def _guard_preparation(self, target, through):
+        with self.journal.write(kind="dispatch") as db:
+            db.execute(_PREPARATION_GUARDS)
+            db.execute("""INSERT INTO preparation_guards VALUES(?,?,?)
+                          ON CONFLICT(target,scope_digest) DO UPDATE
+                          SET verified_through=max(verified_through,excluded.verified_through)""",
+                       (target.id, target.scope_digest, through))
+
+    def _guarded_preparation_prefix(self, target):
+        with self.journal.connect() as db:
+            if not db.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='preparation_guards'").fetchone():
+                return None
+            row = db.execute("SELECT verified_through FROM preparation_guards WHERE target=? AND scope_digest=?",
+                             (target.id, target.scope_digest)).fetchone()
+            return None if row is None else row["verified_through"]
+
     def _dispatch_preparation(self, permit, target, *, progress):
         claims = permit["claims"]
         dispatched = False
@@ -212,12 +235,14 @@ class Broker:
             if progress is not None:
                 progress({"phase": phase, "stage": stage})
 
-        async def execute(transport):
+        async def execute(transport, through):
             nonlocal dispatched
             async with asyncio.timeout(_PREPARATION_TIMEOUT):
-                for phase in PHASES:
+                for index, phase in enumerate(PHASES):
                     report(phase, "CHECKING")
                     status = await transport.phase(phase, inspect=True)
+                    if through is not None and index <= through and status != "VERIFIED":
+                        raise Denied("VPS_PREPARATION_RESUME_DRIFT")
                     if status == "INCOMPLETE":
                         self._checkpoint(claims["job_id"], phase, "DISPATCHING")
                         report(phase, "DISPATCHING")
@@ -236,16 +261,35 @@ class Broker:
         try:
             with self.vault.key_lock(target.value["secret_ref"], shared=True):
                 username, password, private_key = self._take_credentials(claims)
+                through = self._guarded_preparation_prefix(target)
                 transport = PreparationSSH(target, username, password=password, private_key=private_key,
                                            observation_key=self._preparation_key(target))
-                asyncio.run(execute(transport))
+                asyncio.run(execute(transport, through))
         except (Denied, OSError, TimeoutError, sqlite3.Error) as error:
             code = error.code if isinstance(error, Denied) else "VPS_PREPARATION_UNCONFIRMED"
             return self._complete(permit, "UNKNOWN_OUTCOME" if dispatched else "FAILED", code, None)
         return self._complete(permit, "SUCCEEDED", "VPS_PREPARATION_VERIFIED", None)
 
-    def _reconcile_preparation(self, payload):
+    def _resume_checkpoint(self, job_id):
+        with self.journal.connect() as db:
+            exists = db.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='preparation_phases'").fetchone()
+            mark = db.execute("SELECT phase,stage FROM preparation_phases WHERE job_id=?", (job_id,)).fetchone() if exists else None
+        # A delayed SSH command might still reach its remote lock after a readback.
+        # Only a verified checkpoint proves there is no later apply in flight.
+        if mark is None or mark["stage"] != "VERIFIED" or mark["phase"] not in PHASES:
+            raise Denied("VPS_PREPARATION_RESUME_UNCONFIRMED")
+        return PHASES.index(mark["phase"])
+
+    def _reconcile_preparation(self, payload, *, resume=False):
+        successor = None
+        if resume:
+            if not isinstance(payload, dict) or "successor_id" not in payload:
+                raise Denied("RPC_INVALID_REQUEST")
+            successor = text(payload["successor_id"], ULID)
+            payload = {name: value for name, value in payload.items() if name != "successor_id"}
         target, (username, password, private_key) = self._preparation_request(payload)
+        if successor == payload["job_id"]:
+            raise Denied("VPS_PREPARATION_RESUME_INVALID")
         with self.journal.connect() as db:
             row = db.execute("SELECT permit FROM receipts WHERE job_id=?", (payload["job_id"],)).fetchone()
         if row is None:
@@ -256,26 +300,50 @@ class Broker:
             raise Denied("VPS_PREPARATION_RECONCILIATION_UNVERIFIED")
         request = {"job_id": claims["job_id"], "nonce": claims["nonce"]}
 
-        async def inspect(transport):
+        async def inspect(transport, through):
+            partial = False
             async with asyncio.timeout(_PREPARATION_TIMEOUT):
-                for phase in PHASES:
-                    if await transport.phase(phase, inspect=True) != "VERIFIED":
+                for index, phase in enumerate(PHASES):
+                    observed = await transport.phase(phase, inspect=True)
+                    if observed == "VERIFIED":
+                        continue
+                    if through is None or index <= through or observed != "INCOMPLETE":
                         raise Denied("VPS_PREPARATION_RECONCILIATION_UNVERIFIED")
-                await transport.verify_access()
+                    partial = True
+                if not partial:
+                    await transport.verify_access()
+            return partial
 
         receipt = self.gate.call("prepare.readback", request)
         if receipt["state"] in ("FAILED", "CANCELLED_SAFE"):
+            return receipt
+        through = None
+        if resume and receipt["state"] in ("UNKNOWN_OUTCOME", "RECONCILED_FAILED"):
+            through = self._resume_checkpoint(claims["job_id"])
+            guarded = self._guarded_preparation_prefix(target)
+            if guarded is not None:
+                through = max(through, guarded)
+        if receipt["state"] == "RECONCILED_FAILED" and receipt["result_code"] == PARTIAL_PREPARATION:
+            if resume:
+                if guarded is None or guarded < through:
+                    raise Denied("VPS_PREPARATION_RESUME_UNCONFIRMED")
+                self._reserve_preparation(successor, claims["actor_id"], target, (username, password, private_key))
             return receipt
         with self.vault.key_lock(target.value["secret_ref"], shared=True):
             transport = PreparationSSH(target, username, password=password, private_key=private_key,
                                        observation_key=self._preparation_key(target))
             try:
-                asyncio.run(inspect(transport))
+                partial = asyncio.run(inspect(transport, through))
             except TimeoutError:
                 raise Denied("VPS_PREPARATION_RECONCILIATION_UNVERIFIED") from None
-            receipt = self.gate.call("prepare.reconcile", request)
+            if partial:
+                # The guard must survive a crash before the Authority incident is resolved.
+                self._guard_preparation(target, through)
+                self._reserve_preparation(successor, claims["actor_id"], target, (username, password, private_key))
+            receipt = self.gate.call("prepare.partial" if partial else "prepare.reconcile", request)
             self._persist(claims["job_id"], receipt["state"], {
-                "outcome": "SUCCEEDED", "code": receipt["result_code"], "observation": None, "authority_receipt": receipt,
+                "outcome": "FAILED" if partial else "SUCCEEDED", "code": receipt["result_code"],
+                "observation": None, "authority_receipt": receipt,
             })
             return receipt
 
@@ -323,6 +391,8 @@ class Broker:
                 return self._supply_preparation(payload)
             if operation == "prepare.reconcile":
                 return self._reconcile_preparation(payload)
+            if operation == "prepare.resume":
+                return self._reconcile_preparation(payload, resume=True)
         if role != "worker" or peer.uid != self.worker_uid:
             raise Denied("RPC_PEER_DENIED")
         if operation == "use_for_scoped_ssh":

@@ -14,7 +14,7 @@ from nacl.signing import SigningKey, VerifyKey
 
 from ..errors import Denied
 from . import policy as policy_module
-from .protocol import SHA256, ULID, application_payload, canonical, checksum, fields, firewall_payload, integer, preparation_digest, restart_payload, text
+from .protocol import PARTIAL_PREPARATION, SHA256, ULID, application_payload, canonical, checksum, fields, firewall_payload, integer, preparation_digest, restart_payload, text
 from .storage import Journal, new_private_file, protected_bytes
 from .timehealth import ANCHOR_FIELDS, TimeHealth
 
@@ -329,7 +329,7 @@ class Authority:
                 and not db.execute("SELECT 1 FROM attempts WHERE mutating=1 AND state IN ('ISSUED','DISPATCHING','UNKNOWN_OUTCOME')").fetchone()):
             db.execute("UPDATE gate SET state='NORMAL' WHERE id=1")
 
-    def preparation_reconciliation(self, request, *, complete):
+    def preparation_reconciliation(self, request, operation):
         fields(request, ("job_id", "nonce"))
         text(request["job_id"], ULID)
         text(request["nonce"], SHA256)
@@ -341,17 +341,25 @@ class Authority:
             row = db.execute("SELECT * FROM attempts WHERE job_id=? AND nonce=?",
                              (request["job_id"], request["nonce"])).fetchone()
             claims = json.loads(row["claims"]) if row else {}
-            allowed = ("UNKNOWN_OUTCOME", "RECONCILED_SUCCEEDED", "SUCCEEDED")
-            if not complete:
-                allowed += ("FAILED", "CANCELLED_SAFE")
-            if (claims.get("capability") != "host.prepare"
-                    or row["state"] not in allowed):
+            if claims.get("capability") != "host.prepare":
+                raise Denied("VPS_PREPARATION_RECONCILIATION_UNVERIFIED")
+            state = row["state"]
+            already_partial = state == "RECONCILED_FAILED" and row["result_code"] == PARTIAL_PREPARATION
+            allowed = {
+                "prepare.readback": state in ("UNKNOWN_OUTCOME", "RECONCILED_SUCCEEDED", "SUCCEEDED", "FAILED", "CANCELLED_SAFE")
+                or already_partial,
+                "prepare.reconcile": state in ("UNKNOWN_OUTCOME", "RECONCILED_SUCCEEDED", "SUCCEEDED"),
+                "prepare.partial": state == "UNKNOWN_OUTCOME" or already_partial,
+            }
+            if not allowed[operation]:
                 raise Denied("VPS_PREPARATION_RECONCILIATION_UNVERIFIED")
             self.policy.target(claims["target"], "host.prepare", claims["scope_digest"])
-            if complete and row["state"] == "UNKNOWN_OUTCOME":
-                result = {"outcome": "SUCCEEDED", "code": "VPS_PREPARATION_RECONCILED", "observation": None}
-                db.execute("""UPDATE attempts SET state='RECONCILED_SUCCEEDED',result_code=?,result_digest=?
-                              WHERE job_id=?""", (result["code"], checksum(result), request["job_id"]))
+            if operation != "prepare.readback" and state == "UNKNOWN_OUTCOME":
+                partial = operation == "prepare.partial"
+                result = {"outcome": "FAILED" if partial else "SUCCEEDED",
+                          "code": PARTIAL_PREPARATION if partial else "VPS_PREPARATION_RECONCILED", "observation": None}
+                db.execute("""UPDATE attempts SET state=?,result_code=?,result_digest=? WHERE job_id=?""",
+                           ("RECONCILED_" + result["outcome"], result["code"], checksum(result), request["job_id"]))
                 db.execute("DELETE FROM incidents WHERE job_id=?", (request["job_id"],))
                 self._release_recovery_hold(db, gate)
         return self.status(request["job_id"])
@@ -420,8 +428,8 @@ class Authority:
             return self.reconcile_firewall(payload)
         if role == "broker" and operation == "apps.reconcile":
             return self.reconcile_application(payload)
-        if role == "broker" and operation in ("prepare.readback", "prepare.reconcile"):
-            return self.preparation_reconciliation(payload, complete=operation == "prepare.reconcile")
+        if role == "broker" and operation in ("prepare.readback", "prepare.reconcile", "prepare.partial"):
+            return self.preparation_reconciliation(payload, operation)
         if role in ("worker", "broker") and operation == "permit.cancel":
             return self.cancel(payload)
         if role in ("worker", "broker", "updater") and operation == "attempt.status":
