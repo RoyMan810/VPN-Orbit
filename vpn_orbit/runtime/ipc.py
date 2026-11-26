@@ -27,9 +27,14 @@ def peer(connection):
     return Peer(*_CREDENTIALS.unpack(connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, _CREDENTIALS.size)))
 
 
-def exact(connection, size):
+def exact(connection, size, *, deadline=None):
     parts = bytearray()
     while len(parts) < size:
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            connection.settimeout(remaining)
         chunk = connection.recv(size - len(parts))
         if not chunk:
             raise Denied("RPC_INCOMPLETE_FRAME")
@@ -37,11 +42,11 @@ def exact(connection, size):
     return bytes(parts)
 
 
-def receive(connection, *, eof=False):
-    size, = _LENGTH.unpack(exact(connection, 4))
+def receive(connection, *, eof=False, deadline=None):
+    size, = _LENGTH.unpack(exact(connection, 4, deadline=deadline))
     if not 0 < size <= MAX_FRAME:
         raise Denied("RPC_FRAME_TOO_LARGE")
-    value = decode(exact(connection, size))
+    value = decode(exact(connection, size, deadline=deadline))
     if eof and connection.recv(1):
         raise Denied("RPC_TRAILING_DATA")
     return value
@@ -68,20 +73,14 @@ class Client:
                 send(connection, {"v": 1, "operation": operation, "payload": payload})
                 connection.shutdown(socket.SHUT_WR)
                 deadline = time.monotonic() + self.timeout
-                for _ in range(_MAX_PROGRESS_FRAMES + 1):
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise TimeoutError
-                    connection.settimeout(remaining)
-                    response = receive(connection)
+                for index in range(_MAX_PROGRESS_FRAMES + 1):
+                    response = receive(connection, deadline=deadline)
                     if not isinstance(response, dict) or "progress" not in response:
                         break
                     fields(response, ("v", "progress"))
-                    if type(response["v"]) is not int or response["v"] != 1 or progress is None:
+                    if type(response["v"]) is not int or response["v"] != 1 or progress is None or index == _MAX_PROGRESS_FRAMES:
                         raise Denied("RPC_INVALID_RESPONSE", 503)
                     progress(response["progress"])
-                else:
-                    raise Denied("RPC_INVALID_RESPONSE", 503)
         except OSError:
             raise Denied("RPC_UNAVAILABLE", 503) from None
         if not isinstance(response, dict) or response.get("v") != 1 or type(response.get("ok")) is not bool:

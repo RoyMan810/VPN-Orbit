@@ -114,35 +114,46 @@ class PreparationJobTests(unittest.TestCase):
         for path in self.root.rglob("*.sqlite3*"):
             self.assertNotIn(b"lab-credential-canary", path.read_bytes())
 
-    def test_unix_rpc_reports_a_phase_before_the_final_reply(self):
+    def test_unix_rpc_reports_a_phase_before_the_final_reply_and_limits_the_stream(self):
         seen = Event()
+        reports = []
         phase = {"phase": "preflight", "stage": "CHECKING"}
 
         def dispatch(role, peer, operation, payload, *, progress):
             self.assertEqual((role, operation), ("worker", "prepare.run"))
-            progress(phase)
-            self.assertTrue(seen.wait(2))
+            for _ in range(payload["count"]):
+                progress(phase)
+            if payload["count"] == 1:
+                self.assertTrue(seen.wait(2))
             return {"outcome": "SUCCEEDED"}
 
         def observe(value):
             self.assertEqual(value, phase)
+            reports.append(value)
             seen.set()
 
         class ConnectedSocket(socket.socket):
             def connect(self, _):
                 pass
 
-        client, server_peer = socket.socketpair()
-        with client, server_peer, ThreadPoolExecutor(max_workers=1) as pool:
-            def server():
-                handle(server_peer, dispatch, {(os.geteuid(), os.getegid()): "worker"}, progress_operation="prepare.run")
-
-            connection = ConnectedSocket(fileno=client.detach())
-            done = pool.submit(server)
-            with patch("vpn_orbit.runtime.ipc.socket.socket", return_value=connection):
-                result = Client("/unused", server_uids={os.geteuid()}, timeout=4).call("prepare.run", {}, progress=observe)
-            self.assertEqual(result, {"outcome": "SUCCEEDED"})
-            done.result(4)
+        identities = {(os.geteuid(), os.getegid()): "worker"}
+        for count in (1, 21):
+            with self.subTest(count=count):
+                reports.clear()
+                client, server_peer = socket.socketpair()
+                with client, server_peer, ThreadPoolExecutor(max_workers=1) as pool:
+                    connection = ConnectedSocket(fileno=client.detach())
+                    done = pool.submit(handle, server_peer, dispatch, identities, progress_operation="prepare.run")
+                    rpc = Client("/unused", server_uids={os.geteuid()}, timeout=4)
+                    payload = {"count": count}
+                    with patch("vpn_orbit.runtime.ipc.socket.socket", return_value=connection):
+                        if count == 1:
+                            self.assertEqual(rpc.call("prepare.run", payload, progress=observe), {"outcome": "SUCCEEDED"})
+                        else:
+                            with self.assertRaisesRegex(Denied, "RPC_INVALID_RESPONSE"):
+                                rpc.call("prepare.run", payload, progress=observe)
+                    done.result(4)
+                self.assertEqual(len(reports), min(count, 20))
 
     def test_lost_reply_holds_authority_until_readback_proves_all_phases(self):
         self.submit()
