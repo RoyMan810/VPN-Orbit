@@ -9,6 +9,9 @@ on:
       - 'web/**'
       - 'tools/fetch_age.py'
       - 'tests/lab/installation.py'
+      - 'tests/lab/bootstrap_install.py'
+      - 'tests/lab/bootstrap-debian-vm.sh'
+      - 'tests/lab/Dockerfile.bootstrap-debian'
       - 'requirements-app.txt'
       - 'pyproject.toml'
       - '.github/workflows/bootstrap-install.yml'
@@ -47,64 +50,23 @@ jobs:
       - name: Provision Docker, Python, verified Controller and HTTPS WebUI
         run: sudo ./install
       - name: Verify installed services and log in through HTTPS
-        run: |
-          for unit in vpn-orbit-compose.service vpn-orbit-broker.socket vpn-orbit-supervisor.socket vpn-orbit-web.service; do
-            sudo systemctl is-active --quiet "$unit"
-          done
-          sudo python3 - <<'PY'
-          from http.cookiejar import CookieJar
-          import importlib.util
-          import json
-          from pathlib import Path
-          import secrets
-          import ssl
-          import subprocess
-          from urllib.request import HTTPSHandler, HTTPCookieProcessor, Request, build_opener
-
-          fixture_path = Path("tests/lab/installation.py")
-          spec = importlib.util.spec_from_file_location("installation_fixture", fixture_path)
-          fixture = importlib.util.module_from_spec(spec)
-          spec.loader.exec_module(fixture)
-          fixture.PASSWORD = secrets.token_urlsafe(32)
-          fixture.owner_create()
-
-          origin = "https://127.0.0.1:18443"
-          ca = "/opt/vpn-orbit-bootstrap/web-ca.pem"
-          context = ssl.create_default_context(cafile=ca)
-          browser = build_opener(HTTPSHandler(context=context), HTTPCookieProcessor(CookieJar()))
-          with browser.open(origin, timeout=10) as response:
-              assert b"/assets/" in response.read()
-          with browser.open(origin + "/healthz", timeout=10) as response:
-              assert json.load(response)["status"] == "alive"
-          login = Request(origin + "/api/v1/auth/login",
-                          data=json.dumps({"username": "roman", "password": fixture.PASSWORD}).encode(),
-                          headers={"Content-Type": "application/json", "Origin": origin})
-          with browser.open(login, timeout=10) as response:
-              user = json.load(response)["user"]
-              assert user["role"] == "Owner"
-              assert "Secure" in response.headers["Set-Cookie"]
-          with browser.open(origin + "/api/v1/audit/integrity", timeout=10) as response:
-              assert json.load(response)["status"] == "verified"
-
-          subprocess.run(["systemctl", "restart", "vpn-orbit-compose.service"], check=True, timeout=195)
-          # systemd may complete the Compose job before the HTTPS proxy accepts connections.
-          subprocess.run([
-              "curl", "--disable", "--fail", "--silent", "--show-error", "--noproxy", "*",
-              "--retry", "8", "--retry-connrefused", "--retry-max-time", "30", "--max-time", "4",
-              "--cacert", ca, "--output", "/dev/null", origin + "/healthz",
-          ], check=True, timeout=40)
-          with browser.open(origin + "/api/v1/auth/session", timeout=10) as response:
-              assert json.load(response)["user"]["id"] == user["id"]
-          with browser.open(origin + "/api/v1/audit/integrity", timeout=10) as response:
-              assert json.load(response)["status"] == "verified"
-
-          revision = subprocess.check_output(["git", "-c", f"safe.directory={Path.cwd()}",
-                                              "rev-parse", "HEAD"], text=True).strip()
-          installed = json.loads(Path("/opt/vpn-orbit/installation.json").read_bytes())
-          assert installed["source_commit"] == revision
-          assert installed["remote_mutation_enabled"] is False
-          PY
-          test "$(ss -Hltn 'sport = :18443' | awk '{print $4}')" = 127.0.0.1:18443
+        run: sudo RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 tests/lab/bootstrap_install.py
       - name: Inspect service journals after a failure
         if: failure()
         run: sudo journalctl --no-pager -n 60 -u vpn-orbit-compose -u vpn-orbit-web -u vpn-orbit-broker -u vpn-orbit-supervisor
+
+  debian-bootstrap:
+    name: Fresh Debian 13 / bootstrap install and HTTPS
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+      - name: Boot a fresh Debian VM, install Controller and verify HTTPS
+        run: bash tests/lab/bootstrap-debian-vm.sh

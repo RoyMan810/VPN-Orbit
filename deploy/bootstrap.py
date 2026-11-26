@@ -108,14 +108,19 @@ def python_build_jobs(cpus, memory):
     return max(1, min(cpus or 1, memory // 1024**2, 4))
 
 
-def platform_and_ports(endpoint):
-    release = platform.freedesktop_os_release()
-    if release.get("ID") != "ubuntu" or platform.machine() != "x86_64":
-        raise ValueError("Требуется Ubuntu Server amd64.")
-    suites = {"24.04": "noble", "26.04": "resolute"}
-    suite = suites.get(release.get("VERSION_ID"))
+def docker_suite(release):
+    distribution = release.get("ID")
+    suites = {("ubuntu", "24.04"): "noble", ("ubuntu", "26.04"): "resolute", ("debian", "13"): "trixie"}
+    suite = suites.get((distribution, release.get("VERSION_ID")))
     if suite is None or release.get("VERSION_CODENAME") != suite:
-        raise ValueError("Требуется Ubuntu Server 24.04 или 26.04.")
+        raise ValueError("Требуется Ubuntu Server 24.04, 26.04 или Debian 13.")
+    return distribution, suite
+
+
+def platform_and_ports(endpoint):
+    if platform.machine() != "x86_64":
+        raise ValueError("Требуется архитектура amd64.")
+    target = docker_suite(platform.freedesktop_os_release())
     if not Path("/run/systemd/system").is_dir():
         raise ValueError("Требуется запущенный host systemd.")
     for name in (TOOLS.parent, APP.parent, WEB_UNIT.parent, Path("/var/lib"), Path("/run")):
@@ -137,7 +142,7 @@ def platform_and_ports(endpoint):
                  Path("/run/vpn-orbit")):
         if path.exists() or path.is_symlink():
             raise ValueError(f"Найдена существующая установка или её часть: {path}.")
-    return suite
+    return target
 
 
 def download(url, output, sha256=None):
@@ -155,7 +160,7 @@ def apt(*args, **kwargs):
                env={"DEBIAN_FRONTEND": "noninteractive"}, **kwargs)
 
 
-def install_docker(suite, temporary):
+def install_docker(distribution, suite, temporary):
     docker = Path("/usr/bin/docker")
     if docker.exists():
         version = capture(docker, "--host", DOCKER_SOCKET, "version", "--format", "{{.Server.Version}}")
@@ -166,7 +171,8 @@ def install_docker(suite, temporary):
         return
     # apt will refuse to remove pre-existing conflicting host packages.
     candidate = temporary / "docker.asc"
-    download("https://download.docker.com/linux/ubuntu/gpg", candidate)
+    repository = f"https://download.docker.com/linux/{distribution}"
+    download(f"{repository}/gpg", candidate)
     gpg_home = temporary / "gnupg"
     gpg_home.mkdir(mode=0o700)
     result = capture("gpg", "--batch", "--homedir", gpg_home, "--with-colons",
@@ -177,7 +183,7 @@ def install_docker(suite, temporary):
     if primary_keys != [DOCKER_KEY]:
         raise ValueError("Отпечаток ключа Docker APT не совпадает.")
     DOCKER_APT_KEY.parent.mkdir(mode=0o755, exist_ok=True)
-    source = ("Types: deb\nURIs: https://download.docker.com/linux/ubuntu\n"
+    source = (f"Types: deb\nURIs: {repository}\n"
               f"Suites: {suite}\nComponents: stable\nArchitectures: amd64\nSigned-By: {DOCKER_APT_KEY}\n")
     for path, content in ((DOCKER_APT_KEY, candidate.read_bytes()), (DOCKER_APT_SOURCE, source.encode())):
         try:
@@ -193,7 +199,7 @@ def install_docker(suite, temporary):
     for name in ("docker-ce", "docker-ce-cli"):
         rows = [line.split("|") for line in capture("apt-cache", "madison", name).splitlines()]
         version = next((row[1].strip() for row in rows if len(row) == 3
-                        and row[2].strip().startswith("https://download.docker.com/linux/ubuntu")
+                        and row[2].split()[:2] == [repository, f"{suite}/stable"]
                         and re.match(r"(?:[0-9]+:)?29\.", row[1].strip())), None)
         if not version:
             raise ValueError(f"Пакет {name} версии 29.x недоступен.")
@@ -239,7 +245,7 @@ def build_python(work, identity, env):
         "assert sqlite3.sqlite_version_info >= (3,45)")
 
 
-def build_release(source, revision, work, identity, env):
+def build_release(source, revision, work, identity, env, bundle_platform):
     settings = {"identity": identity, "env": env}
     age_archive = work / "age.tar.gz"
     run(PYTHON, source / "tools/fetch_age.py", "--output", age_archive, **settings)
@@ -251,11 +257,13 @@ def build_release(source, revision, work, identity, env):
         "-r", source / "deploy/requirements-wheels.lock", **settings)
     bundle = work / "bundle"
     run(builder, source / "deploy/build_bundle.py", "--output", bundle, "--unsigned",
-        "--python-image", PYTHON_IMAGE, "--age-tool", work / "age/age", **settings)
+        "--python-image", PYTHON_IMAGE, "--age-tool", work / "age/age", "--platform", bundle_platform, **settings)
     manifest_bytes = (bundle / "manifest.json").read_bytes()
     manifest = json.loads(manifest_bytes)
     if manifest["source_commit"] != revision:
         raise ValueError("Ревизия сборки Controller отличается от исходного checkout.")
+    if manifest["platform"] != bundle_platform:
+        raise ValueError("Платформа сборки Controller отличается от платформы хоста.")
     # Root authenticates the locally built manifest by its digest before the
     # installer copies and executes any bundle file.
     digest = hashlib.sha256(manifest_bytes).hexdigest()
@@ -334,7 +342,7 @@ http {{
 
 
 def prepare_web(temporary, endpoint):
-    # Extract the APT packages so Ubuntu's default Nginx service never binds port 80.
+    # Extract the APT packages so the distribution's default Nginx service never binds port 80.
     apt("download", "nginx", "nginx-common", cwd=temporary)
     binary, = temporary.glob("nginx_*.deb")
     common, = temporary.glob("nginx-common_*.deb")
@@ -419,7 +427,9 @@ WantedBy=multi-user.target
             "--output", "/dev/null", endpoint.origin + path)
 
 
-def install(owner, targets, suite, endpoint):
+def install(owner, targets, target, endpoint):
+    distribution, suite = target
+    bundle_platform = "debian-13-amd64" if distribution == "debian" else "ubuntu-24.04-amd64"
     endpoint.check_certificate()
     root = Path(__file__).resolve().parents[1]
     checkout_owner = pwd.getpwuid(root.stat().st_uid)
@@ -446,7 +456,7 @@ def install(owner, targets, suite, endpoint):
             "openssl", "xz-utils", "build-essential", "pkg-config", "libssl-dev", "zlib1g-dev",
             "libsqlite3-dev", "libffi-dev", "libbz2-dev", "liblzma-dev", "libzstd-dev",
             "libcrypt1", "libpcre2-8-0")
-        install_docker(suite, private)
+        install_docker(distribution, suite, private)
         identity = build_identity()
         work = temporary / "build"
         work.mkdir(mode=0o700)
@@ -469,7 +479,7 @@ def install(owner, targets, suite, endpoint):
         try:
             stage("Сборка Python 3.15 и проверенного комплекта Controller.")
             build_python(work, identity, env)
-            bundle, digest, channel = build_release(source, revision, work, identity, env)
+            bundle, digest, channel = build_release(source, revision, work, identity, env, bundle_platform)
             channel_args = ["--development"] if channel == "development" else []
             stage("Сборка WebUI и проверка HTTPS.")
             build_web(source, work, identity, env)

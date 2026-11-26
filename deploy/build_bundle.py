@@ -19,9 +19,9 @@ import tempfile
 import tomllib
 
 if __package__:
-    from .artifact import AGE_FILE, AGE_SHA256, AGE_VERSION, FIXED_FILES, IMAGE, WEB_ASSET, WEB_INDEX, bundle_channel, canonical
+    from .artifact import AGE_FILE, AGE_SHA256, AGE_VERSION, FIXED_FILES, IMAGE, PLATFORMS, UBUNTU_AMD64, WEB_ASSET, WEB_INDEX, bundle_channel, canonical
 else:
-    from artifact import AGE_FILE, AGE_SHA256, AGE_VERSION, FIXED_FILES, IMAGE, WEB_ASSET, WEB_INDEX, bundle_channel, canonical
+    from artifact import AGE_FILE, AGE_SHA256, AGE_VERSION, FIXED_FILES, IMAGE, PLATFORMS, UBUNTU_AMD64, WEB_ASSET, WEB_INDEX, bundle_channel, canonical
 
 
 @contextmanager
@@ -83,6 +83,7 @@ def main(argv=None):
     parser.add_argument("--unsigned", action="store_true",
                         help="Emit a SHA-256 authenticated manifest for a bundle built and installed locally")
     parser.add_argument("--python-image", required=True)
+    parser.add_argument("--platform", choices=PLATFORMS, default=UBUNTU_AMD64)
     parser.add_argument("--age-tool", type=Path, required=True, help="Official checksum-pinned age v1.3.2 linux/amd64 executable")
     parser.add_argument("--include-web", action="store_true", help="Build and include signed WebUI from the same commit; requires Node 26")
     args = parser.parse_args(argv)
@@ -163,7 +164,7 @@ def main(argv=None):
              for path in sorted(output.rglob("*")) if path.is_file()]
     if signer is None:
         value = {"v": 2, "application": "VPN-Orbit", "version": version, "channel": channel,
-                 "source_commit": source, "python_image": args.python_image, "platform": "ubuntu-24.04-amd64",
+                 "source_commit": source, "python_image": args.python_image, "platform": args.platform,
                  "python": "3.15", "sqlite_schema": sqlite_schema, "remote_mutation_enabled": False,
                  "authentication": "sha256", "files": files}
         data = canonical(value)
@@ -172,7 +173,7 @@ def main(argv=None):
                   "authentication": "sha256", "channel": channel}
     else:
         value = {"v": 1, "application": "VPN-Orbit", "version": version, "channel": channel,
-                 "source_commit": source, "python_image": args.python_image, "platform": "ubuntu-24.04-amd64",
+                 "source_commit": source, "python_image": args.python_image, "platform": args.platform,
                  "python": "3.15", "sqlite_schema": sqlite_schema, "remote_mutation_enabled": False, "files": files,
                  "signing_key_sha256": hashlib.sha256(bytes(signer.verify_key)).hexdigest()}
         data = canonical(value)

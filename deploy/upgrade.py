@@ -196,6 +196,7 @@ def prepare(args):
         release, digest = snapshot(args.bundle, stage, key)
         if release["version"] != TARGET or release["python"] != f"{sys.version_info.major}.{sys.version_info.minor}":
             raise ArtifactError("UPDATE_BUNDLE_VERSION_MISMATCH")
+        base.check_bundle_platform(release)
         if not (stage / AGE_FILE).is_file():
             raise ArtifactError("PINNED_AGE_TOOL_REQUIRED")
         web = os.path.lexists(base.UNITS / PROXY)

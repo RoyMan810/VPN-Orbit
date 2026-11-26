@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fresh Ubuntu installation from a verified development bundle."""
+"""Fresh Controller installation from a verified bundle."""
 
 import argparse
 import getpass
@@ -23,7 +23,7 @@ import traceback
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, urlopen
 
-from artifact import AGE_FILE, ArtifactError, bundle_channel, canonical, snapshot, trusted_key
+from artifact import AGE_FILE, DEBIAN_AMD64, UBUNTU_AMD64, ArtifactError, bundle_channel, canonical, snapshot, trusted_key
 
 
 APP = Path("/opt/vpn-orbit")
@@ -129,6 +129,21 @@ def supported_ubuntu(release):
     return release.get("ID") == "ubuntu" and version is not None and tuple(map(int, version.groups())) >= (24, 4)
 
 
+def host_bundle_platform(release, machine):
+    if machine != "x86_64":
+        return None
+    if supported_ubuntu(release):
+        return UBUNTU_AMD64
+    if (release.get("ID"), release.get("VERSION_ID"), release.get("VERSION_CODENAME")) == ("debian", "13", "trixie"):
+        return DEBIAN_AMD64
+    return None
+
+
+def check_bundle_platform(value):
+    if value["platform"] != host_bundle_platform(platform.freedesktop_os_release(), platform.machine()):
+        raise ArtifactError("HOST_BUNDLE_PLATFORM_MISMATCH")
+
+
 def supported_compose(version):
     return re.fullmatch(r"v?(?:2|5)\.[0-9]+\.[0-9]+(?:\+ds[0-9]+-[0-9]+ubuntu[0-9]+(?:\.[0-9]+)*(?:~[0-9]+(?:\.[0-9]+)*)?)?", version) is not None
 
@@ -142,8 +157,7 @@ def advise_capacity(cpus, memory, disk):
 def preflight(args):
     if os.geteuid() != 0:
         raise ArtifactError("LOCAL_ROOT_REQUIRED")
-    release = platform.freedesktop_os_release()
-    if not supported_ubuntu(release) or platform.machine() != "x86_64":
+    if host_bundle_platform(platform.freedesktop_os_release(), platform.machine()) is None:
         raise ArtifactError("PLATFORM_UNSUPPORTED")
     if sys.version_info[:2] not in ((3, 13), (3, 15)) or sqlite3.sqlite_version_info < (3, 45):
         raise ArtifactError("HOST_PYTHON_SQLITE_UNSUPPORTED")
@@ -325,6 +339,7 @@ def check_update_bundle(args, installed):
             raise ArtifactError("UPDATE_BUNDLE_VERSION_MISMATCH")
         if release["python"] != f"{sys.version_info.major}.{sys.version_info.minor}":
             raise ArtifactError("HOST_BUNDLE_PYTHON_MISMATCH")
+        check_bundle_platform(release)
         if not (stage / AGE_FILE).is_file():
             raise ArtifactError("PINNED_AGE_TOOL_REQUIRED")
         selected = installed["docker_host"]
@@ -375,6 +390,7 @@ def install(args):
                                     allow_development=args.development)
         if manifest["python"] != f"{sys.version_info.major}.{sys.version_info.minor}":
             raise ArtifactError("HOST_BUNDLE_PYTHON_MISMATCH")
+        check_bundle_platform(manifest)
         if not (stage / AGE_FILE).is_file():
             raise ArtifactError("PINNED_AGE_TOOL_REQUIRED")
         if args.web_enrollment and not args.targets:
