@@ -7,7 +7,7 @@ import time
 from .auth import AuthService, Role, etag
 from .errors import Denied
 from .queue import JobQueue
-from .runtime.protocol import SHA256, ULID, checksum, compose_summary, docker_summary, software_summary
+from .runtime.protocol import SHA256, ULID, checksum, observation_summary
 
 
 _SELECT = """
@@ -47,24 +47,7 @@ def _sample(raw):
     if raw is None:
         return None
     try:
-        value = json.loads(raw)
-        if (not isinstance(value, dict) or value.get('status') != 'REACHABLE'
-                or value.get('source') != 'restricted_helper' or type(value.get('observed_at')) is not int
-                or not isinstance(value.get('boot_id'), str)
-                or not re.fullmatch(r'[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}', value['boot_id'])):
-            return None
-        sample = {k: value[k] for k in ('status', 'source', 'observed_at', 'boot_id')}
-        if 'software' in value:
-            sample['software'] = software_summary(value['software'])
-        if 'docker' in value:
-            if 'software' not in sample:
-                return None
-            sample['docker'] = docker_summary(value['docker'])
-        if 'compose' in value:
-            if 'docker' not in sample:
-                return None
-            sample['compose'] = compose_summary(value['compose'])
-        return sample
+        return observation_summary(json.loads(raw))
     except (ValueError, TypeError, Denied):
         return None
 

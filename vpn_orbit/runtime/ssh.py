@@ -8,7 +8,7 @@ import time
 import asyncssh
 
 from ..errors import Denied
-from .protocol import MAX_PROBE_REPLY, PROBE_COMMAND, PROBE_REQUEST, PROBE_VERSION, SHA256, ULID, application_payload, canonical, compose_summary, decode, docker_summary, fields, firewall_payload, integer, restart_payload, software_summary, text
+from .protocol import MAX_PROBE_REPLY, PROBE_COMMAND, PROBE_REQUEST, PROBE_VERSION, SHA256, ULID, application_payload, canonical, decode, fields, firewall_payload, integer, observation_summary, restart_payload, text
 from .storage import new_private_file, protected_bytes
 
 
@@ -297,14 +297,12 @@ def parse_probe(output, *, now):
         value = decode(output.rstrip(b"\n"))
     except Denied:
         raise Denied("SSH_UNSUPPORTED_OUTPUT") from None
-    fields(value, ("v", "uid", "boot_id", "observed_at", "software", "docker", "compose"))
+    fields(value, ("v", "uid", "boot_id", "observed_at", "software", "docker", "compose", "local_https"))
     if type(value["v"]) is not int or value["v"] != PROBE_VERSION or type(value["uid"]) is not int or value["uid"] != 0:
         raise Denied("SSH_PROBE_INVALID")
-    text(value["boot_id"], r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}")
     integer(value["observed_at"], now - 300, now + 2)
-    return {"status": "REACHABLE", "source": "restricted_helper", "observed_at": value["observed_at"],
-            "boot_id": value["boot_id"], "software": software_summary(value["software"], complete=True),
-            "docker": docker_summary(value["docker"], complete=True), "compose": compose_summary(value["compose"])}
+    sample = {key: value[key] for key in ("observed_at", "boot_id", "software", "docker", "compose", "local_https")}
+    return observation_summary({"status": "REACHABLE", "source": "restricted_helper", **sample})
 
 
 def provision_known_hosts(path, policy):

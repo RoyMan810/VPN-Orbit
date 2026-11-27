@@ -145,6 +145,7 @@ async def probe(process):
             'software':{'docker':'UNKNOWN','nginx':'UNKNOWN','nginx_service':'UNKNOWN'},
             'docker':{'status':'NOT_CONFIGURED','containers':[]},
             'compose':{'status':'NOT_CONFIGURED','containers':[]},
+            'local_https':{'status':'NOT_CONFIGURED','sites':[]},
             'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip()}
     process.stdout.write(json.dumps(result,sort_keys=True,separators=(',',':')).encode()+b'\\n')
     process.exit(0)

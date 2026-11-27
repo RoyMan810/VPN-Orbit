@@ -108,8 +108,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(self.job(revoked["id"])["reason"], "SECRET_NOT_ACTIVE")
         self.assertEqual(self.executions, [TARGET])
 
-    def test_v2_software_is_persisted_only_when_the_signed_result_is_valid(self):
-        summary = {"docker": "PRESENT", "nginx": "NOT_DETECTED"}
+    def test_software_is_persisted_only_when_the_signed_result_is_valid(self):
+        summary = {"docker": "PRESENT", "nginx": "NOT_DETECTED", "nginx_service": "NOT_FOUND"}
         self.broker.execute = lambda *_: {**observation(), "software": summary}
         job = self.enqueue()
         self.worker.run(once=True)
@@ -126,11 +126,11 @@ class RuntimeTests(unittest.TestCase):
         port = {"address": "::1", "host_port": 8080, "container_port": 80, "protocol": "tcp"}
         container = {"id": "a" * 64, "project": "fixture", "service": "web", "state": "RUNNING",
                      "published_ports": [port], "mount_status": "NONE", "network_status": "ISOLATED",
-                     "dependency_status": "ISOLATED"}
+                     "dependency_status": "ISOLATED", "started_at": None}
         summary = {"status": "OBSERVED", "containers": [container]}
         compose = {"status": "OBSERVED", "containers": [{"id": "b" * 64, "image_id": "sha256:" + "c" * 64,
                     "project": "external", "service": "web", "state": "RUNNING"}]}
-        software = {"docker": "PRESENT", "nginx": "NOT_DETECTED"}
+        software = {"docker": "PRESENT", "nginx": "NOT_DETECTED", "nginx_service": "NOT_FOUND"}
         self.broker.execute = lambda *_: {**observation(), "software": software, "docker": summary, "compose": compose}
         job = self.enqueue()
         self.worker.run(once=True)

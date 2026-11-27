@@ -9,8 +9,11 @@ from .test_auth_api import Fixture, OTHER, SCOPE
 
 
 CONTAINER = "c" * 64
+CONTAINER_IDENTITY = {"id": CONTAINER, "project": "fixture", "service": "web", "state": "RUNNING"}
 RUNNING_DOCKER = {"status": "OBSERVED", "containers": [
-    {"id": CONTAINER, "project": "fixture", "service": "web", "state": "RUNNING"},
+    {**CONTAINER_IDENTITY,
+     "published_ports": None, "mount_status": "UNKNOWN", "network_status": "UNKNOWN",
+     "dependency_status": "UNKNOWN", "started_at": None},
 ]}
 
 
@@ -36,11 +39,11 @@ class InventoryTests(Fixture):
         for state in ("DISPATCHING", "EXECUTING", "VERIFYING"):
             self.queue.advance(claim, state)
         value = {"status": "REACHABLE", "source": "restricted_helper", "observed_at": self.now,
-                 "boot_id": "11111111-1111-1111-1111-111111111111"}
-        if docker is not None:
-            value.update(software={"docker": "PRESENT", "nginx": "UNKNOWN"}, docker=docker)
-        if compose is not None:
-            value["compose"] = compose
+                 "boot_id": "11111111-1111-1111-1111-111111111111",
+                 "software": {"docker": "PRESENT", "nginx": "UNKNOWN", "nginx_service": "UNKNOWN"},
+                 "docker": docker or {"status": "NOT_CONFIGURED", "containers": []},
+                 "local_https": {"status": "NOT_CONFIGURED", "sites": []},
+                 "compose": compose or {"status": "NOT_CONFIGURED", "containers": []}}
         self.queue.finish(claim, outcome, reason, result=value if outcome == "SUCCEEDED" else None)
         return response.json()["id"]
 
@@ -60,7 +63,7 @@ class InventoryTests(Fixture):
         self.assertEqual(digest, checksum(result))
         self.assertEqual(result["action"], "docker.restart")
         self.assertEqual(result["status"], "PREVIEW_ONLY")
-        self.assertEqual(result["target"], {"resource_id": SCOPE, **RUNNING_DOCKER["containers"][0]})
+        self.assertEqual(result["target"], {"resource_id": SCOPE, **CONTAINER_IDENTITY})
         self.assertEqual(result["observed_at"], self.now)
         self.assertEqual(self.restart_preview().json()["preview_digest"], digest)
         with self.store.read() as db:
@@ -76,7 +79,7 @@ class InventoryTests(Fixture):
         self.complete(docker=docker)
         value = self.detail().json()["observation"]
         self.assertEqual(value["last_success"]["docker"], docker)
-        self.assertEqual(self.restart_preview().json()["target"], {"resource_id": SCOPE, **container})
+        self.assertEqual(self.restart_preview().json()["target"], {"resource_id": SCOPE, **CONTAINER_IDENTITY})
 
     def test_discovery_is_read_only_and_does_not_expand_the_restart_scope(self):
         external = "f" * 64
@@ -230,6 +233,12 @@ class InventoryTests(Fixture):
         self.assertEqual(self.detail().json()["observation"], before)
 
     def test_changed_scope_disabled_and_untrusted_result_fields_are_not_current(self):
+        job = self.complete()
+        with self.store.write() as db:
+            db.execute("UPDATE jobs SET result=json_remove(result,'$.software.nginx_service') WHERE id=?", (job,))
+        legacy = self.detail().json()["observation"]
+        self.assertEqual(legacy["reason"], "OBSERVATION_INVALID")
+        self.assertIsNone(legacy["last_success"])
         job = self.complete()
         with self.store.write() as db:
             db.execute("UPDATE jobs SET result=json_set(result,'$.private_key','secret-canary') WHERE id=?", (job,))

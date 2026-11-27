@@ -10,7 +10,7 @@ from .errors import Denied
 from .firewall_requests import FirewallOperations
 from .queue import JobQueue
 from .restart_requests import RestartOperations
-from .runtime.protocol import checksum, compose_summary, docker_summary, fields, firewall_rules, integer, software_summary, text
+from .runtime.protocol import checksum, fields, firewall_rules, integer, observation_summary, text
 from .runtime.storage import process_lock
 
 
@@ -131,25 +131,9 @@ class Worker:
                               "ssh_port": binding["firewall"]["ssh_port"]}
                 self.queue.finish(claim, response["outcome"], response["code"], result=result)
             elif response["outcome"] == "SUCCEEDED":
-                value = response["observation"]
-                names = ("status", "source", "observed_at", "boot_id")
-                if isinstance(value, dict) and "docker" in value:
-                    names += ("software", "docker")
-                    if "compose" in value:
-                        names += ("compose",)
-                        compose_summary(value["compose"])
-                    fields(value, names)
-                    software_summary(value["software"])
-                    docker_summary(value["docker"])
-                elif isinstance(value, dict) and "software" in value:
-                    fields(value, names + ("software",))
-                    software_summary(value["software"])
-                else:
-                    fields(value, names)
-                if value["status"] != "REACHABLE" or value["source"] != "restricted_helper":
-                    raise Denied("BROKER_OBSERVATION_INVALID")
-                integer(value["observed_at"], int(self.queue.clock()) - 300, int(self.queue.clock()) + 2)
-                text(value["boot_id"], r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}")
+                value = observation_summary(response["observation"])
+                now = int(self.queue.clock())
+                integer(value["observed_at"], now - 300, now + 2)
                 self.queue.finish(claim, "SUCCEEDED", response["code"], result=value)
             elif response["outcome"] in ("FAILED", "UNKNOWN_OUTCOME") and response["observation"] is None:
                 self.queue.finish(claim, response["outcome"], response["code"])

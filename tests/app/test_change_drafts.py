@@ -45,18 +45,14 @@ class ChangeDraftTests(Fixture):
             self.queue.advance(claim, state)
         result = {"status": "REACHABLE", "source": "restricted_helper", "observed_at": self.now,
                   "boot_id": boot_id,
-                  "software": {"docker": "PRESENT", "nginx": "UNKNOWN"},
+                  "software": {"docker": "PRESENT", "nginx": "UNKNOWN", "nginx_service": "UNKNOWN"},
+                  "local_https": {"status": "NOT_CONFIGURED", "sites": []},
+                  "compose": {"status": "NOT_CONFIGURED", "containers": []},
                   "docker": {"status": "OBSERVED", "containers": [
-                      {"id": CONTAINER, "project": "fixture", "service": "web", "state": "RUNNING"},
+                      {"id": CONTAINER, "project": "fixture", "service": "web", "state": "RUNNING",
+                       "published_ports": ports, "mount_status": mounts or "UNKNOWN", "network_status": network or "UNKNOWN",
+                       "dependency_status": dependencies or "UNKNOWN", "started_at": None},
                   ]}}
-        if ports is not None:
-            result["docker"]["containers"][0]["published_ports"] = ports
-        if mounts is not None:
-            result["docker"]["containers"][0].update(mount_status=mounts, published_ports=ports)
-        if network is not None:
-            result["docker"]["containers"][0]["network_status"] = network
-        if dependencies is not None:
-            result["docker"]["containers"][0]["dependency_status"] = dependencies
         self.queue.finish(claim, outcome, "PROBE_COMPLETE" if outcome == "SUCCEEDED" else "SSH_TIMEOUT",
                           result=result if outcome == "SUCCEEDED" else None)
 
