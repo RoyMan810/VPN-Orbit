@@ -6,7 +6,7 @@ import re
 import time
 
 from .adoption import assess_profiles, resource_claims
-from .auth import AuthService, Role, etag
+from .auth import AuthService, Role, check_etag, etag
 from .errors import Denied
 from .queue import JobQueue
 from .runtime.protocol import COMPOSE_PROJECT, SHA256, ULID, checksum, observation_summary
@@ -32,7 +32,7 @@ WITH page AS MATERIALIZED (
     LEFT JOIN jobs candidate ON candidate.id=a.correlation_id AND candidate.resource_id=r.id AND candidate.action='host.probe'
     GROUP BY r.id
 )
-SELECT r.*, j.status AS job_status, j.reason AS job_reason, j.updated_at AS checked_at,
+SELECT r.*, j.id AS observation_id, j.status AS job_status, j.reason AS job_reason, j.updated_at AS checked_at,
        j.scope_digest AS job_scope, j.policy_revision AS job_policy, j.result AS job_result,
        s.result AS success_result
 FROM page r
@@ -94,18 +94,23 @@ class Inventory:
                 'observation': {'status': status, 'reason': reason,
                                 'last_checked_at': row['checked_at'], 'last_success': success}}
 
-    def _rows(self, auth, token, *, after='', identity=None, limit=51, permission=None):
+    def _rows(self, auth, token, *, after='', identity=None, limit=51, permission=None, include_observation_id=False):
         with self.store.read() as db:
             JobQueue._schema(db)
             actor = auth._session(db, token)
             rows = db.execute(_SELECT, (after, identity, identity, actor['role'] == Role.OWNER,
                                         actor['id'], limit)).fetchall()
             now = int(self.clock())
+            values = []
             for row in rows:
                 AuthService.require(db, actor, 'vps:read', row['id'])
                 if permission is not None:
                     AuthService.require(db, actor, permission, row['id'])
-            return [self._public(row, now, actor, db) for row in rows]
+                value = self._public(row, now, actor, db)
+                if include_observation_id:
+                    value['observation_id'] = row['observation_id']
+                values.append(value)
+            return values
 
     def list(self, auth, token, *, after='', limit=50):
         if type(limit) is not int or not 1 <= limit <= 100 or (after and re.fullmatch(ULID, after) is None):
@@ -114,10 +119,11 @@ class Inventory:
         value = {'items': rows[:limit], 'next_after': rows[limit - 1]['id'] if len(rows) > limit else None}
         return value, etag(value, 0)
 
-    def _resource(self, auth, token, identity, *, permission=None):
+    def _resource(self, auth, token, identity, *, permission=None, include_observation_id=False):
         if re.fullmatch(ULID, identity) is None:
             raise Denied('RESOURCE_NOT_FOUND', 404)
-        rows = self._rows(auth, token, identity=identity, limit=1, permission=permission)
+        rows = self._rows(auth, token, identity=identity, limit=1, permission=permission,
+                          include_observation_id=include_observation_id)
         if not rows:
             raise Denied('RESOURCE_NOT_FOUND', 404)
         return rows[0]
@@ -155,10 +161,10 @@ class Inventory:
         }
         return {**preview, 'preview_digest': checksum(preview)}
 
-    def adoption_preview(self, auth, token, identity, project):
+    def adoption_preview(self, auth, token, identity, project, *, if_match=None):
         if re.fullmatch(COMPOSE_PROJECT, project) is None:
             raise Denied('COMPOSE_PROJECT_NOT_FOUND', 404)
-        resource = self._resource(auth, token, identity)
+        resource = self._resource(auth, token, identity, include_observation_id=True)
         observation = resource['observation']
         if observation['status'] != 'REACHABLE':
             raise Denied('FRESH_OBSERVATION_REQUIRED', 409)
@@ -204,10 +210,15 @@ class Inventory:
             'policy_revision': resource['policy_revision'],
             'observed_at': sample['observed_at'],
             'boot_id': sample['boot_id'],
+            'observation_id': resource['observation_id'],
             'snapshot_digest': checksum(sample),
             'containers': containers,
             'compatibility': assess_profiles(containers, evidence.get('images', {})),
             'configuration': configuration,
             'attachments': attachments,
         }
-        return {**preview, 'preview_digest': checksum(preview)}
+        value = {**preview, 'preview_digest': checksum(preview)}
+        tag = etag(value, resource['revision'])
+        if if_match is not None:
+            check_etag(if_match, tag)
+        return value, tag

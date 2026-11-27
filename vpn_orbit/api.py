@@ -504,10 +504,14 @@ def create_app(settings: Settings, *, auth: AuthService | None = None, enrollmen
         return value
 
     @app.get("/api/v1/resources/{resource_id}/compose/projects/{project}/adoption-preview")
-    def adoption_preview(resource_id: str, project: str, request: Request, actor=Depends(principal)):
+    def adoption_preview(resource_id: str, project: str, request: Request, response: Response,
+                         actor=Depends(principal)):
         if actor.role != Role.OWNER:
             raise Denied("FORBIDDEN")
-        return inventory.adoption_preview(service, token(request), resource_id, project)
+        value, tag = inventory.adoption_preview(service, token(request), resource_id, project,
+                                                if_match=request.headers.get("if-match"))
+        response.headers["ETag"] = tag
+        return value
 
     @app.get("/api/v1/resources/{resource_id}/docker/containers/{container_id}/restart-preview")
     def restart_preview(resource_id: str, container_id: str, request: Request, actor=Depends(principal)):

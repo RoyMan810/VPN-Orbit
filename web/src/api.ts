@@ -49,6 +49,8 @@ export interface ComposeAdoptionPreview {
   version: 1
   action: 'compose.adopt'
   status: 'PREVIEW_ONLY'
+  observation_id: string
+  preview_digest: string
   target: { resource_id: string; project: string }
   resource_revision: number
   policy_revision: number

@@ -621,10 +621,23 @@ test('previews an observed Compose project on demand and clears the preview when
   await expect(preview.getByText('Profile compatibility is unverified.')).toBeVisible()
   await expect(preview.getByText('Bind mount details unavailable', { exact: true })).toHaveCount(2)
   await expect(preview.getByText('Partial data', { exact: true })).toHaveCount(2)
+  const tag = reply.headers()['etag']
+  expect(tag).toBeTruthy()
+  const rechecked = page.waitForResponse(response => response.url().endsWith('/compose/projects/fixture/adoption-preview'))
+  await preview.getByRole('button', { name: 'Recheck snapshot', exact: true }).click()
+  const match = await rechecked
+  expect(match.request().headers()['if-match']).toBe(tag)
+  expect(match.status()).toBe(200)
+  await expect(preview.getByText('The reviewed snapshot was still current at the time of the check.')).toBeVisible()
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320)
   await page.getByLabel('Language').selectOption('ru')
   const translated = page.getByRole('region', { name: 'Предпросмотр принятия · fixture', exact: true })
   await expect(translated.getByText('Совместимость с профилями не подтверждена.')).toBeVisible()
+  await page.route('**/compose/projects/fixture/adoption-preview', route =>
+    route.fulfill({ status: 412, json: { code: 'STALE_REVISION' } }), { times: 1 })
+  await translated.getByRole('button', { name: 'Сверить снимок', exact: true }).click()
+  await expect(translated.getByRole('alert')).toHaveText('Обновите инвентарь перед повторным запросом предпросмотра.')
+  await expect(translated.getByRole('list')).toHaveCount(0)
   await page.clock.fastForward(301_000)
   await expect(page.getByRole('region', { name: 'Предпросмотр принятия · fixture', exact: true })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Предпросмотр принятия · fixture', exact: true })).toHaveCount(0)

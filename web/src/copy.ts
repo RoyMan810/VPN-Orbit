@@ -220,6 +220,8 @@ export const copy = {
     composeEmpty: 'No Compose services were verified in this observation.',
     adoptionOpen: 'Preview',
     adoptionPreview: 'Adoption preview',
+    adoptionRecheck: 'Recheck snapshot',
+    adoptionRecheckMatched: 'The reviewed snapshot was still current at the time of the check.',
     adoptionScope: 'This check uses image digests, resource labels and observed Compose connections. Configuration and exclusive ownership require separate checks.',
     adoptionCompatibility: 'Profile compatibility',
     adoptionProfileStatus: {
@@ -578,6 +580,8 @@ export const copy = {
     composeEmpty: 'В этом наблюдении нет подтверждённых сервисов Compose.',
     adoptionOpen: 'Просмотр',
     adoptionPreview: 'Предпросмотр принятия',
+    adoptionRecheck: 'Сверить снимок',
+    adoptionRecheckMatched: 'На момент сверки просмотренный снимок оставался актуальным.',
     adoptionScope: 'Проверка учитывает digest образов, метки ресурсов и подключения обнаруженных проектов Compose. Конфигурация и исключительное владение требуют отдельных проверок.',
     adoptionCompatibility: 'Совместимость с профилями',
     adoptionProfileStatus: {
