@@ -7,6 +7,7 @@ from importlib.resources import files
 import json
 
 from .app_profiles import DEPENDENCIES, PROFILES, REPOSITORIES
+from .runtime.protocol import checksum
 
 
 def repository_digest(repository):
@@ -77,3 +78,22 @@ def resource_claims(project, members, labels, usage):
             consumer_status = "PROJECT_ONLY" if len(projects) == 1 else "OTHER_PROJECTS"
         claims.append({"name": name, "status": status, "project": claimant, "usage": consumer_status})
     return claims
+
+
+def daemon_identity(project, containers):
+    keys = ("id", "service", "image_id", "state", "networks", "volumes")
+    return checksum({"project": project, "containers": [
+        {key: row.get(key) for key in keys} for row in sorted(containers, key=lambda row: row["id"])
+    ]})
+
+
+def adoption_ready(preview):
+    return not (preview["source"] != "CONFIRMED" or preview["compatibility"]["status"] != "PROFILE_MATCH"
+            or any(row["state"] != "RUNNING" for row in preview["containers"])
+            or any(value["service_config"] != "LABEL_PRESENT" or value["bind_mounts"] not in ("NONE", "READ_ONLY")
+                   for value in preview["configuration"].values())
+            or any(dependencies is None or any(edge["status"] != "SHARED_NETWORK" for edge in dependencies)
+                   for dependencies in preview["dependencies"].values())
+            or any(value["coverage"] != "OBSERVED_COMPOSE_ONLY"
+                   or any(claim["status"] != "PROJECT_LABEL" or claim["usage"] != "PROJECT_ONLY"
+                          for claim in value["claims"]) for value in preview["attachments"].values()))

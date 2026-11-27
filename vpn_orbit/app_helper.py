@@ -2,10 +2,12 @@
 
 import json
 import os
+from pathlib import Path
 import signal
 import sys
 
-from .app_lifecycle import Lifecycle
+from .app_adoption import EXTERNAL_ACTIONS, ExternalLifecycle
+from .app_lifecycle import Lifecycle, ROOT
 from .errors import Denied
 from .runtime.protocol import application_payload, decode, fields
 
@@ -13,6 +15,18 @@ from .runtime.protocol import application_payload, decode, fields
 def dispatch(request):
     fields(request, ("operation", "application"))
     payload = application_payload(request["application"])
+    if payload["action"] in EXTERNAL_ACTIONS:
+        app = ExternalLifecycle(payload["installation_id"])
+        options = {"action": payload["action"], "binding": payload["spec_digest"], "review": payload.get("review")}
+        if request["operation"] == "execute":
+            result = app.execute(payload["operation_id"], **options)
+        elif request["operation"] == "reconcile":
+            result = app.reconcile(payload["operation_id"], **options)
+        else:
+            raise Denied("APP_ACTION_INVALID")
+        return {"outcome": result["outcome"], "code": result["code"]}
+    if (Path(ROOT) / payload["installation_id"] / "external.json").exists():
+        raise Denied("APP_ACTION_INVALID")
     app = Lifecycle(payload["installation_id"])
     with app.locked():
         spec, _, _ = app.configuration()

@@ -16,6 +16,7 @@ import { TimeZone } from './time-zone'
 import { FirewallPlan } from './firewall-plan'
 import { ApplicationPlan } from './application-plan'
 import { ComposeInventory } from './compose-inventory'
+import type { AdoptionReview } from './adoption-preview'
 import '@mantine/core/styles/default-css-variables.layer.css'
 import '@mantine/core/styles/Table.layer.css'
 import './style.css'
@@ -193,6 +194,11 @@ function Detail({ resource, t, lang, now, expired, session }: {
   resource: Resource; t: Copy; lang: Language; now: number; expired: () => void; session: Session
 }) {
   const timeZone = useContext(TimeZone)
+  const [review, setReview] = useState<AdoptionReview | null>(null)
+  function prepareAdoption(item: AdoptionReview) {
+    setReview(item)
+    document.getElementById('application-plan')?.focus()
+  }
   const observation = resource.observation
   const current = observationState(observation, now)
   const time = (seconds: number | null | undefined) => seconds == null ? '—' :
@@ -275,7 +281,7 @@ function Detail({ resource, t, lang, now, expired, session }: {
       key={JSON.stringify([resource.id, resource.revision, resource.policy_revision, current.status,
         observation.last_checked_at, sample.observed_at, sample.boot_id])}
       adoption={session.user.role === 'Owner' && current.status === 'REACHABLE' && sample.compose?.status === 'OBSERVED'
-        ? { resource, sample, expired } : undefined}
+        ? { resource, sample, expired, prepare: resource.permissions.applications ? prepareAdoption : undefined } : undefined}
       scoped={docker?.status === 'OBSERVED' ? docker.containers : []} historical={current.status !== 'REACHABLE'} t={t}/>}
     {docker && <div className="software">
       <h3>{t.dockerHeading}</h3>
@@ -320,7 +326,9 @@ function Detail({ resource, t, lang, now, expired, session }: {
     {resource.permissions.firewall && session.user.role === 'Owner' &&
       <FirewallPlan key={resource.id} resourceId={resource.id} csrf={session.csrf_token} t={t} expired={expired}/>}
     {resource.permissions.applications && session.user.role === 'Owner' &&
-      <ApplicationPlan key={`apps-${resource.id}`} resourceId={resource.id} session={session} expired={expired} russian={lang === 'ru'}/>}
+      <ApplicationPlan key={`apps-${resource.id}`} resourceId={resource.id} session={session} expired={expired}
+        russian={lang === 'ru'} review={review?.resourceId === resource.id ? review : undefined}
+        clearReview={() => setReview(null)}/>}
   </>
 }
 

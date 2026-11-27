@@ -33,6 +33,20 @@ SETTING_KEYS = {
 PANEL_CA_FILE = "panel-ca.pem"
 PANEL_CA_MOUNT = "/app/vpn-orbit-panel-ca.pem"
 
+CABINET_CONFIG = """server {
+    listen 80;
+    root /usr/share/nginx/html;
+    location / { try_files $uri /index.html; }
+    location /api/ {
+        proxy_pass http://bedolaga-bot:8080/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+"""
+
 
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
@@ -268,17 +282,5 @@ def managed_files(spec):
         files[PANEL_CA_FILE] = spec["settings"]["bedolaga-bot"]["panel_ca_pem"]
     if "bedolaga-cabinet" not in spec["profiles"]:
         return files
-    files["cabinet.conf"] = """server {
-    listen 80;
-    root /usr/share/nginx/html;
-    location / { try_files $uri /index.html; }
-    location /api/ {
-        proxy_pass http://bedolaga-bot:8080/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $remote_addr;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-"""
+    files["cabinet.conf"] = CABINET_CONFIG
     return files

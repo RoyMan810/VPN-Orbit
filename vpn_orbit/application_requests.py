@@ -6,6 +6,7 @@ from .auth import AuthService, Role, check_etag
 from .change_drafts import _latest, _public, _stored
 from .database import Store, identifier
 from .errors import Denied
+from .inventory import Inventory
 from .runtime.protocol import ULID, application_payload, canonical, checksum, text
 
 
@@ -14,8 +15,11 @@ REQUESTED = "change_plan.application_requested"
 
 def application_value(identity, revision, baseline):
     return {"version": 1, "id": identity, "revision": revision, "action": "apps.lifecycle", "state": "DRAFT",
-            "baseline": baseline, "diff": {"operation": baseline["action"], "installation_id": baseline["installation_id"]},
-            "risk": "HOST_NETWORK_AND_APPLICATION_DATA", "execution": "OWNER_APPROVAL_REQUIRED",
+            "baseline": baseline, "diff": {"operation": baseline["action"], "installation_id": baseline["installation_id"],
+                                           **({"project": baseline["project"], "observation_id": baseline["observation_id"]}
+                                              if baseline["action"] == "adopt" else {})},
+            "risk": ("MANAGEMENT_REGISTRATION_ONLY" if baseline["action"] in ("adopt", "detach")
+                     else "HOST_NETWORK_AND_APPLICATION_DATA"), "execution": "OWNER_APPROVAL_REQUIRED",
             "data_policy": "PRESERVE_VOLUMES_AND_NETWORKS"}
 
 
@@ -42,10 +46,24 @@ def checked(db, auth, token, identity, tag, *, csrf=None, mutating=False):
     return actor, row, draft
 
 
-def save(db, auth, token, csrf, resource, installation, binding, action):
+def reviewed_snapshot(db, inventory, actor, baseline):
+    if baseline["action"] == "adopt":
+        preview, _ = inventory.adoption_preview_in(db, actor, baseline["resource_id"], baseline["project"],
+                                                    if_match=baseline["preview_tag"])
+        if not preview["adoption_ready"] or preview["daemon_digest"] != baseline["review"]:
+            raise Denied("APP_ADOPTION_EVIDENCE_INCOMPLETE", 409)
+
+
+def application_intent(baseline, operation):
+    payload = {"operation_id": operation, **{key: baseline[key] for key in ("installation_id", "spec_digest", "action")}}
+    if baseline["action"] == "adopt":
+        payload["review"] = baseline["review"]
+    return application_payload(payload)
+
+
+def save(db, auth, token, csrf, resource, installation, binding, action, *, project=None, preview_tag=None):
     actor = owner(db, auth, token, csrf, True)
     text(resource, ULID)
-    application_payload({"operation_id": resource, "installation_id": installation, "spec_digest": binding, "action": action})
     AuthService.require(db, actor, "vps:apps", resource)
     row = db.execute("SELECT * FROM resources WHERE id=? AND enabled=1", (resource,)).fetchone()
     if row is None:
@@ -54,6 +72,18 @@ def save(db, auth, token, csrf, resource, installation, binding, action):
     baseline = {"installation_id": installation, "spec_digest": binding, "action": action,
                 "resource_id": resource, "resource_revision": row["revision"],
                 "scope_digest": row["scope_digest"], "policy_revision": row["policy_revision"]}
+    if action == "adopt":
+        if project is None or preview_tag is None:
+            raise Denied("IF_MATCH_REQUIRED", 428)
+        preview, _ = Inventory(auth.store, clock=auth.clock).adoption_preview_in(db, actor, resource, project,
+                                                                                if_match=preview_tag)
+        if not preview["adoption_ready"]:
+            raise Denied("APP_ADOPTION_EVIDENCE_INCOMPLETE", 409)
+        baseline.update(project=project, preview_tag=preview_tag, observation_id=preview["observation_id"],
+                        preview_digest=preview["preview_digest"], review=preview["daemon_digest"])
+    elif project is not None:
+        raise Denied("APP_ACTION_INVALID", 422)
+    application_intent(baseline, resource)
     value = application_value(identity, 1, baseline)
     binding = checksum(value)
     db.execute("""INSERT INTO change_plan_drafts VALUES(?,1,?,?,'apps.lifecycle',?,?,?)""",
@@ -64,7 +94,8 @@ def save(db, auth, token, csrf, resource, installation, binding, action):
 
 
 def approve(db, auth, token, csrf, identity, tag, reauth):
-    actor, row, _ = checked(db, auth, token, identity, tag, csrf=csrf, mutating=True)
+    actor, row, draft = checked(db, auth, token, identity, tag, csrf=csrf, mutating=True)
+    reviewed_snapshot(db, Inventory(auth.store, clock=auth.clock), actor, draft["baseline"])
     auth.consume_reauthentication(db, token, reauth, row["plan_hash"])
     previous = db.execute("""SELECT 1 FROM audit WHERE correlation_id=? AND event='change_plan.application_approved'""",
                           (identity,)).fetchone()
@@ -93,9 +124,9 @@ def enqueue(db, queue, auth, token, csrf, identity, tag, approval_id):
     if db.execute("SELECT 1 FROM job_incidents").fetchone():
         raise Denied("OPEN_INCIDENT", 409)
     baseline = draft["baseline"]
+    reviewed_snapshot(db, Inventory(auth.store, clock=auth.clock), actor, baseline)
     details = {**details, "operation_id": approval["id"], "actor_id": actor["id"], "revision": row["revision"],
-               "scope_digest": baseline["scope_digest"], "application": application_payload({
-                   "operation_id": approval["id"], **{key: baseline[key] for key in ("installation_id", "spec_digest", "action")}})}
+               "scope_digest": baseline["scope_digest"], "application": application_intent(baseline, approval["id"])}
     Store.event(db, at=int(auth.clock()), actor=actor["id"], target=row["resource_id"], correlation=identity,
                 kind=REQUESTED, outcome="QUEUED", details=details)
     queue._enqueue_mutation(db, approval["id"], actor["id"], row["resource_id"], baseline["scope_digest"],
@@ -132,8 +163,8 @@ class ApplicationOperations:
                     or json.loads(approval["details"]) != expected
                     or not 0 <= int(self.queue.clock()) - approval["at"] <= 300):
                 raise Denied("CHANGE_PLAN_APPROVAL_REQUIRED")
-            payload = application_payload({"operation_id": job["id"], **{
-                key: baseline[key] for key in ("installation_id", "spec_digest", "action")}})
+            reviewed_snapshot(db, Inventory(self.queue.store, clock=self.queue.clock), actor, baseline)
+            payload = application_intent(baseline, job["id"])
             if payload != details["application"]:
                 raise Denied("APP_REQUEST_DRIFT")
             return row, payload, details
@@ -149,6 +180,35 @@ class ApplicationOperations:
                    "target": job["resource_id"], "capability": "apps.lifecycle", "scope_digest": job["scope_digest"],
                    "time_anchor": anchor, "application": payload}
         return binding, ref, validate
+
+
+def registrations(db, auth, token, resource):
+    actor = owner(db, auth, token)
+    AuthService.require(db, actor, "vps:apps", resource)
+    if not db.execute("SELECT 1 FROM resources WHERE id=?", (resource,)).fetchone():
+        raise Denied("RESOURCE_NOT_FOUND", 404)
+    rows = db.execute("""
+        WITH completed AS (
+            SELECT json_extract(d.baseline, '$.installation_id') AS installation_id,
+                   json_extract(d.baseline, '$.project') AS project,
+                   json_extract(d.baseline, '$.action') AS action,
+                   json_extract(d.baseline, '$.spec_digest') AS spec_digest, j.id AS job_id,
+                   row_number() OVER (
+                       PARTITION BY json_extract(d.baseline, '$.installation_id') ORDER BY completion.seq DESC
+                   ) AS newest
+            FROM audit req
+            JOIN jobs j ON j.id=json_extract(req.details,'$.operation_id') AND j.resource_id=req.target_id
+            JOIN change_plan_drafts d ON d.id=req.correlation_id AND d.revision=json_extract(req.details,'$.revision')
+            JOIN audit completion ON completion.correlation_id=j.id AND completion.target_id=j.resource_id
+                AND ((completion.event='job.finished' AND completion.outcome='SUCCEEDED')
+                     OR (completion.event='application.reconciled' AND completion.outcome='RECONCILED_SUCCEEDED'))
+            WHERE req.event=? AND req.target_id=? AND j.action='apps.lifecycle'
+                AND json_extract(d.baseline,'$.action') IN ('adopt','detach')
+        )
+        SELECT installation_id, project, spec_digest, job_id FROM completed
+        WHERE newest=1 AND action='adopt' ORDER BY project, installation_id
+        """, (REQUESTED, resource)).fetchall()
+    return {"items": [dict(row) for row in rows]}
 
 
 def timeline(db, queue, auth, token, identity):

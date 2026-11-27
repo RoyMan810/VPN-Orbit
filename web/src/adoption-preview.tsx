@@ -3,13 +3,20 @@ import { hasApiStatus, isUlid, request } from './api'
 import type { ComposeAdoptionPreview, Observation, Resource } from './api'
 import type { Copy } from './copy'
 
+export interface AdoptionReview {
+  resourceId: string
+  project: string
+  tag: string
+}
+
 export interface AdoptionContext {
   resource: Resource
   sample: NonNullable<Observation['last_success']>
   expired: () => void
+  prepare?: (review: AdoptionReview) => void
 }
 
-export function AdoptionPreview({ project, resource, sample, expired, t }: AdoptionContext & { project: string; t: Copy }) {
+export function AdoptionPreview({ project, resource, sample, expired, prepare, t }: AdoptionContext & { project: string; t: Copy }) {
   const { id, revision, policy_revision } = resource
   const { observed_at, boot_id } = sample
   const path = `/resources/${encodeURIComponent(id)}/compose/projects/${encodeURIComponent(project)}/adoption-preview`
@@ -81,6 +88,8 @@ export function AdoptionPreview({ project, resource, sample, expired, t }: Adopt
     </p> : preview && <>
       <p>{t.adoptionScope}</p>
       <button type="button" onClick={recheck} disabled={checked === 'loading'}>{t.adoptionRecheck}</button>
+      {prepare && preview.adoption_ready && typeof result === 'object' && <button type="button"
+        onClick={() => prepare({ resourceId: id, project, tag: result.tag })}>{t.adoptionPrepare}</button>}
       {checked === 'loading' && <p role="status">{t.loading}</p>}
       {checked === 'matched' && <p role="status">{t.adoptionRecheckMatched}</p>}
       {(checked === 'rateLimited' || checked === 'error') && <p role="alert" className="error">

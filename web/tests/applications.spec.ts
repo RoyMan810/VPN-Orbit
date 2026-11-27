@@ -69,3 +69,33 @@ test('application controls require the actual resource permission', async ({ pag
   await expect(page.getByRole('region', { name: 'Applications', exact: true })).toHaveCount(0)
   await page.unrouteAll({ behavior: 'wait' })
 })
+
+test('adoption uses the exact tag and project from the reviewed preview', async ({ page }) => {
+  let reviewedTag: string | undefined
+  await page.route('**/compose/projects/fixture/adoption-preview', async route => {
+    const response = await route.fetch()
+    reviewedTag = response.headers()['etag']
+    await route.fulfill({ response, json: { ...(await response.json()), adoption_ready: true } })
+  })
+  await page.route('**/application-drafts', async route => {
+    expect(route.request().headers()['if-match']).toBe(reviewedTag)
+    expect(route.request().postDataJSON()).toEqual({
+      installation_id: resource, spec_digest: 'b'.repeat(64), action: 'adopt', project: 'fixture',
+    })
+    await route.fulfill({
+      status: 201, headers: { etag: '"plan-fixture"' }, json: {
+        id: resource, plan_hash: 'c'.repeat(64), diff: { operation: 'adopt', project: 'fixture' },
+        risk: 'MANAGEMENT_REGISTRATION_ONLY', data_policy: 'PRESERVE_VOLUMES_AND_NETWORKS',
+      },
+    })
+  })
+  await login(page)
+  await page.getByRole('button', { name: 'Adoption preview · fixture', exact: true }).click()
+  await page.getByRole('button', { name: 'Prepare adoption plan', exact: true }).click()
+  const apps = page.getByRole('region', { name: 'Applications', exact: true })
+  await expect(apps).toBeFocused()
+  await apps.getByLabel('Prepared installation ID').fill(resource)
+  await apps.getByLabel('Configuration digest').fill('b'.repeat(64))
+  await apps.getByRole('button', { name: 'Review operation', exact: true }).click()
+  await expect(apps.getByLabel('I confirm the change to the project registration')).toBeVisible()
+})

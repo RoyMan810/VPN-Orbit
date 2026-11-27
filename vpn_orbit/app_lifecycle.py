@@ -442,7 +442,7 @@ class Lifecycle:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("configure", "install", "start", "status", "remove", "reconcile"))
+    parser.add_argument("action", choices=("configure", "stage-adoption", "install", "start", "status", "remove", "reconcile"))
     parser.add_argument("--id")
     parser.add_argument("--spec", type=Path)
     parser.add_argument("--operation")
@@ -451,13 +451,20 @@ def main(argv=None):
     try:
         if os.geteuid() != 0:
             refuse("LOCAL_ROOT_REQUIRED")
-        if args.action == "configure":
+        if args.action in ("configure", "stage-adoption"):
             if args.spec is None:
                 refuse("APP_SPEC_REQUIRED")
             value = json.loads(protected_bytes(args.spec, owner=0, private=True, maximum=65536))
-            result = {"installation_id": Lifecycle.configure(value)}
+            if args.action == "stage-adoption":
+                from .app_adoption import ExternalLifecycle
+                result = ExternalLifecycle.stage(value)
+            else:
+                result = {"installation_id": Lifecycle.configure(value)}
         else:
             runtime = Lifecycle(args.id)
+            if args.action == "status" and (runtime.directory / "external.json").exists():
+                from .app_adoption import ExternalLifecycle
+                runtime = ExternalLifecycle(args.id)
             if args.action == "status":
                 result = runtime.status()
             elif args.action == "reconcile":

@@ -11,12 +11,68 @@ import tempfile
 import time
 import traceback
 
-from vpn_orbit.app_lifecycle import Lifecycle, ROOT
-from vpn_orbit.app_profiles import digest
+from vpn_orbit.app_adoption import ExternalLifecycle
+from vpn_orbit.app_lifecycle import Docker, Lifecycle, ROOT
+from vpn_orbit.app_profiles import digest, render
 from vpn_orbit.errors import Denied
 
 
 IDENTITY = "01JCYQZ4T9V8MNVYEH3D2M7Q1N"
+
+
+def adoption_acceptance(spec):
+    """Exercise protected staging over a real running project with external labels."""
+    docker = Docker()
+    project = "node-external-adoption"
+    external_id = IDENTITY[:-1] + "R"
+    with tempfile.TemporaryDirectory(prefix="vo-node-external-", dir="/var/lib") as directory:
+        source = Path(directory) / "compose.json"
+        document = render(spec, "a" * 64)
+        document["name"] = project
+        document["services"]["remnawave-node"].pop("labels")
+        source.write_text(json.dumps(document))
+        args = ("compose", "--project-name", project, "--file", str(source))
+        docker(*args, "up", "-d", "--pull", "never", "--no-build")
+        try:
+            container = docker(*args, "ps", "--quiet", "remnawave-node").strip()
+            # Compose ps can abbreviate IDs depending on the release.
+            value = json.loads(docker("container", "inspect", container))[0]
+            container = value["Id"]
+            probe = Lifecycle(IDENTITY, docker=docker)
+            deadline = time.monotonic() + 90
+            while not probe.healthy({"containers": {"node": {"Id": container}}}):
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("External Node did not become healthy")
+                time.sleep(1)
+            baseline = probe.inspect("container", container)
+            hashes = dict(row.split() for row in docker(*args, "config", "--hash=*").splitlines())
+            layout = {"version": 1, "id": external_id, "project": project, "compose_files": [str(source)],
+                      "extra_files": [], "service_hashes": hashes}
+            original = source.rename(source.with_suffix(".original"))
+            source.symlink_to(original)
+            try:
+                ExternalLifecycle.stage(layout)
+            except Denied as error:
+                assert error.code == "APP_SOURCE_UNVERIFIED"
+            else:
+                raise RuntimeError("Symbolic link accepted as a protected source")
+            source.unlink()
+            original.rename(source)
+            staged = ExternalLifecycle.stage(layout)
+            app = ExternalLifecycle(external_id)
+            review = app.definition()["baseline"]["identity"]
+            adoption = app.execute(IDENTITY[:-1] + "S", "adopt", staged["spec_digest"], review)
+            assert adoption["code"] == "APP_ADOPTION_REGISTERED" and app.status()["state"] == "ADOPTED"
+            assert app.reconcile(IDENTITY[:-1] + "S", action="adopt", binding=staged["spec_digest"], review=review) == adoption
+            detached = app.execute(IDENTITY[:-1] + "T", "detach", staged["spec_digest"])
+            assert detached["code"] == "APP_ADOPTION_DETACHED" and app.status()["state"] == "STAGED"
+            after = probe.inspect("container", container)
+            assert after["State"]["StartedAt"] == baseline["State"]["StartedAt"]
+            assert probe.stable(after) == probe.stable(baseline)
+            assert probe.healthy({"containers": {"node": {"Id": container}}})
+            print("PASS external Node registration, read-back and detachment without container changes.")
+        finally:
+            docker(*args, "down")
 
 
 def node_acceptance():
@@ -85,6 +141,7 @@ def node_acceptance():
         removed = runtime.execute(IDENTITY[:-1] + "Q", "remove", digest(spec))
         assert removed["outcome"] == "SUCCEEDED", removed
         print("PASS actual Node host networking, TLS 1.3, client certificate requirement and exact-ID removal.")
+        adoption_acceptance(spec)
 
 
 def main():

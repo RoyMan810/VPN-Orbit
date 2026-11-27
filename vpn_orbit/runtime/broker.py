@@ -8,7 +8,7 @@ import time
 
 from ..errors import Denied
 from .authority import verify_permit
-from .protocol import PARTIAL_PREPARATION, SHA256, ULID, canonical, checksum, decode, fields, text
+from .protocol import APPLICATION_SUCCESS, PARTIAL_PREPARATION, SHA256, ULID, canonical, checksum, decode, fields, text
 from .ssh import application, apply_firewall, firewall_status, probe, provision_known_hosts, restart, verify_known_hosts
 from .ssh_preparation import PreparationSSH, validate_administrator
 from .storage import Journal
@@ -146,6 +146,9 @@ class Broker:
                 result = execute(target, key, self.directory / "known_hosts", payload)
             except Denied as error:
                 return self._complete(request["permit"], "UNKNOWN_OUTCOME", error.code, None)
+            if (payload_key == "application" and result["outcome"] == "SUCCEEDED"
+                    and result["code"] not in APPLICATION_SUCCESS[payload["action"]]):
+                return self._complete(request["permit"], "UNKNOWN_OUTCOME", "APP_RECEIPT_UNVERIFIED", None)
             outcome = "FAILED" if result["outcome"] == "DENIED" else result["outcome"]
             return self._complete(request["permit"], outcome, result["code"], None)
         try:
@@ -421,7 +424,7 @@ class Broker:
                                                 scope_digest=target.scope_digest, policy_revision=target.revision)
                 remote = self.execute_application(target, key, self.directory / "known_hosts", request, operation="reconcile")
             if (remote.get("outcome") not in ("SUCCEEDED", "RECONCILED_SUCCEEDED")
-                    or remote.get("code") not in ("APP_READBACK_VERIFIED", "APP_HEALTH_VERIFIED", "APP_REMOVED_DATA_PRESERVED")):
+                    or remote.get("code") not in APPLICATION_SUCCESS[request["action"]]):
                 raise Denied("APP_RECONCILIATION_UNVERIFIED")
             receipt = self.gate.call("attempt.status", {"job_id": claims["job_id"]})
             if receipt["state"] in ("UNKNOWN_OUTCOME", "RECONCILED_SUCCEEDED"):
