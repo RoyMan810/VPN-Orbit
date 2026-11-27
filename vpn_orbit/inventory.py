@@ -172,6 +172,11 @@ class Inventory:
             raise Denied('COMPOSE_PROJECT_NOT_FOUND', 404)
 
         evidence = compose.get('adoption_evidence', {})
+        observed_configuration = evidence.get('configuration', {})
+        configuration = {
+            row['id']: observed_configuration.get(row['id'], {'service_config': 'UNKNOWN', 'bind_mounts': 'UNKNOWN'})
+            for row in containers
+        }
         attachments = {}
         for kind in ('networks', 'volumes'):
             members = defaultdict(set)
@@ -202,6 +207,7 @@ class Inventory:
             'snapshot_digest': checksum(sample),
             'containers': containers,
             'compatibility': assess_profiles(containers, evidence.get('images', {})),
+            'configuration': configuration,
             'attachments': attachments,
         }
         return {**preview, 'preview_digest': checksum(preview)}

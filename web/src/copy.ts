@@ -234,6 +234,17 @@ export const copy = {
       AMBIGUOUS: 'Image matches multiple roles',
       OTHER_IMAGE: 'Image is outside the profile catalog',
     },
+    adoptionConfigStatus: {
+      LABEL_PRESENT: 'Service configuration label present',
+      DIVERGENT: 'Config labels differ across replicas',
+      UNKNOWN: 'Service configuration label unavailable',
+    },
+    adoptionBindStatus: {
+      NONE: 'No bind mounts observed',
+      READ_ONLY: 'Read-only bind mounts',
+      WRITABLE: 'Writable bind mounts',
+      UNKNOWN: 'Bind mount details unavailable',
+    },
     adoptionOwnership: 'Resource labels and sharing',
     adoptionClaimStatus: {
       PROJECT_LABEL: 'Labeled for this project',
@@ -580,6 +591,17 @@ export const copy = {
       UNKNOWN: 'Digest образа недоступен',
       AMBIGUOUS: 'Образ соответствует нескольким ролям',
       OTHER_IMAGE: 'Образ отсутствует в каталоге профилей',
+    },
+    adoptionConfigStatus: {
+      LABEL_PRESENT: 'Метка конфигурации сервиса присутствует',
+      DIVERGENT: 'Метки конфигурации у реплик различаются',
+      UNKNOWN: 'Метка конфигурации сервиса недоступна',
+    },
+    adoptionBindStatus: {
+      NONE: 'Bind mounts не обнаружены',
+      READ_ONLY: 'Bind mounts только для чтения',
+      WRITABLE: 'Bind mounts с доступом на запись',
+      UNKNOWN: 'Данные о bind mounts недоступны',
     },
     adoptionOwnership: 'Метки и совместное использование ресурсов',
     adoptionClaimStatus: {

@@ -83,7 +83,8 @@ class DockerPayloadTests(unittest.TestCase):
         row = {**ROW, "image_id": image, "networks": ["backend"], "volumes": ["data"]}
         fingerprint = "c" * 64 + ":" + "d" * 64
         evidence = {"images": {image: [fingerprint]}, "networks": {"backend": "fixture"}, "volumes": {"data": None},
-                    "usage": {"networks": {"backend": "COMPOSE_ONLY"}, "volumes": {"data": "OUTSIDE_COMPOSE"}}}
+                    "usage": {"networks": {"backend": "COMPOSE_ONLY"}, "volumes": {"data": "OUTSIDE_COMPOSE"}},
+                    "configuration": {TARGET: {"service_config": "LABEL_PRESENT", "bind_mounts": "READ_ONLY"}}}
         compose = {"status": "OBSERVED", "containers": [row], "adoption_evidence": evidence}
         self.assertEqual(compose_summary(compose), compose)
         for invalid in ({"images": {"sha256:" + TARGET: [fingerprint]}},
@@ -91,7 +92,9 @@ class DockerPayloadTests(unittest.TestCase):
                         {"images": {image: [fingerprint] * 5}},
                         {"networks": {"alien": "fixture"}}, {"volumes": {"data": "/host/project"}},
                         {"usage": {"volumes": {}, "networks": {"backend": "UNKNOWN"}}},
-                        {"usage": {"volumes": {"unobserved": "COMPOSE_ONLY"}, "networks": {}}}):
+                        {"usage": {"volumes": {"unobserved": "COMPOSE_ONLY"}, "networks": {}}},
+                        {"configuration": {FOREIGN: evidence["configuration"][TARGET]}},
+                        {"configuration": {TARGET: {"service_config": "LABEL_PRESENT", "bind_mounts": "/host"}}}):
             with self.subTest(invalid=invalid), self.assertRaises(Denied):
                 compose_summary({**compose, "adoption_evidence": {**evidence, **invalid}})
 
@@ -344,9 +347,10 @@ class DockerTransportTests(unittest.TestCase):
     def test_adoption_scope_collects_only_matching_image_digests_and_resource_labels(self):
         image = "sha256:" + FOREIGN
         row = self.response[0]
+        row["Labels"]["com.docker.compose.config-hash"] = "c" * 64
         row.update(ImageID=image, NetworkSettings={"Networks": {
             "backend": {"NetworkID": TARGET}, "drifted": {"NetworkID": TARGET},
-        }}, Mounts=[{"Type": "volume", "Name": "data"}])
+        }}, Mounts=[{"Type": "volume", "Name": "data"}, {"Type": "bind", "RW": False, "Source": "/bind-canary"}])
         self.listings = {
             "/v1.44/images/json?all=1": [
                 {"Id": image, "RepoDigests": ["remnawave/node@sha256:" + FOREIGN], "RepoTags": ["tag-canary"]},
@@ -367,9 +371,11 @@ class DockerTransportTests(unittest.TestCase):
             self.assertEqual(result["adoption_evidence"], {
                 "images": {image: [digest + ":" + FOREIGN]}, "networks": {"backend": "fixture"},
                 "volumes": {"data": None}, "usage": {"networks": {}, "volumes": {}},
+                "configuration": {TARGET: {"service_config": "LABEL_PRESENT", "bind_mounts": "READ_ONLY"}},
             })
             self.assertEqual(self.requests[1:], list(self.listings))
             self.assertNotIn("canary", json.dumps(result))
+            self.assertNotIn("c" * 64, json.dumps(result))
             self.listings["/v1.44/networks"].append(self.listings["/v1.44/networks"][0])
             self.assertEqual(observe()["adoption_evidence"]["networks"], {})
             get = observe.__globals__["docker_get"]
@@ -382,7 +388,31 @@ class DockerTransportTests(unittest.TestCase):
             with patch.dict(observe.__globals__, {"docker_get": timeout}):
                 unavailable = observe()
             self.assertEqual(unavailable["containers"], result["containers"])
-            self.assertNotIn("adoption_evidence", unavailable)
+            self.assertEqual(unavailable["adoption_evidence"], {
+                "images": {}, "networks": {}, "volumes": {},
+                "configuration": result["adoption_evidence"]["configuration"],
+            })
+
+    def test_configuration_drift_labels_are_compared_only_within_the_same_project_and_service(self):
+        def row(identity, project, service, digest, mounts):
+            return {"Id": identity, "Labels": {
+                "com.docker.compose.project": project, "com.docker.compose.service": service,
+                "com.docker.compose.config-hash": digest,
+            }, "Mounts": mounts}
+
+        rows = [
+            row(TARGET, "fixture", "web", "c" * 64, []),
+            row(FOREIGN, "fixture", "web", "d" * 64, [{"Type": "bind", "RW": True, "Source": "/private"}]),
+            row("e" * 64, "other", "web", "e" * 64, [{"Type": "bind", "RW": False}]),
+            row("f" * 64, "fixture", "worker", "invalid/path", [{"Type": "bind", "RW": 0}]),
+        ]
+        result = HELPER["compose_configuration"](rows)
+        self.assertEqual(result, {
+            TARGET: {"service_config": "DIVERGENT", "bind_mounts": "NONE"},
+            FOREIGN: {"service_config": "DIVERGENT", "bind_mounts": "WRITABLE"},
+            "e" * 64: {"service_config": "LABEL_PRESENT", "bind_mounts": "READ_ONLY"},
+            "f" * 64: {"service_config": "UNKNOWN", "bind_mounts": "UNKNOWN"},
+        })
 
     def test_attachment_usage_is_bounded_checks_network_identity_and_includes_non_compose_consumers(self):
         consume = HELPER["attachment_usage"]

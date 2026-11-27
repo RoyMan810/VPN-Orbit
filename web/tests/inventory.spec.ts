@@ -619,6 +619,7 @@ test('previews an observed Compose project on demand and clears the preview when
   expect(reply.status()).toBe(200)
   await expect(preview.getByText('Local image ID', { exact: false })).toHaveCount(2)
   await expect(preview.getByText('Profile compatibility is unverified.')).toBeVisible()
+  await expect(preview.getByText('Bind mount details unavailable', { exact: true })).toHaveCount(2)
   await expect(preview.getByText('Partial data', { exact: true })).toHaveCount(2)
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320)
   await page.getByLabel('Language').selectOption('ru')
