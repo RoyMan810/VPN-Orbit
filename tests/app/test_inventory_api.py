@@ -30,7 +30,7 @@ class InventoryTests(Fixture):
         self.assertEqual(response.status_code, 200, response.text)
         return response
 
-    def complete(self, outcome="SUCCEEDED", reason="PROBE_COMPLETE", *, docker=None, compose=None):
+    def complete(self, outcome="SUCCEEDED", reason="PROBE_COMPLETE", *, docker=None, compose=None, observed_at=None):
         self.now += 1
         response = self.client.post(f"/api/v1/resources/{SCOPE}/observations", json={},
                                     headers=self.headers(**{"Idempotency-Key": identifier()}))
@@ -39,7 +39,8 @@ class InventoryTests(Fixture):
         self.queue.advance(claim, "INTENT_PREPARED", permit={"claims": self.queue.binding(row)})
         for state in ("DISPATCHING", "EXECUTING", "VERIFYING"):
             self.queue.advance(claim, state)
-        value = {"status": "REACHABLE", "source": "restricted_helper", "observed_at": self.now,
+        value = {"status": "REACHABLE", "source": "restricted_helper",
+                 "observed_at": self.now if observed_at is None else observed_at,
                  "boot_id": "11111111-1111-1111-1111-111111111111",
                  "software": {"docker": "PRESENT", "nginx": "UNKNOWN", "nginx_service": "UNKNOWN"},
                  "docker": docker or {"status": "NOT_CONFIGURED", "containers": []},
@@ -148,6 +149,48 @@ class InventoryTests(Fixture):
         self.assertEqual(updated["attachments"]["networks"]["claims"][0]["usage"], "OTHER_PROJECTS")
         self.assertEqual([claim["usage"] for claim in updated["attachments"]["volumes"]["claims"]],
                          ["OTHER_PROJECTS", "UNKNOWN"])
+
+    def test_adoption_recheck_requires_the_exact_completed_job_and_resource_revision(self):
+        compose = {"status": "OBSERVED", "containers": [
+            {**CONTAINER_IDENTITY, "image_id": "sha256:" + CONTAINER},
+        ]}
+        first_job = self.complete(compose=compose)
+        path = f"/api/v1/resources/{SCOPE}/compose/projects/fixture/adoption-preview"
+        preview = self.client.get(path)
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertEqual(preview.json()["observation_id"], first_job)
+        tag = preview.headers["etag"]
+
+        before = self.store.verify_audit()
+        confirmed = self.client.get(path, headers={"If-Match": tag})
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        self.assertEqual(confirmed.headers["etag"], tag)
+        self.assertEqual(confirmed.json(), preview.json())
+        self.assertEqual(self.store.verify_audit(), before)
+        with self.store.read() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM jobs").fetchone()[0], 1)
+        self.assertNotIn("observation_id", self.detail().json())
+
+        for value in ("*", "W/" + tag):
+            self.assertEqual(self.client.get(path, headers={"If-Match": value}).status_code, 412)
+
+        second_job = self.complete(compose=compose, observed_at=preview.json()["observed_at"])
+        newer = self.client.get(path)
+        self.assertEqual(newer.json()["observation_id"], second_job)
+        self.assertEqual(newer.json()["snapshot_digest"], preview.json()["snapshot_digest"])
+        self.assertNotEqual(newer.headers["etag"], tag)
+        rejected = self.client.get(path, headers={"If-Match": tag})
+        self.assertEqual(rejected.status_code, 412)
+        self.assertEqual(rejected.json()["code"], "STALE_REVISION")
+
+        with self.store.write() as db:
+            db.execute("UPDATE resources SET revision=revision+1 WHERE id=?", (SCOPE,))
+        self.assertEqual(self.client.get(path, headers={"If-Match": newer.headers["etag"]}).status_code, 412)
+        current = self.client.get(path)
+        self.complete(outcome="FAILED", reason="SSH_UNAVAILABLE")
+        unavailable = self.client.get(path, headers={"If-Match": current.headers["etag"]})
+        self.assertEqual(unavailable.status_code, 409)
+        self.assertEqual(unavailable.json()["code"], "FRESH_OBSERVATION_REQUIRED")
 
     def test_adoption_preview_checks_exact_image_digests_and_reports_resource_claims(self):
         _, pins = image_catalog()
