@@ -10,7 +10,7 @@ from .errors import Denied
 from .firewall_requests import FirewallOperations
 from .queue import JobQueue
 from .restart_requests import RestartOperations
-from .runtime.protocol import checksum, fields, firewall_rules, integer, observation_summary, text
+from .runtime.protocol import APPLICATION_SUCCESS, checksum, fields, firewall_rules, integer, observation_summary, text
 from .runtime.storage import process_lock
 
 
@@ -113,8 +113,8 @@ class Worker:
             if restart or application or preparation:
                 if response["outcome"] not in ("SUCCEEDED", "FAILED", "UNKNOWN_OUTCOME") or response["observation"] is not None:
                     raise Denied("BROKER_RECEIPT_INVALID")
-                if application and response["outcome"] == "SUCCEEDED" and response["code"] not in (
-                        "APP_HEALTH_VERIFIED", "APP_REMOVED_DATA_PRESERVED", "APP_READBACK_VERIFIED"):
+                if (application and response["outcome"] == "SUCCEEDED"
+                        and response["code"] not in APPLICATION_SUCCESS[binding["application"]["action"]]):
                     raise Denied("BROKER_RECEIPT_INVALID")
                 if preparation and response["outcome"] == "SUCCEEDED" and response["code"] != "VPS_PREPARATION_VERIFIED":
                     raise Denied("BROKER_RECEIPT_INVALID")

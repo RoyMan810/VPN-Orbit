@@ -223,7 +223,8 @@ class FirewallExecution(Input):
 class ApplicationDraft(Input):
     installation_id: Annotated[str, Field(pattern="^" + ULID + "$", max_length=26)]
     spec_digest: Annotated[str, Field(pattern="^[0-9a-f]{64}$")]
-    action: Literal["install", "start", "remove"]
+    action: Literal["install", "start", "remove", "adopt", "detach"]
+    project: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,62}$")] | None = None
 
 
 def create_app(settings: Settings, *, auth: AuthService | None = None, enrollment_catalog=None,
@@ -641,12 +642,18 @@ def create_app(settings: Settings, *, auth: AuthService | None = None, enrollmen
         with service.store.read() as db:
             return firewall_timeline(db, service, token(request), draft_id)
 
+    @app.get("/api/v1/resources/{resource_id}/adopted-applications")
+    def adopted_applications(resource_id: str, request: Request, actor=Depends(principal)):
+        with service.store.read() as db:
+            return applications.registrations(db, service, token(request), resource_id)
+
     @app.post("/api/v1/resources/{resource_id}/application-drafts", status_code=201)
     def application_draft(resource_id: str, body: ApplicationDraft, request: Request, response: Response,
                           actor=Depends(principal)):
         with service.store.write() as db:
             value, tag = applications.save(db, service, token(request), csrf(request), resource_id,
-                                           body.installation_id, body.spec_digest, body.action)
+                                           body.installation_id, body.spec_digest, body.action,
+                                           project=body.project, preview_tag=request.headers.get("if-match"))
         response.headers["ETag"] = tag
         response.headers["Location"] = f'/api/v1/change-plans/{value["id"]}'
         return value

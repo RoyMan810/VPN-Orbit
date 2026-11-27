@@ -5,7 +5,7 @@ import json
 import re
 import time
 
-from .adoption import assess_profiles, resource_claims
+from .adoption import adoption_ready, assess_profiles, daemon_identity, resource_claims
 from .auth import AuthService, Role, check_etag, etag
 from .errors import Denied
 from .queue import JobQueue
@@ -94,23 +94,25 @@ class Inventory:
                 'observation': {'status': status, 'reason': reason,
                                 'last_checked_at': row['checked_at'], 'last_success': success}}
 
-    def _rows(self, auth, token, *, after='', identity=None, limit=51, permission=None, include_observation_id=False):
+    def _rows(self, auth, token, *, after='', identity=None, limit=51, permission=None):
         with self.store.read() as db:
             JobQueue._schema(db)
             actor = auth._session(db, token)
-            rows = db.execute(_SELECT, (after, identity, identity, actor['role'] == Role.OWNER,
-                                        actor['id'], limit)).fetchall()
-            now = int(self.clock())
-            values = []
-            for row in rows:
-                AuthService.require(db, actor, 'vps:read', row['id'])
-                if permission is not None:
-                    AuthService.require(db, actor, permission, row['id'])
-                value = self._public(row, now, actor, db)
-                if include_observation_id:
-                    value['observation_id'] = row['observation_id']
-                values.append(value)
-            return values
+            return self._rows_in(db, actor, after=after, identity=identity, limit=limit, permission=permission)
+
+    def _rows_in(self, db, actor, *, after='', identity=None, limit=1, permission=None, include_observation_id=False):
+        rows = db.execute(_SELECT, (after, identity, identity, actor['role'] == Role.OWNER, actor['id'], limit)).fetchall()
+        now = int(self.clock())
+        values = []
+        for row in rows:
+            AuthService.require(db, actor, 'vps:read', row['id'])
+            if permission is not None:
+                AuthService.require(db, actor, permission, row['id'])
+            value = self._public(row, now, actor, db)
+            if include_observation_id:
+                value['observation_id'] = row['observation_id']
+            values.append(value)
+        return values
 
     def list(self, auth, token, *, after='', limit=50):
         if type(limit) is not int or not 1 <= limit <= 100 or (after and re.fullmatch(ULID, after) is None):
@@ -119,11 +121,10 @@ class Inventory:
         value = {'items': rows[:limit], 'next_after': rows[limit - 1]['id'] if len(rows) > limit else None}
         return value, etag(value, 0)
 
-    def _resource(self, auth, token, identity, *, permission=None, include_observation_id=False):
+    def _resource(self, auth, token, identity, *, permission=None):
         if re.fullmatch(ULID, identity) is None:
             raise Denied('RESOURCE_NOT_FOUND', 404)
-        rows = self._rows(auth, token, identity=identity, limit=1, permission=permission,
-                          include_observation_id=include_observation_id)
+        rows = self._rows(auth, token, identity=identity, limit=1, permission=permission)
         if not rows:
             raise Denied('RESOURCE_NOT_FOUND', 404)
         return rows[0]
@@ -162,9 +163,22 @@ class Inventory:
         return {**preview, 'preview_digest': checksum(preview)}
 
     def adoption_preview(self, auth, token, identity, project, *, if_match=None):
+        with self.store.read() as db:
+            actor = auth._session(db, token)
+            return self.adoption_preview_in(db, actor, identity, project, if_match=if_match)
+
+    def adoption_preview_in(self, db, actor, identity, project, *, if_match=None):
+        JobQueue._schema(db)
+        if actor['role'] != Role.OWNER:
+            raise Denied('FORBIDDEN')
         if re.fullmatch(COMPOSE_PROJECT, project) is None:
             raise Denied('COMPOSE_PROJECT_NOT_FOUND', 404)
-        resource = self._resource(auth, token, identity, include_observation_id=True)
+        if re.fullmatch(ULID, identity) is None:
+            raise Denied('RESOURCE_NOT_FOUND', 404)
+        rows = self._rows_in(db, actor, identity=identity, include_observation_id=True)
+        if not rows:
+            raise Denied('RESOURCE_NOT_FOUND', 404)
+        resource = rows[0]
         observation = resource['observation']
         if observation['status'] != 'REACHABLE':
             raise Denied('FRESH_OBSERVATION_REQUIRED', 409)
@@ -221,6 +235,8 @@ class Inventory:
             'dependencies': {row['id']: observed_dependencies.get(row['id']) for row in containers},
             'attachments': attachments,
         }
+        preview['adoption_ready'] = adoption_ready(preview)
+        preview['daemon_digest'] = daemon_identity(project, containers)
         value = {**preview, 'preview_digest': checksum(preview)}
         tag = etag(value, resource['revision'])
         if if_match is not None:

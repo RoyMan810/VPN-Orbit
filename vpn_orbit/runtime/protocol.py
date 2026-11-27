@@ -28,12 +28,24 @@ DOCKER_STARTED_AT = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.
 MAX_FIREWALL_RULES = 32
 
 
+APPLICATION_SUCCESS = {
+    "install": ("APP_HEALTH_VERIFIED", "APP_READBACK_VERIFIED"),
+    "start": ("APP_HEALTH_VERIFIED", "APP_READBACK_VERIFIED"),
+    "remove": ("APP_REMOVED_DATA_PRESERVED", "APP_READBACK_VERIFIED"),
+    "adopt": ("APP_ADOPTION_REGISTERED",),
+    "detach": ("APP_ADOPTION_DETACHED",),
+}
+
+
 def application_payload(value):
-    fields(value, ("operation_id", "installation_id", "spec_digest", "action"))
+    adopting = isinstance(value, dict) and value.get("action") == "adopt"
+    fields(value, ("operation_id", "installation_id", "spec_digest", "action") + (("review",) if adopting else ()))
+    if adopting:
+        text(value["review"], SHA256)
     text(value["operation_id"], ULID)
     text(value["installation_id"], ULID)
     text(value["spec_digest"], SHA256)
-    if value["action"] not in ("install", "start", "remove"):
+    if not isinstance(value["action"], str) or value["action"] not in APPLICATION_SUCCESS:
         raise Denied("APP_ACTION_INVALID")
     return value
 

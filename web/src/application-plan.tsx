@@ -1,15 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
 import { apiErrorDetails, hasApiStatus, isUlid, request } from './api'
 import type { Session } from './api'
+import type { AdoptionReview } from './adoption-preview'
 
-type Action = 'install' | 'start' | 'remove'
+type Action = 'install' | 'start' | 'remove' | 'detach'
 type Draft = { id: string; plan_hash: string; diff: Record<string, unknown>; risk: string; data_policy: string }
 type Saved = { draft: Draft | null; tag: string | null; approval: string | null; job: string | null }
+type Registration = { installation_id: string; project: string; spec_digest: string; job_id: string }
 type Entry = { seq: number; event: string; outcome: string; attempt: number; code?: string }
 const active = new Set(['QUEUED', 'INTENT_PREPARED', 'DISPATCHING', 'EXECUTING', 'VERIFYING'])
 
-export function ApplicationPlan({ resourceId, session, expired, russian }: {
+export function ApplicationPlan({ resourceId, session, expired, russian, review, clearReview }: {
   resourceId: string; session: Session; expired: () => void; russian: boolean
+  review?: AdoptionReview; clearReview: () => void
 }) {
   const key = `vpn-orbit.application.${session.user.id}.${resourceId}`
   const load = (): Saved => {
@@ -32,10 +35,14 @@ export function ApplicationPlan({ resourceId, session, expired, russian }: {
   const [jobState, setJobState] = useState<{ status: string; reason: string | null } | null>(null)
   const [entries, setEntries] = useState<Entry[]>([])
   const [refresh, setRefresh] = useState(0)
+  const [registrations, setRegistrations] = useState<Registration[] | null>(null)
   const flight = useRef(false)
   const words = russian ? {
     title: 'Приложения', id: 'ID подготовленной установки', digest: 'Digest конфигурации',
-    install: 'Установить', start: 'Запустить', remove: 'Удалить контейнеры',
+    install: 'Установить', start: 'Запустить', remove: 'Удалить контейнеры', detach: 'Отменить регистрацию',
+    adopt: 'Принятие проекта', cancelAdopt: 'Закрыть план принятия',
+    registrations: 'Принятые проекты', noRegistrations: 'Подтверждённых регистраций пока нет.',
+    registrationConfirm: 'Подтверждаю изменение регистрации проекта',
     hint: 'Настройте приложения и секреты на сервере. Удаление сохраняет данные и сети.',
     draft: 'Проверить операцию', confirm: 'Подтверждаю операцию и риск изменения сети хоста',
     password: 'Пароль Owner', approve: 'Подтвердить ревизию', enqueue: 'Выполнить',
@@ -43,7 +50,10 @@ export function ApplicationPlan({ resourceId, session, expired, russian }: {
     failed: 'Запрос не выполнен. Сохранённый запрос можно повторить.',
   } : {
     title: 'Applications', id: 'Prepared installation ID', digest: 'Configuration digest',
-    install: 'Install', start: 'Start', remove: 'Remove containers',
+    install: 'Install', start: 'Start', remove: 'Remove containers', detach: 'Detach registration',
+    adopt: 'Adopt project', cancelAdopt: 'Close adoption plan',
+    registrations: 'Adopted projects', noRegistrations: 'No confirmed registrations yet.',
+    registrationConfirm: 'I confirm the change to the project registration',
     hint: 'Prepare application configuration and secrets on the server. Removal preserves data and networks.',
     draft: 'Review operation', confirm: 'I confirm this operation and its host network risk',
     password: 'Owner password', approve: 'Approve revision', enqueue: 'Execute',
@@ -91,14 +101,34 @@ export function ApplicationPlan({ resourceId, session, expired, russian }: {
   const status = jobState?.status ?? ''
   const unresolved = status === 'UNKNOWN_OUTCOME' && last?.outcome !== 'RECONCILED_SUCCEEDED'
 
-  return <section aria-label={words.title}>
+  return <section id="application-plan" tabIndex={-1} aria-label={words.title}>
     <h3>{words.title}</h3><p>{words.hint}</p>
+    <button type="button" disabled={busy} onClick={() => void run(async () => {
+      const result = await request<{ items: Registration[] }>(`/resources/${resourceId}/adopted-applications`)
+      setRegistrations(result.items)
+    })}>{words.registrations}</button>
+    {registrations && (registrations.length > 0 ? <ul aria-label={words.registrations}>
+      {registrations.map(item => <li key={item.installation_id}>
+        <strong>{item.project}</strong> · <code>{item.installation_id}</code>{' '}
+        {!saved.draft && <button type="button" onClick={() => {
+          clearReview()
+          setInstallation(item.installation_id)
+          setBinding(item.spec_digest)
+          setAction('detach')
+        }}>{words.detach}</button>}
+      </li>)}
+    </ul> : <p>{words.noRegistrations}</p>)}
+    {!saved.draft && review && <p>{words.adopt} <code>{review.project}</code> <button type="button" onClick={clearReview}>
+      {words.cancelAdopt}
+    </button></p>}
     {!saved.draft && <form onSubmit={event => {
       event.preventDefault()
       void run(async () => {
         let tag: string | null = null
         const draft = await request<Draft>(`/resources/${resourceId}/application-drafts`, {
-          body: { installation_id: installation, spec_digest: binding, action }, csrf: session.csrf_token,
+          body: { installation_id: installation, spec_digest: binding,
+            ...(review ? { action: 'adopt', project: review.project } : { action }) },
+          csrf: session.csrf_token, ifMatch: review?.tag,
           onHeaders: headers => { tag = headers.get('ETag') },
         })
         if (!tag) throw new Error('ETAG_MISSING')
@@ -109,9 +139,10 @@ export function ApplicationPlan({ resourceId, session, expired, russian }: {
         required onChange={event => setInstallation(event.target.value)}/></label>
       <label>{words.digest}<input value={binding} maxLength={64} pattern="[0-9a-f]{64}"
         required onChange={event => setBinding(event.target.value)}/></label>
-      <select aria-label={words.title} value={action} onChange={event => setAction(event.target.value as Action)}>
+      {!review && <select aria-label={words.title} value={action} onChange={event => setAction(event.target.value as Action)}>
         <option value="install">{words.install}</option><option value="start">{words.start}</option><option value="remove">{words.remove}</option>
-      </select>
+        <option value="detach">{words.detach}</option>
+      </select>}
       <button disabled={busy}>{words.draft}</button>
     </form>}
     {saved.draft && <><pre>{JSON.stringify(saved.draft.diff, null, 2)}</pre>
@@ -130,7 +161,7 @@ export function ApplicationPlan({ resourceId, session, expired, russian }: {
         persist({ ...saved, approval: value.approval_id })
       })
     }}>
-      <label><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)}/>{words.confirm}</label>
+      <label><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)}/>{saved.draft.risk === 'MANAGEMENT_REGISTRATION_ONLY' ? words.registrationConfirm : words.confirm}</label>
       <label>{words.password}<input type="password" autoComplete="current-password" value={password}
         onChange={event => setPassword(event.target.value)}/></label>
       <button disabled={busy || !confirmed || !password}>{words.approve}</button>

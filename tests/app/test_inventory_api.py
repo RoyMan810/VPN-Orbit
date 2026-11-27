@@ -3,10 +3,12 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from vpn_orbit.adoption import image_catalog
+from vpn_orbit.application_requests import ApplicationOperations
+from vpn_orbit.errors import Denied
 from vpn_orbit.database import identifier
 from vpn_orbit.queue import JobQueue
 from vpn_orbit.runtime.protocol import checksum
-from .test_auth_api import Fixture, OTHER, SCOPE
+from .test_auth_api import Fixture, OTHER, PASSWORD, SCOPE
 
 
 CONTAINER = "c" * 64
@@ -193,6 +195,102 @@ class InventoryTests(Fixture):
         unavailable = self.client.get(path, headers={"If-Match": current.headers["etag"]})
         self.assertEqual(unavailable.status_code, 409)
         self.assertEqual(unavailable.json()["code"], "FRESH_OBSERVATION_REQUIRED")
+
+    def adoption_fixture(self, *, ready=True):
+        _, pins = image_catalog()
+        node = {**CONTAINER_IDENTITY, "image_id": "sha256:" + CONTAINER, "networks": ["host"], "volumes": []}
+        compose = {"status": "OBSERVED", "containers": [node], "adoption_evidence": {
+            "images": {node["image_id"]: [pins["remnawave-node"]]}, "networks": {}, "volumes": {},
+            "configuration": {CONTAINER: {"service_config": "LABEL_PRESENT", "bind_mounts": "NONE"}},
+            "definition": {"sources": {"fixture": "CONFIRMED" if ready else "UNVERIFIED"},
+                           "dependencies": {CONTAINER: []}},
+        }}
+        self.complete(compose=compose)
+        preview = self.client.get(f"/api/v1/resources/{SCOPE}/compose/projects/fixture/adoption-preview")
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertEqual(preview.json()["adoption_ready"], ready)
+        return compose, preview
+
+    def adoption_draft(self, preview, *, action="adopt"):
+        body = {"installation_id": OTHER, "spec_digest": "b" * 64, "action": action}
+        headers = self.headers()
+        if action == "adopt":
+            body["project"] = "fixture"
+            if preview is not None:
+                headers["If-Match"] = preview.headers["etag"]
+        return self.client.post(f"/api/v1/resources/{SCOPE}/application-drafts", json=body, headers=headers)
+
+    def confirm_application(self, draft):
+        self.assertEqual(draft.status_code, 201, draft.text)
+        path = draft.headers["location"]
+        headers = self.headers(**{"If-Match": draft.headers["etag"]})
+        grant = self.client.post("/api/v1/auth/reauth", headers=self.headers(),
+                                 json={"password": PASSWORD, "plan_hash": draft.json()["plan_hash"]})
+        self.assertEqual(grant.status_code, 200, grant.text)
+        return self.client.post(path + "/application-approval", headers=headers, json={"reauth_id": grant.json()["id"]})
+
+    def request_application(self, draft, approved):
+        self.assertEqual(approved.status_code, 200, approved.text)
+        headers = self.headers(**{"If-Match": draft.headers["etag"]})
+        response = self.client.post(draft.headers["location"] + "/application-execution-requests", headers=headers,
+                                    json={"approval_id": approved.json()["approval_id"]})
+        self.assertEqual(response.status_code, 202, response.text)
+        return response.json()["id"]
+
+    def finish_registered_application(self, job, code, *, preview=None):
+        claim, row = self.queue.claim(identifier())
+        self.assertEqual(row["id"], job)
+        class Gate:
+            def call(self, *args):
+                return {}
+        operations = ApplicationOperations(self.queue, Gate(), None, {SCOPE: "key"})
+        intent, _, validate = operations.prepare(row)
+        if preview is not None:
+            self.assertEqual(intent["application"]["review"], preview.json()["daemon_digest"])
+        else:
+            self.assertNotIn("review", intent["application"])
+        self.queue.advance(claim, "INTENT_PREPARED", permit={"claims": intent}, binding=intent, validate=validate)
+        for state in ("DISPATCHING", "EXECUTING", "VERIFYING"):
+            self.queue.advance(claim, state)
+        self.queue.finish(claim, "SUCCEEDED", code)
+
+    def test_owner_can_register_and_detach_the_exact_reviewed_project(self):
+        _, preview = self.adoption_fixture()
+        listing = f"/api/v1/resources/{SCOPE}/adopted-applications"
+        self.assertEqual(self.client.get(listing).json(), {"items": []})
+        draft = self.adoption_draft(preview)
+        self.assertEqual(draft.status_code, 201, draft.text)
+        self.assertEqual(draft.json()["diff"]["observation_id"], preview.json()["observation_id"])
+        job = self.request_application(draft, self.confirm_application(draft))
+        self.finish_registered_application(job, "APP_ADOPTION_REGISTERED", preview=preview)
+        self.assertEqual(self.client.get(listing).json(), {"items": [
+            {"installation_id": OTHER, "project": "fixture", "job_id": job, "spec_digest": "b" * 64},
+        ]})
+        detach = self.adoption_draft(None, action="detach")
+        operation = self.request_application(detach, self.confirm_application(detach))
+        self.finish_registered_application(operation, "APP_ADOPTION_DETACHED")
+        self.assertEqual(self.client.get(listing).json(), {"items": []})
+        self.store.verify_audit()
+
+    def test_adoption_requires_ready_evidence_and_rechecks_at_approval_and_dispatch(self):
+        _, incomplete = self.adoption_fixture(ready=False)
+        self.assertEqual(self.adoption_draft(None).status_code, 428)
+        self.assertEqual(self.adoption_draft(incomplete).json()["code"], "APP_ADOPTION_EVIDENCE_INCOMPLETE")
+        compose, preview = self.adoption_fixture()
+        stale = self.adoption_draft(preview)
+        self.complete(compose=compose)
+        self.assertEqual(self.confirm_application(stale).status_code, 412)
+        current = self.client.get(f"/api/v1/resources/{SCOPE}/compose/projects/fixture/adoption-preview")
+        draft = self.adoption_draft(current)
+        job = self.request_application(draft, self.confirm_application(draft))
+        claim, row = self.queue.claim(identifier())
+        self.assertEqual(row["id"], job)
+        with self.store.write() as db:
+            db.execute("UPDATE resources SET revision=revision+1 WHERE id=?", (SCOPE,))
+        operations = ApplicationOperations(self.queue, None, None, {SCOPE: "key"})
+        with self.assertRaisesRegex(Denied, "STALE_REVISION"):
+            operations.prepare(row)
+        self.queue.finish(claim, "FAILED", "STALE_REVISION")
 
     def test_adoption_preview_checks_exact_image_digests_and_reports_resource_claims(self):
         _, pins = image_catalog()
