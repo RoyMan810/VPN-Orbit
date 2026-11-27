@@ -297,11 +297,11 @@ def parse_probe(output, *, now):
         value = decode(output.rstrip(b"\n"))
     except Denied:
         raise Denied("SSH_UNSUPPORTED_OUTPUT") from None
-    fields(value, ("v", "uid", "boot_id", "observed_at", "software", "docker", "compose", "local_https", "nginx"))
+    fields(value, ("v", "uid", "boot_id", "observed_at", "software", "docker", "compose", "local_https", "nginx", "firewall", "app_links"))
     if type(value["v"]) is not int or value["v"] != PROBE_VERSION or type(value["uid"]) is not int or value["uid"] != 0:
         raise Denied("SSH_PROBE_INVALID")
     integer(value["observed_at"], now - 300, now + 2)
-    sample = {key: value[key] for key in ("observed_at", "boot_id", "software", "docker", "compose", "local_https", "nginx")}
+    sample = {key: value[key] for key in ("observed_at", "boot_id", "software", "docker", "compose", "local_https", "nginx", "firewall", "app_links")}
     return observation_summary({"status": "REACHABLE", "source": "restricted_helper", **sample})
 
 

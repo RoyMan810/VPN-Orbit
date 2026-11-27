@@ -26,6 +26,23 @@ export function ComposeInventory({ compose, scoped, historical, t }: {
     else projects.set(container.project, [container])
   }
 
+  const shared = (['networks', 'volumes'] as const).flatMap(kind => {
+    const members = new Map<string, Set<string>>()
+    for (const [project, containers] of projects) {
+      for (const container of containers) {
+        for (const name of container[kind] ?? []) {
+          if (kind === 'networks' && ['bridge', 'host', 'none'].includes(name)) continue
+          const owners = members.get(name) ?? new Set<string>()
+          owners.add(project)
+          members.set(name, owners)
+        }
+      }
+    }
+    return [...members].filter(([, owners]) => owners.size > 1).map(([name, owners]) => ({
+      kind, name, projects: [...owners].sort(),
+    }))
+  })
+
   return <section className="software" aria-labelledby="compose-projects-heading">
     <h3 id="compose-projects-heading">{t.composeProjects}</h3>
     {discovered ? <p>{t.composeAllScope}</p> : scoped.length > 0 && <p>{t.composeScope}</p>}
@@ -45,5 +62,12 @@ export function ComposeInventory({ compose, scoped, historical, t }: {
         {showAttachments && <Table.Td><Attachments containers={containers} kind="volumes" t={t} /></Table.Td>}
       </Table.Tr>)}</Table.Tbody>
     </Table> : (discovered || scoped.length > 0) && <p>{t.composeEmpty}</p>}
+    {shared.length > 0 && <section aria-labelledby="compose-shared-heading">
+      <h4 id="compose-shared-heading">{t.composeShared}</h4>
+      <dl>{shared.map(resource => <div key={JSON.stringify([resource.kind, resource.name])}>
+        <dt>{resource.kind === 'networks' ? t.composeNetworks : t.composeVolumes} · <code>{resource.name}</code></dt>
+        <dd><code>{resource.projects.join(', ')}</code></dd>
+      </div>)}</dl>
+    </section>}
   </section>
 }

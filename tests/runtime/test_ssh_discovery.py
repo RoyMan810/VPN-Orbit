@@ -1,4 +1,5 @@
 import asyncio
+import io
 from pathlib import Path
 import runpy
 import subprocess
@@ -10,7 +11,7 @@ from unittest.mock import patch
 import asyncssh
 
 from vpn_orbit.errors import Denied
-from vpn_orbit.runtime.protocol import PROBE_VERSION, canonical, software_summary
+from vpn_orbit.runtime.protocol import PROBE_VERSION, app_links_summary, canonical, firewall_summary, software_summary
 from vpn_orbit.runtime.ssh import exchange, exchange_restart, parse_probe
 
 
@@ -22,6 +23,8 @@ class DiscoveryPayloadTests(unittest.TestCase):
     def test_current_probe_requires_complete_scoped_observation(self):
         value = {"v": PROBE_VERSION, "uid": 0, "boot_id": BOOT, "observed_at": 1000, "software": SOFTWARE,
                  "docker": {"status": "NOT_CONFIGURED", "containers": []},
+                 "app_links": {"status": "NOT_CONFIGURED", "links": []},
+                 "firewall": {"status": "NOT_CONFIGURED", "chains": []},
                  "nginx": {"status": "NOT_CONFIGURED", "names": [], "partial": False},
                  "local_https": {"status": "NOT_CONFIGURED", "sites": []},
                  "compose": {"status": "NOT_CONFIGURED", "containers": []}}
@@ -32,7 +35,7 @@ class DiscoveryPayloadTests(unittest.TestCase):
             {**value, "software": {"docker": "PRESENT", "nginx": "PRESENT"}},
             {**value, "docker": {"status": "OBSERVED", "containers": [
                 {"id": "a" * 64, "project": "fixture", "service": "web", "state": "RUNNING"}]}},
-            {**value, "v": 12},
+            {**value, "v": 13},
             {k: v for k, v in value.items() if k != "compose"},
         ):
             with self.subTest(invalid=invalid), self.assertRaises(Denied):
@@ -80,6 +83,45 @@ class DiscoveryPayloadTests(unittest.TestCase):
             self.assertEqual(helper['tool_status'](directory), 'UNKNOWN')
 
 
+    def test_nftables_snapshot_only_exports_base_filter_chain_metadata(self):
+        helper = runpy.run_path(str(Path(__file__).resolve().parents[2] / "remote/typed-helper"))
+        observe = helper["observe_firewall"]
+        chain = {"family": "inet", "table": "filter", "name": "incoming", "hook": "input", "policy": "drop", "prio": -10}
+        raw = canonical({"nftables": [
+            {"metainfo": {"json_schema_version": 1}},
+            {"chain": {**chain, "type": "filter", "comment": "private-canary"}},
+            {"chain": {**chain, "name": "nat", "type": "nat", "comment": "private-canary"}},
+            {"chain": {"family": "inet", "table": "filter", "name": "regular"}},
+        ]})
+        with patch.dict(observe.__globals__, {"read_root_config": lambda *_: b"enabled\n",
+                                              "tool_status": lambda _: "PRESENT"}), patch.object(subprocess, "Popen") as popen:
+            process = popen.return_value.__enter__.return_value
+            process.stdout = io.BytesIO(raw)
+            process.wait.return_value = process.poll.return_value = 0
+            self.assertEqual(firewall_summary(observe()), {"status": "OBSERVED", "chains": [chain]})
+            self.assertEqual(popen.call_args.args[0], ["/usr/sbin/nft", "-j", "-nn", "list", "chains"])
+            process.stdout = io.BytesIO(b"x" * (128 * 1024 + 1))
+            self.assertEqual(observe(), {"status": "LIMIT_EXCEEDED", "chains": []})
+        for invalid in ([{**chain, "comment": "private-canary"}], [{**chain, "prio": True}], [chain, chain]):
+            with self.subTest(invalid=invalid), self.assertRaises(Denied):
+                firewall_summary({"status": "OBSERVED", "chains": invalid})
+
+
+    def test_application_links_are_explicit_sorted_and_reject_credentials(self):
+        helper = runpy.run_path(str(Path(__file__).resolve().parents[2] / "remote/typed-helper"))
+        observe = helper["observe_app_links"]
+        with patch.dict(observe.__globals__, {"read_root_config": lambda *_: b"node xray panel.example 443\nbot api panel.example 443\n"}):
+            snapshot = observe()
+        self.assertEqual(app_links_summary(snapshot), {"status": "DECLARED", "links": [
+            {"project": "bot", "service": "api", "host": "panel.example", "port": 443},
+            {"project": "node", "service": "xray", "host": "panel.example", "port": 443},
+        ]})
+        for invalid in (b"bot api https://user:password@panel.example 443\n",
+                        b"bot api panel.example 65536\n", b"bot api panel.example 443\n" * 2):
+            with self.subTest(value=invalid), patch.dict(observe.__globals__, {"read_root_config": lambda *_: invalid}):
+                self.assertEqual(observe(), {"status": "POLICY_INVALID", "links": []})
+
+
 class ProbeNegotiationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.requests = []
@@ -109,9 +151,9 @@ class ProbeNegotiationTests(unittest.IsolatedAsyncioTestCase):
     async def probe(self):
         return await asyncio.wait_for(exchange(self.target, self.client_key, self.known_hosts), 5)
 
-    async def test_v13_uses_one_fixed_request(self):
+    async def test_v14_uses_one_fixed_request(self):
         self.assertEqual(await self.probe(), b'probe')
-        self.assertEqual(self.requests, [('vpn-orbit.v13.probe', b'{"operation":"probe","version":13}\n')])
+        self.assertEqual(self.requests, [('vpn-orbit.v14.probe', b'{"operation":"probe","version":14}\n')])
 
     async def test_failed_or_noisy_probe_does_not_fall_back(self):
         for status, data in ((65, b''), (65, b'canary'), (1, b'')):

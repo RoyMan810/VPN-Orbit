@@ -10,7 +10,7 @@ from ..errors import Denied
 
 
 MAX_FRAME = 16384
-PROBE_VERSION = 13
+PROBE_VERSION = 14
 PROBE_COMMAND = f"vpn-orbit.v{PROBE_VERSION}.probe"
 PROBE_REQUEST = b'{"operation":"probe","version":%d}\n' % PROBE_VERSION
 MAX_PROBE_REPLY = 15360
@@ -306,8 +306,51 @@ def nginx_summary(value):
     return value
 
 
+def firewall_summary(value):
+    fields(value, ("status", "chains"))
+    status, chains = value["status"], value["chains"]
+    if (status not in ("OBSERVED", "NOT_CONFIGURED", "POLICY_INVALID", "UNAVAILABLE", "LIMIT_EXCEEDED")
+            or not isinstance(chains, list) or len(chains) > 16 or status != "OBSERVED" and chains):
+        raise Denied("PROBE_FIREWALL_INVALID")
+    seen = []
+    for chain in chains:
+        fields(chain, ("family", "table", "name", "hook", "policy", "prio"))
+        if (chain["family"] not in ("ip", "ip6", "inet", "arp", "bridge", "netdev")
+                or chain["hook"] not in ("prerouting", "input", "forward", "output", "postrouting", "ingress", "egress")
+                or chain["policy"] not in ("accept", "drop")):
+            raise Denied("PROBE_FIREWALL_INVALID")
+        table = text(chain["table"], r"[A-Za-z0-9_.-]{1,64}")
+        name = text(chain["name"], r"[A-Za-z0-9_.-]{1,64}")
+        integer(chain["prio"], -(2**31), 2**31 - 1)
+        seen.append((chain["family"], table, name))
+    if seen != sorted(set(seen)):
+        raise Denied("PROBE_FIREWALL_INVALID")
+    return value
+
+
+def app_links_summary(value):
+    fields(value, ("status", "links"))
+    status, links = value["status"], value["links"]
+    if (status not in ("DECLARED", "NOT_CONFIGURED", "POLICY_INVALID", "UNAVAILABLE", "LIMIT_EXCEEDED")
+            or not isinstance(links, list) or len(links) > 8 or bool(links) != (status == "DECLARED")):
+        raise Denied("PROBE_APP_LINKS_INVALID")
+    seen = []
+    for link in links:
+        fields(link, ("project", "service", "host", "port"))
+        project = text(link["project"], r"[a-z0-9][a-z0-9_-]{0,62}")
+        service = text(link["service"], r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}")
+        host = link["host"]
+        if (not isinstance(host, str) or len(host) > 253 or host.rsplit(".", 1)[-1].isdigit()
+                or not re.fullmatch(rf"{DNS_LABEL}(?:\.{DNS_LABEL})+", host)):
+            raise Denied("PROBE_APP_LINKS_INVALID")
+        seen.append((project, service, host, integer(link["port"], 1, 65535)))
+    if seen != sorted(set(seen)):
+        raise Denied("PROBE_APP_LINKS_INVALID")
+    return value
+
+
 def observation_summary(value):
-    fields(value, ("status", "source", "observed_at", "boot_id", "software", "docker", "compose", "local_https", "nginx"))
+    fields(value, ("status", "source", "observed_at", "boot_id", "software", "docker", "compose", "local_https", "nginx", "firewall", "app_links"))
     if value["status"] != "REACHABLE" or value["source"] != "restricted_helper":
         raise Denied("BROKER_OBSERVATION_INVALID")
     integer(value["observed_at"], 0, 2**63 - 1)
@@ -317,4 +360,6 @@ def observation_summary(value):
     compose_summary(value["compose"])
     local_https_summary(value["local_https"])
     nginx_summary(value["nginx"])
+    firewall_summary(value["firewall"])
+    app_links_summary(value["app_links"])
     return value

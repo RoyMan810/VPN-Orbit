@@ -151,6 +151,18 @@ ForceCommand {LIBEXEC}/firewall-gateway
         previous_digest = first["rules_digest"]
         baseline = run(["ip", "netns", "exec", NS, "nft", "-nn", "list", "table", "inet", "vpn_orbit"]).stdout
         assert b"meta nfproto 2 tcp dport 443 drop" in baseline, baseline
+        scope = root / "firewall-inventory.enabled"
+        scope.write_bytes(b"enabled\n")
+        scope.chmod(0o600)
+        code = ("import json, runpy, sys; from pathlib import Path; "
+                "observe = runpy.run_path(sys.argv[1])['observe_firewall']; "
+                "print(json.dumps(observe(Path(sys.argv[2]))))")
+        result = run(["ip", "netns", "exec", NS, sys.executable, "-c", code, REPO / "remote/typed-helper", scope])
+        snapshot = json.loads(result.stdout)
+        assert snapshot["status"] == "OBSERVED", snapshot
+        assert any(chain["family"] == "inet" and chain["table"] == "vpn_orbit" and chain["hook"] == "input"
+                   for chain in snapshot["chains"]), snapshot
+        assert run(["ip", "netns", "exec", NS, "nft", "-nn", "list", "table", "inet", "vpn_orbit"]).stdout == baseline
         rejected = call({"operation": "exec", "command": "nft flush ruleset"}, success=False)
         assert rejected["outcome"] == "DENIED"
 

@@ -49,10 +49,18 @@ def fixture(directory):
             queue.advance(claim, state)
         result = {"status": "REACHABLE", "source": "restricted_helper", "observed_at": int(time.time()) - age,
                   "boot_id": "11111111-1111-1111-1111-111111111111"}
+        result["app_links"] = {"status": "NOT_CONFIGURED", "links": []}
+        result["firewall"] = {"status": "NOT_CONFIGURED", "chains": []}
         result["nginx"] = {"status": "NOT_CONFIGURED", "names": [], "partial": False}
         result["local_https"] = {"status": "NOT_CONFIGURED", "sites": []}
         result["compose"] = {"status": "NOT_CONFIGURED", "containers": []}
         if index == 0:
+            result["app_links"] = {"status": "DECLARED", "links": [
+                {"project": "fixture", "service": "web", "host": "upstream.example.test", "port": 443},
+            ]}
+            result["firewall"] = {"status": "OBSERVED", "chains": [
+                {"family": "inet", "table": "filter", "name": "incoming", "hook": "input", "policy": "drop", "prio": 0},
+            ]}
             result["nginx"] = {"status": "OBSERVED", "names": ["panel.example.test", "www.example.test"], "partial": True}
             result["local_https"] = {"status": "OBSERVED", "sites": [
                 {"name": "cabinet.example.test", "state": "VERIFIED", "expires_at": int(time.time()) + 86400},
@@ -85,6 +93,8 @@ def fixture(directory):
                  "service": "web", "state": "RUNNING", "networks": ["external_frontend"], "volumes": ["external_data"]},
                 {"id": "c" * 64, "image_id": "sha256:" + "b" * 64, "project": "external",
                  "service": "worker", "state": "RUNNING", "networks": ["external_frontend"], "volumes": None},
+                {"id": "f" * 64, "image_id": "sha256:" + "b" * 64, "project": "proxy",
+                 "service": "gateway", "state": "RUNNING", "networks": ["external_frontend"], "volumes": ["external_data"]},
             ]}
         queue.finish(claim, "SUCCEEDED", "PROBE_VERIFIED", result=result)
 
@@ -115,6 +125,8 @@ def fixture(directory):
                       "boot_id": "11111111-1111-1111-1111-111111111111"}
             result["software"] = {"docker": "PRESENT", "nginx": "NOT_DETECTED", "nginx_service": "NOT_FOUND"}
             result["docker"] = {"status": "NOT_CONFIGURED", "containers": []}
+            result["app_links"] = {"status": "NOT_CONFIGURED", "links": []}
+            result["firewall"] = {"status": "NOT_CONFIGURED", "chains": []}
             result["nginx"] = {"status": "NOT_CONFIGURED", "names": [], "partial": False}
             result["local_https"] = {"status": "NOT_CONFIGURED", "sites": []}
             result["compose"] = {"status": "NOT_CONFIGURED", "containers": []}

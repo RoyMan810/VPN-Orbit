@@ -48,7 +48,7 @@ class DockerPayloadTests(unittest.TestCase):
         compose = {"status": "OBSERVED", "containers": [{**ROW, "image_id": "sha256:" + FOREIGN}]}
         value = {"v": PROBE_VERSION, "uid": 0, "boot_id": "12345678-1234-1234-1234-123456789abc",
                  "observed_at": 1000, "software": {"docker": "PRESENT", "nginx": "NOT_DETECTED", "nginx_service": "NOT_FOUND"},
-                 "docker": scoped, "nginx": {"status": "NOT_CONFIGURED", "names": [], "partial": False}, "local_https": {"status": "NOT_CONFIGURED", "sites": []}, "compose": compose}
+                 "docker": scoped, "app_links": {"status": "NOT_CONFIGURED", "links": []}, "firewall": {"status": "NOT_CONFIGURED", "chains": []}, "nginx": {"status": "NOT_CONFIGURED", "names": [], "partial": False}, "local_https": {"status": "NOT_CONFIGURED", "sites": []}, "compose": compose}
         result = parse_probe(canonical(value), now=1000)
         self.assertEqual(result["docker"], scoped)
         self.assertEqual(result["compose"], compose)
@@ -65,10 +65,10 @@ class DockerPayloadTests(unittest.TestCase):
         scoped = {"status": "NOT_CONFIGURED", "containers": []}
         value = {"v": PROBE_VERSION, "uid": 0, "boot_id": "12345678-1234-1234-1234-123456789abc",
                  "observed_at": 1000, "software": {"docker": "PRESENT", "nginx": "NOT_DETECTED", "nginx_service": "NOT_FOUND"},
-                 "docker": scoped, "nginx": {"status": "NOT_CONFIGURED", "names": [], "partial": False}, "local_https": {"status": "NOT_CONFIGURED", "sites": []}, "compose": {"status": "OBSERVED", "containers": [row]}}
+                 "docker": scoped, "app_links": {"status": "NOT_CONFIGURED", "links": []}, "firewall": {"status": "NOT_CONFIGURED", "chains": []}, "nginx": {"status": "NOT_CONFIGURED", "names": [], "partial": False}, "local_https": {"status": "NOT_CONFIGURED", "sites": []}, "compose": {"status": "OBSERVED", "containers": [row]}}
         self.assertEqual(parse_probe(canonical(value), now=1000)["compose"], value["compose"])
         with self.assertRaises(Denied):
-            parse_probe(canonical({**value, "v": 12}), now=1000)
+            parse_probe(canonical({**value, "v": 13}), now=1000)
         for rows in ([{**base, "networks": []}], [row, {**base, "id": FOREIGN}],
                      [{**row, "volumes": ["/host/private"]}], [{**row, "volumes": ["x" * 65]}],
                      [{**row, "volumes": ["data", "data"]}], [{**row, "volumes": ["web", "data"]}],
@@ -89,9 +89,11 @@ class DockerPayloadTests(unittest.TestCase):
         value = {"v": PROBE_VERSION, "uid": 0, "boot_id": "12345678-1234-1234-1234-123456789abc", "observed_at": 1000,
                  "software": {"docker": "PRESENT", "nginx": "NOT_DETECTED", "nginx_service": "NOT_FOUND"},
                  "docker": {"status": "OBSERVED", "containers": scoped},
+                 "app_links": {"status": "NOT_CONFIGURED", "links": []},
+                 "firewall": {"status": "NOT_CONFIGURED", "chains": []},
                  "nginx": {"status": "NOT_CONFIGURED", "names": [], "partial": False},
                  "local_https": {"status": "OBSERVED", "sites": [
-                     {"name": chr(97 + i) + "a" * 62 + "." + "b" * 63 + "." + "c" * 63 + "." + "d" * 61,
+                     {"name": chr(97 + i) + "a" * 62 + "." + "b" * 63 + "." + "c" * 63 + "." + "d" * 5,
                       "state": "VERIFIED", "expires_at": 253402300799} for i in range(2)
                  ]},
                  "compose": {"status": "OBSERVED", "containers": compose}}

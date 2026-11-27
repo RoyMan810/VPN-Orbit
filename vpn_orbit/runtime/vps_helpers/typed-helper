@@ -22,6 +22,8 @@ from urllib.parse import urlencode
 DOCKER_SCOPE = Path("/etc/vpn-orbit/docker-discovery.json")
 COMPOSE_DISCOVERY = Path("/etc/vpn-orbit/compose-discovery.enabled")
 COMPOSE_RESOURCE_SCOPE = b"enabled-with-resources\n"
+APP_LINKS_SCOPE = Path("/etc/vpn-orbit/application-links.txt")
+FIREWALL_SCOPE = Path("/etc/vpn-orbit/firewall-inventory.enabled")
 NGINX_SCOPE = Path("/etc/vpn-orbit/nginx-inventory.files")
 LOCAL_HTTPS_SCOPE = Path("/etc/vpn-orbit/local-https.names")
 DOCKER_SOCKET = Path("/run/docker.sock")
@@ -31,6 +33,7 @@ MAX_PUBLISHED_PORTS = 8
 MAX_DOCKER_REPLY = 256 * 1024
 MAX_PROBE_REPLY = 15360
 MAX_ATTACHMENT_NAMES = 8
+NFT_CHAIN_NAME = r"[A-Za-z0-9_.-]{1,64}"
 DNS_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 DOCKER_RESOURCE = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
 DOCKER_STATES = {"created", "restarting", "running", "removing", "paused", "exited", "dead"}
@@ -503,8 +506,106 @@ def observe_nginx(path=NGINX_SCOPE, root=Path("/etc/nginx")):
     return {"status": "OBSERVED", "names": sorted(names), "partial": partial}
 
 
+def firewall_chains(data):
+    entries = json.loads(data, object_pairs_hook=unique_object)["nftables"]
+    if not isinstance(entries, list):
+        raise ValueError("invalid nftables response")
+    chains = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("invalid nftables item")
+        chain = entry.get("chain")
+        if chain is None:
+            continue
+        if not isinstance(chain, dict):
+            raise ValueError("invalid nftables chain")
+        if chain.get("type") != "filter" or "hook" not in chain:
+            continue
+        observed = {key: chain[key] for key in ("family", "table", "name", "hook", "policy", "prio")}
+        if (observed["family"] not in ("ip", "ip6", "inet", "arp", "bridge", "netdev")
+                or observed["hook"] not in ("prerouting", "input", "forward", "output", "postrouting", "ingress", "egress")
+                or observed["policy"] not in ("accept", "drop")
+                or type(observed["prio"]) is not int or not -(2**31) <= observed["prio"] < 2**31
+                or any(not isinstance(observed[key], str) or not re.fullmatch(NFT_CHAIN_NAME, observed[key])
+                       for key in ("table", "name"))):
+            raise ValueError("invalid nftables filter chain")
+        chains.append(observed)
+    chains.sort(key=lambda x: (x["family"], x["table"], x["name"]))
+    if len({(x["family"], x["table"], x["name"]) for x in chains}) != len(chains):
+        raise ValueError("duplicate nftables chain")
+    return chains
+
+
+def observe_firewall(path=FIREWALL_SCOPE):
+    empty = {"chains": []}
+    try:
+        if read_root_config(path, 16) != b"enabled\n":
+            raise ValueError("invalid firewall observation scope")
+    except FileNotFoundError:
+        return {"status": "NOT_CONFIGURED", **empty}
+    except (OSError, ValueError):
+        return {"status": "POLICY_INVALID", **empty}
+
+    nft = next((name for name in ("/usr/sbin/nft", "/usr/bin/nft") if tool_status(name) == "PRESENT"), None)
+    if nft is None:
+        return {"status": "UNAVAILABLE", **empty}
+    try:
+        with subprocess.Popen([nft, "-j", "-nn", "list", "chains"], stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}) as process:
+            try:
+                limit = 128 * 1024
+                data = process.stdout.read(limit + 1)
+                if len(data) > limit:
+                    return {"status": "LIMIT_EXCEEDED", **empty}
+                if process.wait(timeout=0.25) != 0:
+                    return {"status": "UNAVAILABLE", **empty}
+            finally:
+                if process.poll() is None:
+                    process.kill()
+        chains = firewall_chains(data)
+    except (OSError, ValueError, KeyError, TypeError, RecursionError, subprocess.TimeoutExpired):
+        return {"status": "UNAVAILABLE", **empty}
+    if len(chains) > 16:
+        return {"status": "LIMIT_EXCEEDED", **empty}
+    return {"status": "OBSERVED", "chains": chains}
+
+
+def observe_app_links(path=APP_LINKS_SCOPE):
+    empty = {"links": []}
+    try:
+        rows = read_root_config(path, 2048).decode("ascii").splitlines()
+        if not 1 <= len(rows) <= 8:
+            raise ValueError("invalid application link count")
+        links = set()
+        for row in rows:
+            project, service, host, port = row.split()
+            if (not re.fullmatch(COMPOSE_PROJECT, project) or not re.fullmatch(COMPOSE_SERVICE, service)
+                    or len(host) > 253 or host.rsplit(".", 1)[-1].isdigit()
+                    or not re.fullmatch(rf"{DNS_LABEL}(?:\.{DNS_LABEL})+", host)
+                    or not re.fullmatch(r"[1-9][0-9]{0,4}", port) or int(port) > 65535):
+                raise ValueError("invalid application link")
+            links.add((project, service, host, int(port)))
+        if len(links) != len(rows):
+            raise ValueError("duplicate application link")
+    except FileNotFoundError:
+        return {"status": "NOT_CONFIGURED", **empty}
+    except (OSError, ValueError):
+        return {"status": "POLICY_INVALID", **empty}
+    return {"status": "DECLARED", "links": [
+        {"project": project, "service": service, "host": host, "port": port}
+        for project, service, host, port in sorted(links)
+    ]}
+
+
 def probe_reply(value):
     output = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    if len(output) + 1 > MAX_PROBE_REPLY and value["app_links"]["status"] == "DECLARED":
+        value["app_links"] = {"status": "LIMIT_EXCEEDED", "links": []}
+        output = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    if len(output) + 1 > MAX_PROBE_REPLY and value["firewall"]["status"] == "OBSERVED":
+        value["firewall"] = {"status": "LIMIT_EXCEEDED", "chains": []}
+        output = json.dumps(value, sort_keys=True, separators=(",", ":"))
     if len(output) + 1 > MAX_PROBE_REPLY and value["nginx"]["status"] == "OBSERVED":
         value["nginx"] = {"status": "LIMIT_EXCEEDED", "names": [], "partial": False}
         output = json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -524,13 +625,13 @@ def probe_reply(value):
 def main():
     if os.geteuid() != 0 or len(sys.argv) != 1:
         return 65
-    request = b'{"operation":"probe","version":13}\n'
+    request = b'{"operation":"probe","version":14}\n'
     signal.alarm(5)
     payload = sys.stdin.buffer.read(len(request) + 1)
     signal.alarm(0)
     if payload != request:
         return 65
-    value = {"v": 13, "uid": 0, "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+    value = {"v": 14, "uid": 0, "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
              "observed_at": int(time.time()),
              "software": {"docker": tool_status("/usr/bin/docker"), "nginx": tool_status("/usr/sbin/nginx"),
                           "nginx_service": nginx_service_state()}}
@@ -559,6 +660,12 @@ def main():
     signal.alarm(1)
     try:
         value["nginx"] = observe_nginx()
+        value["app_links"] = observe_app_links()
+        value["firewall"] = observe_firewall()
+    except TimeoutError:
+        value.setdefault("nginx", {"status": "UNAVAILABLE", "names": [], "partial": False})
+        value.setdefault("app_links", {"status": "UNAVAILABLE", "links": []})
+        value["firewall"] = {"status": "UNAVAILABLE", "chains": []}
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous)
