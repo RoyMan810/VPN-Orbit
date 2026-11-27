@@ -34,14 +34,18 @@ APPLICATION_SUCCESS = {
     "remove": ("APP_REMOVED_DATA_PRESERVED", "APP_READBACK_VERIFIED"),
     "adopt": ("APP_ADOPTION_REGISTERED",),
     "detach": ("APP_ADOPTION_DETACHED",),
+    "start-adopted": ("APP_ADOPTED_START_VERIFIED",),
 }
 
 
 def application_payload(value):
-    adopting = isinstance(value, dict) and value.get("action") == "adopt"
-    fields(value, ("operation_id", "installation_id", "spec_digest", "action") + (("review",) if adopting else ()))
-    if adopting:
+    action = value.get("action") if isinstance(value, dict) else None
+    extra = ("review",) if action == "adopt" else ("registration_id",) if action == "start-adopted" else ()
+    fields(value, ("operation_id", "installation_id", "spec_digest", "action") + extra)
+    if action == "adopt":
         text(value["review"], SHA256)
+    elif action == "start-adopted":
+        text(value["registration_id"], ULID)
     text(value["operation_id"], ULID)
     text(value["installation_id"], ULID)
     text(value["spec_digest"], SHA256)

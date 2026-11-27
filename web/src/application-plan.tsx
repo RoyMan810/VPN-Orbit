@@ -3,7 +3,7 @@ import { apiErrorDetails, hasApiStatus, isUlid, request } from './api'
 import type { Session } from './api'
 import type { AdoptionReview } from './adoption-preview'
 
-type Action = 'install' | 'start' | 'remove' | 'detach'
+type Action = 'install' | 'start' | 'remove' | 'detach' | 'start-adopted'
 type Draft = { id: string; plan_hash: string; diff: Record<string, unknown>; risk: string; data_policy: string }
 type Saved = { draft: Draft | null; tag: string | null; approval: string | null; job: string | null }
 type Registration = { installation_id: string; project: string; spec_digest: string; job_id: string }
@@ -40,6 +40,7 @@ export function ApplicationPlan({ resourceId, session, expired, russian, review,
   const words = russian ? {
     title: 'Приложения', id: 'ID подготовленной установки', digest: 'Digest конфигурации',
     install: 'Установить', start: 'Запустить', remove: 'Удалить контейнеры', detach: 'Отменить регистрацию',
+    'start-adopted': 'Запустить принятый Node',
     adopt: 'Принятие проекта', cancelAdopt: 'Закрыть план принятия',
     registrations: 'Принятые проекты', noRegistrations: 'Подтверждённых регистраций пока нет.',
     registrationConfirm: 'Подтверждаю изменение регистрации проекта',
@@ -51,6 +52,7 @@ export function ApplicationPlan({ resourceId, session, expired, russian, review,
   } : {
     title: 'Applications', id: 'Prepared installation ID', digest: 'Configuration digest',
     install: 'Install', start: 'Start', remove: 'Remove containers', detach: 'Detach registration',
+    'start-adopted': 'Start adopted Node',
     adopt: 'Adopt project', cancelAdopt: 'Close adoption plan',
     registrations: 'Adopted projects', noRegistrations: 'No confirmed registrations yet.',
     registrationConfirm: 'I confirm the change to the project registration',
@@ -110,12 +112,13 @@ export function ApplicationPlan({ resourceId, session, expired, russian, review,
     {registrations && (registrations.length > 0 ? <ul aria-label={words.registrations}>
       {registrations.map(item => <li key={item.installation_id}>
         <strong>{item.project}</strong> · <code>{item.installation_id}</code>{' '}
-        {!saved.draft && <button type="button" onClick={() => {
-          clearReview()
-          setInstallation(item.installation_id)
-          setBinding(item.spec_digest)
-          setAction('detach')
-        }}>{words.detach}</button>}
+        {!saved.draft && (['start-adopted', 'detach'] as const).map(operation =>
+          <button key={operation} type="button" onClick={() => {
+            clearReview()
+            setInstallation(item.installation_id)
+            setBinding(item.spec_digest)
+            setAction(operation)
+          }}>{words[operation]}</button>)}
       </li>)}
     </ul> : <p>{words.noRegistrations}</p>)}
     {!saved.draft && review && <p>{words.adopt} <code>{review.project}</code> <button type="button" onClick={clearReview}>
@@ -142,6 +145,7 @@ export function ApplicationPlan({ resourceId, session, expired, russian, review,
       {!review && <select aria-label={words.title} value={action} onChange={event => setAction(event.target.value as Action)}>
         <option value="install">{words.install}</option><option value="start">{words.start}</option><option value="remove">{words.remove}</option>
         <option value="detach">{words.detach}</option>
+        <option value="start-adopted">{words['start-adopted']}</option>
       </select>}
       <button disabled={busy}>{words.draft}</button>
     </form>}

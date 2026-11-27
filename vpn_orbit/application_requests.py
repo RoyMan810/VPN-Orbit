@@ -16,8 +16,8 @@ REQUESTED = "change_plan.application_requested"
 def application_value(identity, revision, baseline):
     return {"version": 1, "id": identity, "revision": revision, "action": "apps.lifecycle", "state": "DRAFT",
             "baseline": baseline, "diff": {"operation": baseline["action"], "installation_id": baseline["installation_id"],
-                                           **({"project": baseline["project"], "observation_id": baseline["observation_id"]}
-                                              if baseline["action"] == "adopt" else {})},
+                                           **{key: baseline[key] for key in ("project", "observation_id", "registration_id")
+                                              if key in baseline}},
             "risk": ("MANAGEMENT_REGISTRATION_ONLY" if baseline["action"] in ("adopt", "detach")
                      else "HOST_NETWORK_AND_APPLICATION_DATA"), "execution": "OWNER_APPROVAL_REQUIRED",
             "data_policy": "PRESERVE_VOLUMES_AND_NETWORKS"}
@@ -46,18 +46,30 @@ def checked(db, auth, token, identity, tag, *, csrf=None, mutating=False):
     return actor, row, draft
 
 
+def active_registration(db, baseline):
+    return next((item for item in registered_applications(db, baseline["resource_id"])
+                 if (item["installation_id"], item["spec_digest"]) == (baseline["installation_id"], baseline["spec_digest"])),
+                None)
+
+
 def reviewed_snapshot(db, inventory, actor, baseline):
     if baseline["action"] == "adopt":
         preview, _ = inventory.adoption_preview_in(db, actor, baseline["resource_id"], baseline["project"],
                                                     if_match=baseline["preview_tag"])
         if not preview["adoption_ready"] or preview["daemon_digest"] != baseline["review"]:
             raise Denied("APP_ADOPTION_EVIDENCE_INCOMPLETE", 409)
+    if baseline["action"] == "start-adopted":
+        registered = active_registration(db, baseline)
+        if registered is None or registered["job_id"] != baseline["registration_id"]:
+            raise Denied("APP_ADOPTION_STATE_INVALID", 409)
 
 
 def application_intent(baseline, operation):
     payload = {"operation_id": operation, **{key: baseline[key] for key in ("installation_id", "spec_digest", "action")}}
     if baseline["action"] == "adopt":
         payload["review"] = baseline["review"]
+    elif baseline["action"] == "start-adopted":
+        payload["registration_id"] = baseline["registration_id"]
     return application_payload(payload)
 
 
@@ -83,6 +95,11 @@ def save(db, auth, token, csrf, resource, installation, binding, action, *, proj
                         preview_digest=preview["preview_digest"], review=preview["daemon_digest"])
     elif project is not None:
         raise Denied("APP_ACTION_INVALID", 422)
+    if action == "start-adopted":
+        registered = active_registration(db, baseline)
+        if registered is None:
+            raise Denied("APP_ADOPTION_STATE_INVALID", 409)
+        baseline.update(project=registered["project"], registration_id=registered["job_id"])
     application_intent(baseline, resource)
     value = application_value(identity, 1, baseline)
     binding = checksum(value)
@@ -187,6 +204,10 @@ def registrations(db, auth, token, resource):
     AuthService.require(db, actor, "vps:apps", resource)
     if not db.execute("SELECT 1 FROM resources WHERE id=?", (resource,)).fetchone():
         raise Denied("RESOURCE_NOT_FOUND", 404)
+    return {"items": registered_applications(db, resource)}
+
+
+def registered_applications(db, resource):
     rows = db.execute("""
         WITH completed AS (
             SELECT json_extract(d.baseline, '$.installation_id') AS installation_id,
@@ -208,7 +229,7 @@ def registrations(db, auth, token, resource):
         SELECT installation_id, project, spec_digest, job_id FROM completed
         WHERE newest=1 AND action='adopt' ORDER BY project, installation_id
         """, (REQUESTED, resource)).fetchall()
-    return {"items": [dict(row) for row in rows]}
+    return [dict(row) for row in rows]
 
 
 def timeline(db, queue, auth, token, identity):

@@ -99,3 +99,29 @@ test('adoption uses the exact tag and project from the reviewed preview', async 
   await apps.getByRole('button', { name: 'Review operation', exact: true }).click()
   await expect(apps.getByLabel('I confirm the change to the project registration')).toBeVisible()
 })
+
+test('starting an adopted Node uses the selected registration and host network approval', async ({ page }) => {
+  const binding = 'b'.repeat(64)
+  await page.route('**/adopted-applications', route => route.fulfill({ json: {
+    items: [{ installation_id: resource, project: 'fixture-node', spec_digest: binding, job_id: resource }],
+  } }))
+  await page.route('**/application-drafts', async route => {
+    expect(route.request().postDataJSON()).toEqual({
+      installation_id: resource, spec_digest: binding, action: 'start-adopted',
+    })
+    await route.fulfill({
+      status: 201, headers: { etag: '"plan-fixture"' }, json: {
+        id: resource, plan_hash: 'c'.repeat(64), diff: { operation: 'start-adopted', project: 'fixture-node' },
+        risk: 'HOST_NETWORK_AND_APPLICATION_DATA', data_policy: 'PRESERVE_VOLUMES_AND_NETWORKS',
+      },
+    })
+  })
+  await login(page)
+  const apps = page.getByRole('region', { name: 'Applications', exact: true })
+  await apps.getByRole('button', { name: 'Adopted projects', exact: true }).click()
+  await apps.getByRole('listitem').filter({ hasText: 'fixture-node' })
+    .getByRole('button', { name: 'Start adopted Node', exact: true }).click()
+  await apps.getByRole('button', { name: 'Review operation', exact: true }).click()
+  await expect(apps.getByLabel('I confirm this operation and its host network risk')).toBeVisible()
+  await expect(apps.getByRole('button', { name: 'Approve revision', exact: true })).toBeDisabled()
+})
