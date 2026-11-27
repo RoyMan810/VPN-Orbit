@@ -2,6 +2,7 @@
 """Read-only root observation. No command, path or target arguments are accepted."""
 from contextlib import ExitStack
 from datetime import datetime
+import hashlib
 import http.client
 from ipaddress import ip_address
 import json
@@ -21,7 +22,10 @@ from urllib.parse import urlencode
 
 DOCKER_SCOPE = Path("/etc/vpn-orbit/docker-discovery.json")
 COMPOSE_DISCOVERY = Path("/etc/vpn-orbit/compose-discovery.enabled")
+COMPOSE_BASIC_SCOPE = b"enabled\n"
 COMPOSE_RESOURCE_SCOPE = b"enabled-with-resources\n"
+COMPOSE_ADOPTION_SCOPE = b"enabled-with-adoption\n"
+COMPOSE_SCOPES = (COMPOSE_BASIC_SCOPE, COMPOSE_RESOURCE_SCOPE, COMPOSE_ADOPTION_SCOPE)
 APP_LINKS_SCOPE = Path("/etc/vpn-orbit/application-links.txt")
 FIREWALL_SCOPE = Path("/etc/vpn-orbit/firewall-inventory.enabled")
 NGINX_SCOPE = Path("/etc/vpn-orbit/nginx-inventory.files")
@@ -40,6 +44,7 @@ DOCKER_STATES = {"created", "restarting", "running", "removing", "paused", "exit
 DOCKER_ID = r"[0-9a-f]{64}"
 COMPOSE_PROJECT = r"[a-z0-9][a-z0-9_-]{0,62}"
 COMPOSE_SERVICE = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}"
+IMAGE_DIGEST_REF = r"([a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*)@sha256:(" + DOCKER_ID + r")"
 
 
 def unique_object(pairs):
@@ -339,10 +344,87 @@ def compose_attachments(row):
     return {"networks": attachment_names(networks) if isinstance(networks, dict) else None, "volumes": volumes}
 
 
+def docker_listing(path, endpoint, *, key=None):
+    try:
+        result = docker_get(path, endpoint)
+    except TimeoutError:
+        raise
+    except (OSError, ValueError, RecursionError, http.client.HTTPException):
+        return []
+    if key is not None:
+        result = result.get(key) if isinstance(result, dict) else None
+    if not isinstance(result, list) or any(not isinstance(item, dict) for item in result):
+        return []
+    return result
+
+
+def selected_docker_rows(rows, key, identities):
+    selected, duplicates = {}, set()
+    for row in rows:
+        value = row.get(key)
+        if not isinstance(value, str) or value not in identities:
+            continue
+        if value in selected:
+            duplicates.add(value)
+        selected[value] = row
+    return {value: row for value, row in selected.items() if value not in duplicates}
+
+
+def digest_evidence(refs):
+    if not isinstance(refs, list) or not 1 <= len(refs) <= 4:
+        return []
+    result = set()
+    for ref in refs:
+        match = re.fullmatch(IMAGE_DIGEST_REF, ref) if isinstance(ref, str) and len(ref) <= 232 else None
+        if match is None:
+            return []
+        repository, digest = match.groups()
+        first, slash, path = repository.partition("/")
+        if not slash:
+            repository = "docker.io/library/" + first
+        elif first in ("docker.io", "index.docker.io"):
+            repository = "docker.io/" + (path if "/" in path else "library/" + path)
+        elif "." not in first and first != "localhost":
+            repository = "docker.io/" + repository
+        # Keep private registry names off the wire while allowing exact catalog comparisons.
+        result.add(hashlib.sha256(repository.encode("ascii")).hexdigest() + ":" + digest)
+    return sorted(result)
+
+
+def compose_adoption_evidence(path, rows, network_ids):
+    result = {"images": {}, "networks": {}, "volumes": {}}
+    images = docker_listing(path, "/v1.44/images/json?all=1")
+    for identity, image in selected_docker_rows(images, "Id", {row["image_id"] for row in rows}).items():
+        if refs := digest_evidence(image.get("RepoDigests")):
+            result["images"][identity] = refs
+    for kind, key in (("networks", None), ("volumes", "Volumes")):
+        names = {name for row in rows for name in row[kind] or ()}
+        if kind == "networks":
+            names -= {"bridge", "host", "none"}
+        if not names:
+            continue
+        records = docker_listing(path, "/v1.44/" + kind, key=key)
+        for name, record in selected_docker_rows(records, "Name", names).items():
+            if kind == "networks":
+                identity = record.get("Id")
+                if not isinstance(identity, str) or network_ids.get(name) != {identity}:
+                    continue
+            labels = record.get("Labels")
+            if isinstance(labels, dict):
+                project = labels.get("com.docker.compose.project")
+                if isinstance(project, str) and re.fullmatch(COMPOSE_PROJECT, project):
+                    result[kind][name] = project
+                elif "com.docker.compose.project" not in labels:
+                    result[kind][name] = None
+            elif "Labels" in record and labels is None:
+                result[kind][name] = None
+    return result
+
+
 def observe_compose(switch=COMPOSE_DISCOVERY, socket_path=DOCKER_SOCKET):
     try:
-        scope = read_root_config(switch, len(COMPOSE_RESOURCE_SCOPE))
-        if scope not in (b"enabled\n", COMPOSE_RESOURCE_SCOPE):
+        scope = read_root_config(switch, max(map(len, COMPOSE_SCOPES)))
+        if scope not in COMPOSE_SCOPES:
             raise ValueError("invalid Compose discovery setting")
     except FileNotFoundError:
         return {"status": "NOT_CONFIGURED", "containers": []}
@@ -360,7 +442,7 @@ def observe_compose(switch=COMPOSE_DISCOVERY, socket_path=DOCKER_SOCKET):
             raise ValueError("invalid Compose inventory")
         if len(values) > MAX_COMPOSE_CONTAINERS:
             return {"status": "LIMIT_EXCEEDED", "containers": []}
-        rows = {}
+        rows, network_ids = {}, {}
         for row in values:
             labels = row.get("Labels") if isinstance(row, dict) else None
             if not isinstance(labels, dict):
@@ -376,10 +458,24 @@ def observe_compose(switch=COMPOSE_DISCOVERY, socket_path=DOCKER_SOCKET):
                     or not isinstance(state, str) or state not in DOCKER_STATES):
                 raise ValueError("invalid or duplicate Compose container")
             item["state"] = state.upper()
-            if scope == COMPOSE_RESOURCE_SCOPE:
+            if scope != COMPOSE_BASIC_SCOPE:
                 item.update(compose_attachments(row))
+            if scope == COMPOSE_ADOPTION_SCOPE:
+                for name in item["networks"] or ():
+                    details = row["NetworkSettings"]["Networks"][name]
+                    identity = details.get("NetworkID") if isinstance(details, dict) else None
+                    valid = isinstance(identity, str) and re.fullmatch(DOCKER_ID, identity)
+                    network_ids.setdefault(name, set()).add(identity if valid else None)
             rows[item["id"]] = item
-        return {"status": "OBSERVED", "containers": sorted(rows.values(), key=lambda row: (row["project"], row["service"], row["id"]))}
+        containers = sorted(rows.values(), key=lambda row: (row["project"], row["service"], row["id"]))
+        result = {"status": "OBSERVED", "containers": containers}
+        if containers and scope == COMPOSE_ADOPTION_SCOPE:
+            try:
+                result["adoption_evidence"] = compose_adoption_evidence(socket_path, containers, network_ids)
+            except TimeoutError:
+                # Keep the base inventory when the shared Docker deadline expires.
+                pass
+        return result
     except (OSError, ValueError, RecursionError, http.client.HTTPException):
         return {"status": "UNAVAILABLE", "containers": []}
 
@@ -600,6 +696,9 @@ def observe_app_links(path=APP_LINKS_SCOPE):
 
 def probe_reply(value):
     output = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    if len(output) + 1 > MAX_PROBE_REPLY and "adoption_evidence" in value["compose"]:
+        del value["compose"]["adoption_evidence"]
+        output = json.dumps(value, sort_keys=True, separators=(",", ":"))
     if len(output) + 1 > MAX_PROBE_REPLY and value["app_links"]["status"] == "DECLARED":
         value["app_links"] = {"status": "LIMIT_EXCEEDED", "links": []}
         output = json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -625,13 +724,13 @@ def probe_reply(value):
 def main():
     if os.geteuid() != 0 or len(sys.argv) != 1:
         return 65
-    request = b'{"operation":"probe","version":14}\n'
+    request = b'{"operation":"probe","version":15}\n'
     signal.alarm(5)
     payload = sys.stdin.buffer.read(len(request) + 1)
     signal.alarm(0)
     if payload != request:
         return 65
-    value = {"v": 14, "uid": 0, "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+    value = {"v": 15, "uid": 0, "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
              "observed_at": int(time.time()),
              "software": {"docker": tool_status("/usr/bin/docker"), "nginx": tool_status("/usr/sbin/nginx"),
                           "nginx_service": nginx_service_state()}}

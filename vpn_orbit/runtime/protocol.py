@@ -10,7 +10,7 @@ from ..errors import Denied
 
 
 MAX_FRAME = 16384
-PROBE_VERSION = 14
+PROBE_VERSION = 15
 PROBE_COMMAND = f"vpn-orbit.v{PROBE_VERSION}.probe"
 PROBE_REQUEST = b'{"operation":"probe","version":%d}\n' % PROBE_VERSION
 MAX_PROBE_REPLY = 15360
@@ -19,6 +19,7 @@ ULID = r"[0-7][0-9A-HJKMNP-TV-Z]{25}"
 SHA256 = r"[0-9a-f]{64}"
 DNS_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 COMPOSE_PROJECT = r"[a-z0-9][a-z0-9_-]{0,62}"
+DOCKER_RESOURCE = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
 BOOT_ID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
 DOCKER_STARTED_AT = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z"
 
@@ -188,7 +189,8 @@ def _validate_published_ports(ports, state):
 
 
 def compose_summary(value):
-    fields(value, ("status", "containers"))
+    has_evidence = isinstance(value, dict) and "adoption_evidence" in value
+    fields(value, ("status", "containers", "adoption_evidence") if has_evidence else ("status", "containers"))
     status, rows = value["status"], value["containers"]
     if (status not in ("OBSERVED", "NOT_CONFIGURED", "POLICY_INVALID", "UNAVAILABLE", "LIMIT_EXCEEDED")
             or not isinstance(rows, list) or len(rows) > 12 or rows and status != "OBSERVED"):
@@ -208,7 +210,7 @@ def compose_summary(value):
                 if not isinstance(items, list) or len(items) > 8:
                     raise Denied("PROBE_COMPOSE_INVALID")
                 for name in items:
-                    text(name, r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", "PROBE_COMPOSE_INVALID")
+                    text(name, DOCKER_RESOURCE, "PROBE_COMPOSE_INVALID")
                 if items != sorted(set(items)):
                     raise Denied("PROBE_COMPOSE_INVALID")
         identity = text(row["id"], SHA256)
@@ -218,7 +220,33 @@ def compose_summary(value):
         if identity in seen or row["state"] not in ("CREATED", "RESTARTING", "RUNNING", "REMOVING", "PAUSED", "EXITED", "DEAD"):
             raise Denied("PROBE_COMPOSE_INVALID")
         seen.add(identity)
+    if has_evidence:
+        if not rows or not include:
+            raise Denied("PROBE_COMPOSE_INVALID")
+        compose_evidence(value["adoption_evidence"], rows)
     return value
+
+
+def compose_evidence(evidence, rows):
+    fields(evidence, ("images", "networks", "volumes"))
+    images = evidence["images"]
+    if not isinstance(images, dict) or not images.keys() <= {row["image_id"] for row in rows}:
+        raise Denied("PROBE_COMPOSE_INVALID")
+    for refs in images.values():
+        if not isinstance(refs, list) or not 1 <= len(refs) <= 4:
+            raise Denied("PROBE_COMPOSE_INVALID")
+        for ref in refs:
+            text(ref, SHA256 + ":" + SHA256, "PROBE_COMPOSE_INVALID")
+        if refs != sorted(set(refs)):
+            raise Denied("PROBE_COMPOSE_INVALID")
+    for kind in ("networks", "volumes"):
+        labels = evidence[kind]
+        names = {name for row in rows for name in row[kind] or ()}
+        if not isinstance(labels, dict) or not labels.keys() <= names:
+            raise Denied("PROBE_COMPOSE_INVALID")
+        for project in labels.values():
+            if project is not None:
+                text(project, COMPOSE_PROJECT, "PROBE_COMPOSE_INVALID")
 
 
 def docker_summary(value):

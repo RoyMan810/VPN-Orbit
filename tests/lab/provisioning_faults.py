@@ -25,6 +25,7 @@ from vpn_orbit.errors import Denied
 from vpn_orbit.runtime import vps_preparation as preparation
 from vpn_orbit.runtime.ipc import Peer
 from vpn_orbit.runtime.policy import Policy, Target
+from vpn_orbit.runtime.protocol import PROBE_COMMAND, PROBE_REQUEST, PROBE_VERSION
 from vpn_orbit.runtime.ssh_enrollment import verify_credentials
 from vpn_orbit.runtime.ssh_preparation import PreparationSSH
 
@@ -160,8 +161,8 @@ def probe(directory, key, fingerprint):
         ["ssh", "-F", "/dev/null", "-p", str(PORT), "-i", str(directory / "output" / "probe"),
          "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes",
          "-o", "GlobalKnownHostsFile=/dev/null", "-o", f"UserKnownHostsFile={known}",
-         f"{SERVICE}@{ADDRESS}", "vpn-orbit.v14.probe"],
-        input='{"operation":"probe","version":14}\n', capture_output=True, text=True)
+         f"{SERVICE}@{ADDRESS}", PROBE_COMMAND],
+        input=PROBE_REQUEST.decode("ascii"), capture_output=True, text=True)
 
 
 def state(directory):
@@ -469,7 +470,7 @@ def main():
         expect(state(directory)["status"] == "VERIFIED", "Retry must verify the postcondition")
         result = probe(directory, key, fingerprint)
         observation = json.loads(result.stdout) if result.returncode == 0 else {}
-        expect(observation.get("v") == 14 and observation.get("uid") == 0
+        expect(observation.get("v") == PROBE_VERSION and observation.get("uid") == 0
                and observation.get("compose") == {"status": "NOT_CONFIGURED", "containers": []},
                "A fresh SSH connection must observe uid 0 and opt-in Compose disabled", result)
         expect(observation["software"]["nginx_service"] in {"ACTIVE", "INACTIVE", "FAILED", "TRANSITIONING", "NOT_FOUND"},

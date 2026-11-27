@@ -48,7 +48,8 @@ def main():
         return identity
 
     try:
-        network = docker("network", "create", prefix + "-network")
+        network = docker("network", "create", "--label", "com.docker.compose.project=" + prefix,
+                         prefix + "-network")
         volume = docker("volume", "create", prefix + "-data")
         running = create(prefix, "web", "--network", prefix + "-network", "--network-alias", "alias-canary",
                          "--publish", "127.0.0.1::8080/tcp", "--expose", "8081/tcp")
@@ -105,6 +106,15 @@ def main():
             assert by_id[foreign]["volumes"] == by_id[mounted]["volumes"] == [volume], attachments
             assert by_id[stopped]["volumes"] == [], attachments
             assert all(value not in json.dumps(attachments) for value in ("label-canary", "mount-canary", "alias-canary"))
+            switch.write_bytes(b"enabled-with-adoption\n")
+            adoption = discover(switch, protected_socket)
+            refs = json.loads(docker("image", "inspect", "--format", "{{json .RepoDigests}}", args.image))
+            fingerprints = helper["digest_evidence"](refs)
+            assert fingerprints, refs
+            assert adoption["adoption_evidence"] == {
+                "images": {image: fingerprints}, "networks": {prefix + "-network": prefix}, "volumes": {volume: None},
+            }, adoption
+            assert "label-canary" not in json.dumps(adoption)
             assert docker("inspect", "--format", "{{.Id}} {{.State.Status}} {{.State.StartedAt}}", *ids) == before
             mounted_scope = {"id": mounted, "project": prefix, "service": "mounted"}
             registry.write_text(json.dumps({"v": 1, "containers": [*scope, mounted_scope]}))

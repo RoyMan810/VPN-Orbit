@@ -21,7 +21,7 @@ vpn-orbit-app-archive = "vpn_orbit.app_archive:main"
 include = ["vpn_orbit*"]
 
 [tool.setuptools.package-data]
-vpn_orbit = ["release-manifest.json"]
+vpn_orbit = ["release-manifest.json", "application-images.json"]
 "vpn_orbit.runtime" = ["vps-platform.sh", "vps-readiness.sh", "vps_helpers/*"]
 
 [tool.ruff]

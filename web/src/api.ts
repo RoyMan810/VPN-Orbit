@@ -55,8 +55,18 @@ export interface ComposeAdoptionPreview {
   observed_at: number
   boot_id: string
   containers: ComposeObservation['containers']
+  compatibility: {
+    status: 'PROFILE_MATCH' | 'MISMATCH' | 'UNVERIFIED'
+    profiles: string[]
+    services: {
+      container_id: string
+      role: string | null
+      status: 'PIN_MATCH' | 'PIN_NOT_VERIFIED' | 'UNKNOWN' | 'AMBIGUOUS' | 'OTHER_IMAGE'
+    }[]
+  }
   attachments: Record<'networks' | 'volumes', {
     coverage: 'PARTIAL' | 'OBSERVED_COMPOSE_ONLY'
+    claims: { name: string; project: string | null; status: 'PROJECT_LABEL' | 'OTHER_PROJECT_LABEL' | 'UNLABELED' | 'UNKNOWN' }[]
     shared: { name: string; other_projects: string[] }[]
   }>
 }

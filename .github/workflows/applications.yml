@@ -8,7 +8,7 @@ on:
       - vpn_orbit/worker.py
       - vpn_orbit/runtime/**
       - remote/apps-gateway
-      - deploy/application-images.json
+      - vpn_orbit/application-images.json
       - tests/runtime/test_app*.py
       - tests/lab/application_*.py
       - .github/workflows/applications.yml

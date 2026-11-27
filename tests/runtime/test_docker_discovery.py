@@ -1,3 +1,4 @@
+import hashlib
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -68,7 +69,7 @@ class DockerPayloadTests(unittest.TestCase):
                  "docker": scoped, "app_links": {"status": "NOT_CONFIGURED", "links": []}, "firewall": {"status": "NOT_CONFIGURED", "chains": []}, "nginx": {"status": "NOT_CONFIGURED", "names": [], "partial": False}, "local_https": {"status": "NOT_CONFIGURED", "sites": []}, "compose": {"status": "OBSERVED", "containers": [row]}}
         self.assertEqual(parse_probe(canonical(value), now=1000)["compose"], value["compose"])
         with self.assertRaises(Denied):
-            parse_probe(canonical({**value, "v": 13}), now=1000)
+            parse_probe(canonical({**value, "v": PROBE_VERSION - 1}), now=1000)
         for rows in ([{**base, "networks": []}], [row, {**base, "id": FOREIGN}],
                      [{**row, "volumes": ["/host/private"]}], [{**row, "volumes": ["x" * 65]}],
                      [{**row, "volumes": ["data", "data"]}], [{**row, "volumes": ["web", "data"]}],
@@ -76,6 +77,20 @@ class DockerPayloadTests(unittest.TestCase):
                      [{**row, "networks": {"frontend": "192.0.2.1"}}]):
             with self.subTest(rows=rows), self.assertRaises(Denied):
                 compose_summary({"status": "OBSERVED", "containers": rows})
+
+    def test_adoption_evidence_is_bounded_and_belongs_to_observed_resources(self):
+        image = "sha256:" + FOREIGN
+        row = {**ROW, "image_id": image, "networks": ["backend"], "volumes": ["data"]}
+        fingerprint = "c" * 64 + ":" + "d" * 64
+        evidence = {"images": {image: [fingerprint]}, "networks": {"backend": "fixture"}, "volumes": {"data": None}}
+        compose = {"status": "OBSERVED", "containers": [row], "adoption_evidence": evidence}
+        self.assertEqual(compose_summary(compose), compose)
+        for invalid in ({"images": {"sha256:" + TARGET: [fingerprint]}},
+                        {"images": {image: ["remnawave/node@sha256:" + FOREIGN]}},
+                        {"images": {image: [fingerprint] * 5}},
+                        {"networks": {"alien": "fixture"}}, {"volumes": {"data": "/host/project"}}):
+            with self.subTest(invalid=invalid), self.assertRaises(Denied):
+                compose_summary({**compose, "adoption_evidence": {**evidence, **invalid}})
 
     def test_largest_supported_compose_and_scoped_inventory_fit_the_frame(self):
         row = {"project": "p" * 63, "service": "s" * 63, "state": "RESTARTING"}
@@ -103,6 +118,10 @@ class DockerPayloadTests(unittest.TestCase):
         names = [f"{i:064x}" for i in range(8)]
         for item in compose:
             item.update(networks=names, volumes=names)
+        value["compose"]["adoption_evidence"] = {
+            "images": {"sha256:" + FOREIGN: [FOREIGN + ":" + TARGET]},
+            "networks": {}, "volumes": {},
+        }
         compose[0]["volumes"] = []
         self.assertGreater(len(canonical(value)), MAX_PROBE_REPLY)
         wire = HELPER["probe_reply"](value).encode() + b"\n"
@@ -113,6 +132,7 @@ class DockerPayloadTests(unittest.TestCase):
         self.assertEqual(result["compose"]["containers"][0]["volumes"], [])
         self.assertIsNone(result["compose"]["containers"][1]["volumes"])
         self.assertIsNone(result["compose"]["containers"][1]["networks"])
+        self.assertNotIn("adoption_evidence", result["compose"])
         self.assertLessEqual(len(canonical(result)) + 1024, MAX_FRAME)
         self.assertEqual(result["local_https"], value["local_https"])
 
@@ -234,6 +254,8 @@ class DockerTransportTests(unittest.TestCase):
                     value = fixture.peers
                 elif self.path == f"/v1.44/containers/{TARGET}/json":
                     value = fixture.inspect
+                elif self.path in getattr(fixture, "listings", {}):
+                    value = fixture.listings[self.path]
                 else:
                     value = fixture.response
                 if value is None:
@@ -302,13 +324,61 @@ class DockerTransportTests(unittest.TestCase):
                 (b"enabled-with-resources\n", {**base, "networks": ["bridge"], "volumes": ["named-data"]}),
             ):
                 self.requests.clear()
-                with patch.dict(observe.__globals__, {"read_root_config": lambda *_: switch}):
+
+                def read_switch(_path, limit):
+                    if len(switch) > limit:
+                        raise ValueError("Docker configuration too large")
+                    return switch
+
+                with patch.dict(observe.__globals__, {"read_root_config": read_switch}):
                     self.assertEqual(observe(), {"status": "OBSERVED", "containers": [expected]})
                 self.assertEqual(len(self.requests), 1)
             row.update(NetworkSettings={"Networks": {}}, Mounts=[{"Type": "volume"}])
             with patch.dict(observe.__globals__, {"read_root_config": lambda *_: b"enabled-with-resources\n"}):
                 result = observe()["containers"][0]
                 self.assertEqual(result, {**base, "networks": [], "volumes": None})
+
+    def test_adoption_scope_collects_only_matching_image_digests_and_resource_labels(self):
+        image = "sha256:" + FOREIGN
+        row = self.response[0]
+        row.update(ImageID=image, NetworkSettings={"Networks": {
+            "backend": {"NetworkID": TARGET}, "drifted": {"NetworkID": TARGET},
+        }}, Mounts=[{"Type": "volume", "Name": "data"}])
+        self.listings = {
+            "/v1.44/images/json?all=1": [
+                {"Id": image, "RepoDigests": ["remnawave/node@sha256:" + FOREIGN], "RepoTags": ["tag-canary"]},
+                {"Id": "sha256:" + TARGET, "RepoDigests": ["private.site/repo@sha256:" + TARGET]},
+            ],
+            "/v1.44/networks": [
+                {"Name": "backend", "Id": TARGET, "Labels": {"com.docker.compose.project": "fixture", "env": "label-canary"}},
+                {"Name": "drifted", "Id": FOREIGN, "Labels": {"com.docker.compose.project": "fixture"}},
+            ],
+            "/v1.44/volumes": {"Volumes": [{"Name": "data", "Labels": None, "Mountpoint": "/volume-canary"}]},
+        }
+        observe = HELPER["observe_compose"]
+        with patch.dict(observe.__globals__, {"require_docker_socket": lambda _: None,
+                                             "read_root_config": lambda *_: b"enabled-with-adoption\n"}):
+            result = compose_summary(observe())
+            digest = hashlib.sha256(b"docker.io/remnawave/node").hexdigest()
+            self.assertEqual(result["adoption_evidence"], {
+                "images": {image: [digest + ":" + FOREIGN]}, "networks": {"backend": "fixture"},
+                "volumes": {"data": None},
+            })
+            self.assertEqual(self.requests[1:], list(self.listings))
+            self.assertNotIn("canary", json.dumps(result))
+            self.listings["/v1.44/networks"].append(self.listings["/v1.44/networks"][0])
+            self.assertEqual(observe()["adoption_evidence"]["networks"], {})
+            get = observe.__globals__["docker_get"]
+
+            def timeout(path, endpoint):
+                if endpoint == "/v1.44/images/json?all=1":
+                    raise TimeoutError
+                return get(path, endpoint)
+
+            with patch.dict(observe.__globals__, {"docker_get": timeout}):
+                unavailable = observe()
+            self.assertEqual(unavailable["containers"], result["containers"])
+            self.assertNotIn("adoption_evidence", unavailable)
 
     def test_reads_only_approved_ids_and_projects_fixed_fields(self):
         self.assertEqual(self.observe(), [ROW])

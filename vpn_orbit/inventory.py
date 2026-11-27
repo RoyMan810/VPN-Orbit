@@ -5,6 +5,7 @@ import json
 import re
 import time
 
+from .adoption import assess_profiles, resource_claims
 from .auth import AuthService, Role, etag
 from .errors import Denied
 from .queue import JobQueue
@@ -170,6 +171,7 @@ class Inventory:
         if not containers:
             raise Denied('COMPOSE_PROJECT_NOT_FOUND', 404)
 
+        evidence = compose.get('adoption_evidence', {})
         attachments = {}
         for kind in ('networks', 'volumes'):
             members = defaultdict(set)
@@ -180,6 +182,8 @@ class Inventory:
                     members[name].add(row['project'])
             attachments[kind] = {
                 'coverage': 'PARTIAL' if any(row.get(kind) is None for row in rows) else 'OBSERVED_COMPOSE_ONLY',
+                'claims': resource_claims(project, {name for name, projects in members.items() if project in projects},
+                                          evidence.get(kind, {})),
                 'shared': [
                     {'name': name, 'other_projects': sorted(projects - {project})}
                     for name, projects in sorted(members.items()) if project in projects and len(projects) > 1
@@ -197,6 +201,7 @@ class Inventory:
             'boot_id': sample['boot_id'],
             'snapshot_digest': checksum(sample),
             'containers': containers,
+            'compatibility': assess_profiles(containers, evidence.get('images', {})),
             'attachments': attachments,
         }
         return {**preview, 'preview_digest': checksum(preview)}
