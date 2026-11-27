@@ -620,6 +620,8 @@ test('previews an observed Compose project on demand and clears the preview when
   await expect(preview.getByText('Local image ID', { exact: false })).toHaveCount(2)
   await expect(preview.getByText('Profile compatibility is unverified.')).toBeVisible()
   await expect(preview.getByText('Bind mount details unavailable', { exact: true })).toHaveCount(2)
+  await expect(preview.getByText('Compose source files are unverified.')).toBeVisible()
+  await expect(preview.getByText('Declared dependencies are unavailable.', { exact: true })).toHaveCount(2)
   await expect(preview.getByText('Partial data', { exact: true })).toHaveCount(2)
   const tag = reply.headers()['etag']
   expect(tag).toBeTruthy()

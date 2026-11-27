@@ -33,14 +33,19 @@ def main():
     ids = []
     network = volume = None
     config_hash = uuid4().hex * 2
+    source_dir = tempfile.TemporaryDirectory(prefix="vpn-orbit-compose-", dir="/var/lib")
+    source = Path(source_dir.name) / "compose.yaml"
 
     def docker(*values):
         return subprocess.check_output(["docker", "--host", host, *values], text=True, timeout=45).strip()
 
     def create(project, service, *network_args):
+        dependency = "missing:service_started:false,worker:service_healthy:false" if service == "web" else ""
         compose_labels = ("--label", "com.docker.compose.project=" + project,
                           "--label", "com.docker.compose.service=" + service,
-                          "--label", "com.docker.compose.config-hash=" + config_hash) if project is not None else ()
+                          "--label", "com.docker.compose.config-hash=" + config_hash,
+                          "--label", "com.docker.compose.project.config_files=" + str(source),
+                          "--label", "com.docker.compose.depends_on=" + dependency) if project is not None else ()
         identity = docker("create", *network_args, "--read-only", "--cap-drop", "ALL",
                           "--security-opt", "no-new-privileges=true", "--user", "65534:65534",
                           *compose_labels,
@@ -51,6 +56,7 @@ def main():
         return identity
 
     try:
+        source.write_text("source-content-canary\n")
         network = docker("network", "create", "--label", "com.docker.compose.project=" + prefix,
                          prefix + "-network")
         volume = docker("volume", "create", prefix + "-data")
@@ -112,7 +118,10 @@ def main():
             assert by_id[stopped]["volumes"] == [], attachments
             assert all(value not in json.dumps(attachments) for value in ("label-canary", "mount-canary", "alias-canary"))
             switch.write_bytes(b"enabled-with-adoption\n")
-            adoption = discover(switch, protected_socket)
+            sources = Path(directory) / "compose-sources.json"
+            sources.write_text(json.dumps({prefix: [str(source)]}))
+            sources.chmod(0o600)
+            adoption = discover(switch, protected_socket, sources=sources)
             refs = json.loads(docker("image", "inspect", "--format", "{{json .RepoDigests}}", args.image))
             fingerprints = helper["digest_evidence"](refs)
             assert fingerprints, refs
@@ -123,8 +132,21 @@ def main():
                     identity: {"service_config": "LABEL_PRESENT", "bind_mounts": "READ_ONLY" if identity == mounted else "NONE"}
                     for identity in set(ids) - {outside}
                 },
+                "definition": {
+                    "sources": {prefix: "CONFIRMED", prefix + "-foreign": "NOT_CONFIGURED"},
+                    "dependencies": {
+                        running: [{"service": "missing", "status": "NOT_OBSERVED"},
+                                  {"service": "worker", "status": "NETWORK_UNVERIFIED"}],
+                        stopped: [], mounted: [], foreign: [],
+                    },
+                },
             }, adoption
-            assert all(value not in json.dumps(adoption) for value in ("label-canary", outside, config_hash, "/bind-canary"))
+            assert all(value not in json.dumps(adoption) for value in
+                       ("label-canary", outside, config_hash, "/bind-canary", str(source), "source-content-canary"))
+            original = source.rename(source.with_suffix(".bak"))
+            source.symlink_to(original)
+            source_check = discover(switch, protected_socket, sources=sources)
+            assert source_check["adoption_evidence"]["definition"]["sources"][prefix] == "UNVERIFIED", source_check
             assert docker("inspect", "--format", "{{.Id}} {{.State.Status}} {{.State.StartedAt}}", *ids) == before
             mounted_scope = {"id": mounted, "project": prefix, "service": "mounted"}
             registry.write_text(json.dumps({"v": 1, "containers": [*scope, mounted_scope]}))
@@ -163,6 +185,7 @@ def main():
             assert observe(registry, protected_socket) == {"status": "NOT_CONFIGURED", "containers": []}
         print("Pinned Docker returned scoped containers and opt-in Compose inventory without changing any container.")
     finally:
+        source_dir.cleanup()
         if ids:
             docker("rm", "-f", *ids)
         if volume:

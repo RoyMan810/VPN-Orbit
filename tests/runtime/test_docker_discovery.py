@@ -84,7 +84,9 @@ class DockerPayloadTests(unittest.TestCase):
         fingerprint = "c" * 64 + ":" + "d" * 64
         evidence = {"images": {image: [fingerprint]}, "networks": {"backend": "fixture"}, "volumes": {"data": None},
                     "usage": {"networks": {"backend": "COMPOSE_ONLY"}, "volumes": {"data": "OUTSIDE_COMPOSE"}},
-                    "configuration": {TARGET: {"service_config": "LABEL_PRESENT", "bind_mounts": "READ_ONLY"}}}
+                    "configuration": {TARGET: {"service_config": "LABEL_PRESENT", "bind_mounts": "READ_ONLY"}},
+                    "definition": {"sources": {"fixture": "CONFIRMED"},
+                                   "dependencies": {TARGET: [{"service": "db", "status": "NOT_OBSERVED"}]}}}
         compose = {"status": "OBSERVED", "containers": [row], "adoption_evidence": evidence}
         self.assertEqual(compose_summary(compose), compose)
         for invalid in ({"images": {"sha256:" + TARGET: [fingerprint]}},
@@ -94,7 +96,11 @@ class DockerPayloadTests(unittest.TestCase):
                         {"usage": {"volumes": {}, "networks": {"backend": "UNKNOWN"}}},
                         {"usage": {"volumes": {"unobserved": "COMPOSE_ONLY"}, "networks": {}}},
                         {"configuration": {FOREIGN: evidence["configuration"][TARGET]}},
-                        {"configuration": {TARGET: {"service_config": "LABEL_PRESENT", "bind_mounts": "/host"}}}):
+                        {"configuration": {TARGET: {"service_config": "LABEL_PRESENT", "bind_mounts": "/host"}}},
+                        {"definition": {"sources": {"fixture": "/private/compose.yaml"},
+                                        "dependencies": {TARGET: []}}},
+                        {"definition": {"sources": {"fixture": "CONFIRMED"},
+                                        "dependencies": {TARGET: [{"service": "db", "status": "SHARED_NETWORK"}]}}}):
             with self.subTest(invalid=invalid), self.assertRaises(Denied):
                 compose_summary({**compose, "adoption_evidence": {**evidence, **invalid}})
 
@@ -372,6 +378,7 @@ class DockerTransportTests(unittest.TestCase):
                 "images": {image: [digest + ":" + FOREIGN]}, "networks": {"backend": "fixture"},
                 "volumes": {"data": None}, "usage": {"networks": {}, "volumes": {}},
                 "configuration": {TARGET: {"service_config": "LABEL_PRESENT", "bind_mounts": "READ_ONLY"}},
+                "definition": {"sources": {"fixture": "POLICY_INVALID"}, "dependencies": {TARGET: None}},
             })
             self.assertEqual(self.requests[1:], list(self.listings))
             self.assertNotIn("canary", json.dumps(result))
@@ -412,6 +419,57 @@ class DockerTransportTests(unittest.TestCase):
             FOREIGN: {"service_config": "DIVERGENT", "bind_mounts": "WRITABLE"},
             "e" * 64: {"service_config": "LABEL_PRESENT", "bind_mounts": "READ_ONLY"},
             "f" * 64: {"service_config": "UNKNOWN", "bind_mounts": "UNKNOWN"},
+        })
+
+    def test_source_check_compares_every_label_with_the_protected_ordered_policy_first(self):
+        verify = HELPER["compose_sources"]
+        files = ["/opt/fixture/compose.yaml", "/opt/fixture/override.yaml"]
+        row = {"Labels": {"com.docker.compose.project": "fixture",
+                          "com.docker.compose.project.config_files": ",".join(files)}}
+        checked = []
+        policy = {"fixture": files}
+        def read(_path, limit):
+            return canonical(policy)
+
+        def inspect(path):
+            checked.append(path)
+            return True
+
+        with patch.dict(verify.__globals__, {"read_root_config": read, "protected_compose_source": inspect}):
+            self.assertEqual(verify([row, row], Path("/unused")), {"fixture": "CONFIRMED"})
+            self.assertEqual(checked, files)
+            checked.clear()
+            for label, status in (
+                ("/unapproved/compose.yaml", "LABEL_MISMATCH"),
+                (",".join(reversed(files)), "LABEL_MISMATCH"),
+                ("/opt//fixture/compose.yaml", "UNVERIFIED"),
+                (None, "UNVERIFIED"),
+            ):
+                with self.subTest(label=label):
+                    changed = {"Labels": {**row["Labels"], "com.docker.compose.project.config_files": label}}
+                    self.assertEqual(verify([row, changed], Path("/unused")), {"fixture": status})
+                    self.assertEqual(checked, [])
+            policy["fixture"] = ["/opt/../compose.yaml"]
+            self.assertEqual(verify([row], Path("/unused")), {"fixture": "POLICY_INVALID"})
+
+    def test_declared_dependencies_correlate_in_project_using_network_ids(self):
+        def row(identity, project, service, depends, network):
+            return {"Id": identity, "Labels": {
+                "com.docker.compose.project": project, "com.docker.compose.service": service,
+                "com.docker.compose.depends_on": depends,
+            }, "NetworkSettings": {"Networks": {"backend": {"NetworkID": network}}}}
+
+        links = HELPER["compose_dependencies"]([
+            row(TARGET, "main", "web",
+                "redis:service_started:false,db:service_healthy:true,other:service_started:false", TARGET),
+            row(FOREIGN, "main", "db", "", TARGET),
+            row("c" * 64, "main", "redis", None, FOREIGN),
+            row("d" * 64, "foreign", "other", "other:service_started:false", TARGET),
+        ])
+        self.assertEqual(links, {
+            TARGET: [{"service": "db", "status": "SHARED_NETWORK"}, {"service": "other", "status": "NOT_OBSERVED"},
+                     {"service": "redis", "status": "NETWORK_UNVERIFIED"}],
+            FOREIGN: [], "c" * 64: None, "d" * 64: None,
         })
 
     def test_attachment_usage_is_bounded_checks_network_identity_and_includes_non_compose_consumers(self):

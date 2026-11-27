@@ -121,6 +121,8 @@ class InventoryTests(Fixture):
         self.assertEqual(preview["containers"], [target])
         self.assertEqual(preview["compatibility"]["status"], "UNVERIFIED")
         self.assertEqual(preview["configuration"], {target["id"]: {"service_config": "UNKNOWN", "bind_mounts": "UNKNOWN"}})
+        self.assertEqual(preview["source"], "UNVERIFIED")
+        self.assertEqual(preview["dependencies"], {target["id"]: None})
         self.assertEqual(preview["attachments"], {
             "networks": {
                 "coverage": "OBSERVED_COMPOSE_ONLY",
@@ -199,7 +201,8 @@ class InventoryTests(Fixture):
         evidence = {"images": {node["image_id"]: [pins["remnawave-node"]]},
                     "networks": {"unlabeled": None}, "volumes": {"local": "fixture", "shared": "foreign"},
                     "usage": {"networks": {}, "volumes": {"local": "COMPOSE_ONLY", "shared": "OUTSIDE_COMPOSE"}},
-                    "configuration": {CONTAINER: {"service_config": "LABEL_PRESENT", "bind_mounts": "WRITABLE"}}}
+                    "configuration": {CONTAINER: {"service_config": "LABEL_PRESENT", "bind_mounts": "WRITABLE"}},
+                    "definition": {"sources": {"fixture": "CONFIRMED"}, "dependencies": {CONTAINER: []}}}
         compose = {"status": "OBSERVED", "containers": [node], "adoption_evidence": evidence}
         self.complete(compose=compose)
         path = f"/api/v1/resources/{SCOPE}/compose/projects/fixture/adoption-preview"
@@ -210,6 +213,8 @@ class InventoryTests(Fixture):
             ],
         })
         self.assertEqual(preview["configuration"], evidence["configuration"])
+        self.assertEqual(preview["source"], "CONFIRMED")
+        self.assertEqual(preview["dependencies"], {CONTAINER: []})
         self.assertEqual(preview["attachments"]["networks"]["claims"], [
             {"name": "unlabeled", "project": None, "status": "UNLABELED", "usage": "UNKNOWN"},
         ])
