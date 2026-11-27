@@ -556,7 +556,7 @@ def main():
         if any(name.startswith("tests/") for name in archive.namelist()):
             raise RuntimeError("Controller wheel contains repository test or lab code")
         helpers = {"ssh-gateway", "typed-helper", "firewall-gateway", "firewall-apply", "firewall-rollback"}
-        expected = {"vpn_orbit/runtime/vps_preparation.py", *(f"vpn_orbit/runtime/vps_helpers/{name}" for name in helpers)}
+        expected = {"vpn_orbit/runtime/vps_preparation.py", "vpn_orbit/runtime/nginx_inventory.py", *(f"vpn_orbit/runtime/vps_helpers/{name}" for name in helpers)}
         if not expected <= set(archive.namelist()):
             raise RuntimeError("Controller wheel is missing VPS preparation resources")
 

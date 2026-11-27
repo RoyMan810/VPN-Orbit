@@ -49,9 +49,11 @@ def fixture(directory):
             queue.advance(claim, state)
         result = {"status": "REACHABLE", "source": "restricted_helper", "observed_at": int(time.time()) - age,
                   "boot_id": "11111111-1111-1111-1111-111111111111"}
+        result["nginx"] = {"status": "NOT_CONFIGURED", "names": [], "partial": False}
         result["local_https"] = {"status": "NOT_CONFIGURED", "sites": []}
         result["compose"] = {"status": "NOT_CONFIGURED", "containers": []}
         if index == 0:
+            result["nginx"] = {"status": "OBSERVED", "names": ["panel.example.test", "www.example.test"], "partial": True}
             result["local_https"] = {"status": "OBSERVED", "sites": [
                 {"name": "cabinet.example.test", "state": "VERIFIED", "expires_at": int(time.time()) + 86400},
                 {"name": "panel.example.test", "state": "CERTIFICATE_INVALID", "expires_at": None},
@@ -113,6 +115,7 @@ def fixture(directory):
                       "boot_id": "11111111-1111-1111-1111-111111111111"}
             result["software"] = {"docker": "PRESENT", "nginx": "NOT_DETECTED", "nginx_service": "NOT_FOUND"}
             result["docker"] = {"status": "NOT_CONFIGURED", "containers": []}
+            result["nginx"] = {"status": "NOT_CONFIGURED", "names": [], "partial": False}
             result["local_https"] = {"status": "NOT_CONFIGURED", "sites": []}
             result["compose"] = {"status": "NOT_CONFIGURED", "containers": []}
             if restart:

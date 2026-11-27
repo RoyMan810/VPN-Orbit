@@ -160,8 +160,8 @@ def probe(directory, key, fingerprint):
         ["ssh", "-F", "/dev/null", "-p", str(PORT), "-i", str(directory / "output" / "probe"),
          "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes",
          "-o", "GlobalKnownHostsFile=/dev/null", "-o", f"UserKnownHostsFile={known}",
-         f"{SERVICE}@{ADDRESS}", "vpn-orbit.v12.probe"],
-        input='{"operation":"probe","version":12}\n', capture_output=True, text=True)
+         f"{SERVICE}@{ADDRESS}", "vpn-orbit.v13.probe"],
+        input='{"operation":"probe","version":13}\n', capture_output=True, text=True)
 
 
 def state(directory):
@@ -469,13 +469,15 @@ def main():
         expect(state(directory)["status"] == "VERIFIED", "Retry must verify the postcondition")
         result = probe(directory, key, fingerprint)
         observation = json.loads(result.stdout) if result.returncode == 0 else {}
-        expect(observation.get("v") == 12 and observation.get("uid") == 0
+        expect(observation.get("v") == 13 and observation.get("uid") == 0
                and observation.get("compose") == {"status": "NOT_CONFIGURED", "containers": []},
                "A fresh SSH connection must observe uid 0 and opt-in Compose disabled", result)
         expect(observation["software"]["nginx_service"] in {"ACTIVE", "INACTIVE", "FAILED", "TRANSITIONING", "NOT_FOUND"},
                "The restricted SSH helper must observe the host systemd unit", result)
         expect(observation.get("local_https") == {"status": "NOT_CONFIGURED", "sites": []},
                "A default target must leave local TLS observation disabled", result)
+        expect(observation.get("nginx") == {"status": "NOT_CONFIGURED", "names": [], "partial": False},
+               "A default target must leave configuration scanning disabled", result)
         removed = provision(directory, key, fingerprint, cleanup=True)
         expect(removed.returncode == 0, "Cleanup after success must succeed", removed)
         expect(subprocess.run(["getent", "passwd", SERVICE], capture_output=True).returncode != 0,

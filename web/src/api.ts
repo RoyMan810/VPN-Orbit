@@ -75,6 +75,11 @@ export interface Observation {
     docker: DockerObservation
     compose: ComposeObservation
     local_https: LocalHttpsObservation
+    nginx: {
+      status: 'OBSERVED' | 'NOT_CONFIGURED' | 'POLICY_INVALID' | 'UNAVAILABLE' | 'LIMIT_EXCEEDED'
+      names: string[]
+      partial: boolean
+    }
   } | null
 }
 export interface Resource {
