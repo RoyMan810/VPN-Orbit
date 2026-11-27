@@ -12,6 +12,7 @@ import time
 import traceback
 
 from vpn_orbit.app_adoption import ExternalLifecycle
+from vpn_orbit.app_helper import dispatch
 from vpn_orbit.app_lifecycle import Docker, Lifecycle, ROOT
 from vpn_orbit.app_profiles import digest, render
 from vpn_orbit.errors import Denied
@@ -29,7 +30,9 @@ def adoption_acceptance(spec):
         source = Path(directory) / "compose.json"
         document = render(spec, "a" * 64)
         document["name"] = project
-        document["services"]["remnawave-node"].pop("labels")
+        node = document["services"]["remnawave-node"]
+        node.pop("labels")
+        node["restart"] = "no"
         source.write_text(json.dumps(document))
         args = ("compose", "--project-name", project, "--file", str(source))
         docker(*args, "up", "-d", "--pull", "never", "--no-build")
@@ -47,7 +50,7 @@ def adoption_acceptance(spec):
             baseline = probe.inspect("container", container)
             hashes = dict(row.split() for row in docker(*args, "config", "--hash=*").splitlines())
             layout = {"version": 1, "id": external_id, "project": project, "compose_files": [str(source)],
-                      "extra_files": [], "service_hashes": hashes}
+                      "extra_files": [], "service_hashes": hashes, "allow_start": True}
             original = source.rename(source.with_suffix(".original"))
             source.symlink_to(original)
             try:
@@ -71,6 +74,24 @@ def adoption_acceptance(spec):
             assert probe.stable(after) == probe.stable(baseline)
             assert probe.healthy({"containers": {"node": {"Id": container}}})
             print("PASS external Node registration, read-back and detachment without container changes.")
+
+            binding = staged["spec_digest"]
+            registration = IDENTITY[:-1] + "V"
+            app.execute(registration, "adopt", binding, review)
+            for operation in (IDENTITY[:-1] + "W", IDENTITY[:-1] + "X"):
+                docker("container", "stop", container, timeout=45)
+                payload = {"action": "start-adopted", "operation_id": operation, "installation_id": external_id,
+                           "spec_digest": binding, "registration_id": registration}
+                result = dispatch({"operation": "execute", "application": payload})
+                assert result["code"] == "APP_ADOPTED_START_VERIFIED", result
+                current = probe.inspect("container", container)
+                assert current["State"]["StartedAt"] != after["State"]["StartedAt"]
+                assert probe.stable(current) == probe.stable(after)
+                assert probe.healthy({"containers": {"node": {"Id": container}}})
+                assert dispatch({"operation": "reconcile", "application": payload}) == result
+                after = current
+            assert app.execute(IDENTITY[:-1] + "Y", "detach", binding)["code"] == "APP_ADOPTION_DETACHED"
+            print("PASS two explicit starts of the exact adopted Node, verified health and read-back.")
         finally:
             docker(*args, "down")
 

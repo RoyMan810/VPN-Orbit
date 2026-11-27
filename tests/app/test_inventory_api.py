@@ -237,7 +237,7 @@ class InventoryTests(Fixture):
         self.assertEqual(response.status_code, 202, response.text)
         return response.json()["id"]
 
-    def finish_registered_application(self, job, code, *, preview=None):
+    def finish_registered_application(self, job, code, *, preview=None, registration=None):
         claim, row = self.queue.claim(identifier())
         self.assertEqual(row["id"], job)
         class Gate:
@@ -249,6 +249,7 @@ class InventoryTests(Fixture):
             self.assertEqual(intent["application"]["review"], preview.json()["daemon_digest"])
         else:
             self.assertNotIn("review", intent["application"])
+        self.assertEqual(intent["application"].get("registration_id"), registration)
         self.queue.advance(claim, "INTENT_PREPARED", permit={"claims": intent}, binding=intent, validate=validate)
         for state in ("DISPATCHING", "EXECUTING", "VERIFYING"):
             self.queue.advance(claim, state)
@@ -258,6 +259,7 @@ class InventoryTests(Fixture):
         _, preview = self.adoption_fixture()
         listing = f"/api/v1/resources/{SCOPE}/adopted-applications"
         self.assertEqual(self.client.get(listing).json(), {"items": []})
+        self.assertEqual(self.adoption_draft(None, action="start-adopted").json()["code"], "APP_ADOPTION_STATE_INVALID")
         draft = self.adoption_draft(preview)
         self.assertEqual(draft.status_code, 201, draft.text)
         self.assertEqual(draft.json()["diff"]["observation_id"], preview.json()["observation_id"])
@@ -266,10 +268,24 @@ class InventoryTests(Fixture):
         self.assertEqual(self.client.get(listing).json(), {"items": [
             {"installation_id": OTHER, "project": "fixture", "job_id": job, "spec_digest": "b" * 64},
         ]})
+        start = self.adoption_draft(None, action="start-adopted")
+        self.assertEqual(start.status_code, 201, start.text)
+        self.assertEqual(start.json()["diff"], {"operation": "start-adopted", "installation_id": OTHER,
+                                                "project": "fixture", "registration_id": job})
+        start_job = self.request_application(start, self.confirm_application(start))
+        self.finish_registered_application(start_job, "APP_ADOPTED_START_VERIFIED", registration=job)
+        stale = self.adoption_draft(None, action="start-adopted")
+        self.assertEqual(self.client.get(listing).json()["items"][0]["job_id"], job)
         detach = self.adoption_draft(None, action="detach")
         operation = self.request_application(detach, self.confirm_application(detach))
         self.finish_registered_application(operation, "APP_ADOPTION_DETACHED")
         self.assertEqual(self.client.get(listing).json(), {"items": []})
+        self.now += 901  # The previous approvals used this reauthentication window.
+        _, preview = self.adoption_fixture()
+        readopt = self.adoption_draft(preview)
+        new_registration = self.request_application(readopt, self.confirm_application(readopt))
+        self.finish_registered_application(new_registration, "APP_ADOPTION_REGISTERED", preview=preview)
+        self.assertEqual(self.confirm_application(stale).json()["code"], "APP_ADOPTION_STATE_INVALID")
         self.store.verify_audit()
 
     def test_adoption_requires_ready_evidence_and_rechecks_at_approval_and_dispatch(self):

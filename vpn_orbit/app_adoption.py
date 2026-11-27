@@ -1,6 +1,7 @@
-"""Protected metadata registration for an existing Docker Compose project."""
+"""Protected lifecycle operations for an existing Docker Compose project."""
 
 from contextlib import ExitStack
+from datetime import datetime
 from hashlib import sha256
 from importlib.resources import files
 import json
@@ -10,16 +11,20 @@ import re
 import secrets
 import stat
 import tempfile
+import time
 from urllib.parse import urlsplit
 
 from .adoption import daemon_identity
 from .app_lifecycle import Lifecycle, ROOT, SCHEMA, atomic_write, private_directory, refuse
 from .app_profiles import CABINET_CONFIG, canonical, digest, panel_origin
-from .runtime.protocol import COMPOSE_PROJECT, COMPOSE_SERVICE, DOCKER_RESOURCE, SHA256, ULID
+from .errors import Denied
+from .runtime.protocol import COMPOSE_PROJECT, COMPOSE_SERVICE, DOCKER_RESOURCE, DOCKER_STARTED_AT, SHA256, ULID
 from .runtime.storage import Journal, directory_sync, process_lock, protected_bytes
 
 
-EXTERNAL_ACTIONS = {"adopt": "APP_ADOPTION_REGISTERED", "detach": "APP_ADOPTION_DETACHED"}
+START = "start-adopted"
+EXTERNAL_ACTIONS = {"adopt": "APP_ADOPTION_REGISTERED", "detach": "APP_ADOPTION_DETACHED",
+                    START: "APP_ADOPTED_START_VERIFIED"}
 BUILTIN_NETWORKS = {"bridge", "host", "none"}
 LAYOUT_FIELDS = {"version", "id", "project", "compose_files", "extra_files", "service_hashes"}
 
@@ -65,7 +70,8 @@ def source_digest(path):
 
 
 def validate_layout(layout):
-    if (not isinstance(layout, dict) or layout.keys() != LAYOUT_FIELDS or type(layout["version"]) is not int
+    if (not isinstance(layout, dict) or not LAYOUT_FIELDS <= layout.keys() <= (LAYOUT_FIELDS | {"allow_start"})
+            or type(layout.get("allow_start", False)) is not bool or type(layout["version"]) is not int
             or layout["version"] != 1 or not isinstance(layout["id"], str) or not re.fullmatch(ULID, layout["id"])
             or not isinstance(layout["project"], str) or not re.fullmatch(COMPOSE_PROJECT, layout["project"])
             or layout["project"].startswith("vo-app-")
@@ -223,6 +229,38 @@ def attached_networks(container):
     return networks
 
 
+def timestamp(value):
+    if not isinstance(value, str) or not re.fullmatch(DOCKER_STARTED_AT, value):
+        refuse("APP_ADOPTED_START_UNVERIFIED")
+    seconds, _, fraction = value[:-1].partition(".")
+    try:
+        return datetime.fromisoformat(seconds), fraction.ljust(9, "0")
+    except ValueError:
+        refuse("APP_ADOPTED_START_UNVERIFIED")
+
+
+def node_runtime(container, attached, *, stopped):
+    host, state = container["HostConfig"], container["State"]
+    host_network = attached.get("host", {}).get("NetworkID") or None
+    if (host.get("NetworkMode") != "host" or set(attached) - {"host"}
+            or ((not stopped or host_network is not None) and
+                (not isinstance(host_network, str) or not re.fullmatch(SHA256, host_network)))
+            or host.get("ReadonlyRootfs") is not True or host.get("AutoRemove") or host.get("Privileged")
+            or (host.get("RestartPolicy") or {}).get("Name") not in ("", "no", None)
+            or any(host.get(key) for key in ("Devices", "DeviceRequests", "DeviceCgroupRules", "VolumesFrom",
+                                             "PidMode", "UTSMode"))
+            or host.get("IpcMode") not in (None, "", "private")
+            or any(mount.get("Type") == "volume" for mount in container["Mounts"])):
+        refuse("APP_ADOPTED_START_UNSUPPORTED")
+    if state.get("Running") is not (not stopped) or any(state.get(key) for key in ("Paused", "Restarting", "Dead")):
+        refuse("APP_ADOPTED_START_UNVERIFIED")
+    timestamp(state.get("StartedAt"))
+    restarts = container.get("RestartCount")
+    if type(restarts) is not int or restarts < 0:
+        refuse("APP_ADOPTED_START_UNVERIFIED")
+    return {"restart_count": restarts, "host_network": host_network}
+
+
 class ExternalLifecycle(Lifecycle):
     @classmethod
     def stage(cls, layout, *, root=ROOT, docker=None, owner=0):
@@ -271,7 +309,11 @@ class ExternalLifecycle(Lifecycle):
             refuse("APP_ADOPTION_SCOPE_UNVERIFIED")
         return set(ids)
 
-    def capture(self, layout):
+    def capture(self, layout, *, stopped=False, expected=None):
+        node_start_enabled = layout.get("allow_start", False)
+        if stopped and not node_start_enabled:
+            refuse("APP_ADOPTED_START_UNSUPPORTED")
+        running_state = "exited" if stopped else "running"
         project = layout["project"]
         ids = self.list_ids("label=com.docker.compose.project=" + project)
         if not 1 <= len(ids) <= 12:
@@ -292,9 +334,11 @@ class ExternalLifecycle(Lifecycle):
                     or labels.get("com.docker.compose.project.config_files") != ",".join(layout["compose_files"])
                     or service not in layout["service_hashes"]
                     or labels.get("com.docker.compose.config-hash") != layout["service_hashes"][service]
-                    or state != "running" or not isinstance(container["Image"], str)
+                    or not isinstance(container["Image"], str)
                     or re.fullmatch("sha256:" + SHA256, container["Image"]) is None):
                 refuse("APP_OWNERSHIP_UNVERIFIED")
+            if state != running_state:
+                refuse("APP_ADOPTED_NOT_STOPPED" if stopped else "APP_OWNERSHIP_UNVERIFIED")
             attached = attached_networks(container)
             attached_volumes = set()
             for mount in container["Mounts"]:
@@ -322,7 +366,9 @@ class ExternalLifecycle(Lifecycle):
             for name in attached_volumes:
                 volumes.setdefault(name, set()).add(identity)
             containers[service] = container
-            stable[service] = {**self.stable(container), "started_at": container["State"].get("StartedAt"),
+            pinned = expected["containers"].get(service, {}) if expected else {}
+            stable[service] = {**self.stable(container, expected=pinned.get("configuration")),
+                               "started_at": container["State"].get("StartedAt"),
                                "network_bindings": digest(attached)}
             observations.append({"id": identity, "service": service, "image_id": container["Image"],
                                  "state": state.upper(), "networks": sorted(attached), "volumes": sorted(attached_volumes)})
@@ -348,7 +394,13 @@ class ExternalLifecycle(Lifecycle):
                 refuse("APP_VOLUME_SHARED")
             records["volumes"][name] = digest(volume)
         roles = image_roles(self, containers)
+        if node_start_enabled and list(roles.values()) != ["remnawave-node"]:
+            refuse("APP_ADOPTED_START_UNSUPPORTED")
         for service, container in containers.items():
+            if node_start_enabled:
+                stable[service].update(node_runtime(container, attached_networks(container), stopped=stopped))
+            if stopped:
+                continue
             health = container["State"].get("Health")
             if (health is not None or roles[service] == "remnawave-node") and (
                     not isinstance(health, dict) or health.get("Status") != "healthy"):
@@ -375,10 +427,24 @@ class ExternalLifecycle(Lifecycle):
             row = db.execute("SELECT * FROM installation WHERE id=1").fetchone()
             if row is None or row["spec_digest"] != digest(definition):
                 refuse("APP_ADOPTION_DRIFT")
+            pending = db.execute("SELECT id FROM operations WHERE state IN ('DISPATCHING','UNKNOWN_OUTCOME')").fetchone()
             state = "ADOPTED" if row["inventory"] is not None else "STAGED"
-            return {"state": state, "project": definition["layout"]["project"], "spec_digest": row["spec_digest"]}
+            result = {"state": state, "project": definition["layout"]["project"], "spec_digest": row["spec_digest"]}
+            if pending:
+                result.update(state="UNKNOWN_OUTCOME", operations=[pending["id"]])
+            return result
 
-    def execute(self, operation, action, binding, review=None):
+    @staticmethod
+    def operation_binding(action, binding, registration_id):
+        if action == START:
+            if not isinstance(registration_id, str) or not re.fullmatch(ULID, registration_id):
+                refuse("APP_ADOPTION_STATE_INVALID")
+            return digest({"spec_digest": binding, "registration_id": registration_id})
+        if registration_id is not None:
+            refuse("APP_ACTION_INVALID")
+        return binding
+
+    def execute(self, operation, action, binding, review=None, *, registration_id=None):
         if action not in EXTERNAL_ACTIONS:
             refuse("APP_ACTION_INVALID")
         if not isinstance(operation, str) or not re.fullmatch(ULID, operation):
@@ -388,21 +454,28 @@ class ExternalLifecycle(Lifecycle):
             baseline = definition["baseline"]
             if digest(definition) != binding or (action == "adopt" and review != baseline["identity"]):
                 refuse("APP_ADOPTION_DRIFT")
-            if action == "detach" and review is not None:
+            if action != "adopt" and review is not None:
                 refuse("APP_ACTION_INVALID")
+            receipt_binding = self.operation_binding(action, binding, registration_id)
             with self.journal.connect() as db:
                 old = db.execute("SELECT * FROM operations WHERE id=?", (operation,)).fetchone()
+                pending = db.execute("SELECT 1 FROM operations WHERE state IN ('DISPATCHING','UNKNOWN_OUTCOME')").fetchone()
+                installation = db.execute("SELECT * FROM installation WHERE id=1").fetchone()
+            if installation is None or installation["spec_digest"] != binding:
+                refuse("APP_ADOPTION_DRIFT")
             if old is not None:
-                return self.receipt(old, action, binding)
+                return self.receipt(old, action, receipt_binding)
+            if pending:
+                refuse("APP_RECONCILIATION_REQUIRED")
+            if action == START:
+                return self.start_adopted(operation, receipt_binding, definition["layout"],
+                                          installation["inventory"], registration_id)
             if action == "adopt":
                 self.require_unique_registration(definition["layout"]["project"])
                 if self.capture(definition["layout"]) != baseline:
                     refuse("APP_ADOPTION_DRIFT")
             with self.journal.write() as db:
-                row = db.execute("SELECT * FROM installation WHERE id=1").fetchone()
-                if row is None or row["spec_digest"] != binding:
-                    refuse("APP_ADOPTION_DRIFT")
-                if (row["inventory"] is not None) == (action == "adopt"):
+                if (installation["inventory"] is not None) == (action == "adopt"):
                     refuse("APP_ADOPTION_STATE_INVALID")
                 inventory = canonical(baseline).decode() if action == "adopt" else None
                 db.execute("UPDATE installation SET inventory=? WHERE id=1", (inventory,))
@@ -410,17 +483,93 @@ class ExternalLifecycle(Lifecycle):
                            (operation, action, binding, EXTERNAL_ACTIONS[action]))
             return {"operation_id": operation, "outcome": "SUCCEEDED", "code": EXTERNAL_ACTIONS[action]}
 
+    def verify_node(self, layout, inventory, *, stopped):
+        current = self.capture(layout, stopped=stopped, expected=inventory)
+        service, old = next(iter(inventory["containers"].items()))
+        node = current["containers"].get(service, {})
+        stable_fields = {"Id", "configuration", "restart_count"}
+        unchanged = all(current[key] == inventory[key] for key in
+                        ("sources", "roles", "dependencies", "networks", "volumes"))
+        if not unchanged or any(node.get(key) != old[key] for key in stable_fields):
+            refuse("APP_ADOPTION_DRIFT")
+        previous, observed = timestamp(old["started_at"]), timestamp(node["started_at"])
+        if stopped:
+            if observed != previous or node["host_network"] not in (None, old["host_network"]):
+                refuse("APP_ADOPTION_DRIFT")
+        elif observed <= previous or node["host_network"] != old["host_network"]:
+            refuse("APP_ADOPTED_START_UNVERIFIED")
+        return current
+
+    def start_adopted(self, operation, binding, layout, inventory, registration_id):
+        if not layout.get("allow_start"):
+            refuse("APP_ADOPTED_START_UNSUPPORTED")
+        if inventory is None:
+            refuse("APP_ADOPTION_STATE_INVALID")
+        with self.journal.connect() as db:
+            registration = db.execute("""SELECT id FROM operations WHERE action='adopt' AND state='SUCCEEDED'
+                                         ORDER BY rowid DESC LIMIT 1""").fetchone()
+        if registration is None or registration["id"] != registration_id:
+            refuse("APP_ADOPTION_STATE_INVALID")
+        inventory = json.loads(inventory)
+        self.verify_node(layout, inventory, stopped=True)
+        node = next(iter(inventory["containers"].values()))
+        # The registration holds the exact ID and previous StartedAt. Leave that
+        # snapshot in place while dispatch is pending, including after a lost reply.
+        with self.journal.write() as db:
+            db.execute("INSERT INTO operations(id,action,binding,state,code) VALUES(?,?,?,'DISPATCHING','APP_PENDING')",
+                       (operation, START, binding))
+        try:
+            self.docker("container", "start", node["Id"], timeout=45)
+            deadline = time.monotonic() + 90
+            while True:
+                value = self.inspect("container", node["Id"])
+                state = value["State"]
+                if value["Id"] != node["Id"] or state["Status"] != "running":
+                    refuse("APP_ADOPTED_START_UNVERIFIED")
+                if (state.get("Health") or {}).get("Status") == "healthy":
+                    break
+                if time.monotonic() >= deadline:
+                    refuse("APP_HEALTH_UNVERIFIED")
+                time.sleep(1)
+            current = self.verify_node(layout, inventory, stopped=False)
+        except Exception:
+            return self.finish(operation, "UNKNOWN_OUTCOME", "APP_ADOPTED_START_UNVERIFIED")
+        return self.record_started(operation, current)
+
+    def record_started(self, operation, inventory):
+        code = EXTERNAL_ACTIONS[START]
+        with self.journal.write() as db:
+            db.execute("UPDATE installation SET inventory=? WHERE id=1", (canonical(inventory).decode(),))
+            db.execute("UPDATE operations SET state='SUCCEEDED',code=? WHERE id=?", (code, operation))
+        return {"operation_id": operation, "outcome": "SUCCEEDED", "code": code}
+
     @staticmethod
     def receipt(row, action, binding):
-        if (row is None or row["action"] != action or row["binding"] != binding or row["state"] != "SUCCEEDED"
-                or row["code"] != EXTERNAL_ACTIONS.get(action)):
+        if row is None or row["action"] != action or row["binding"] != binding:
             refuse("APP_ADOPTION_RECEIPT_UNVERIFIED")
-        return {"operation_id": row["id"], "outcome": row["state"], "code": row["code"]}
+        if row["state"] == "SUCCEEDED" and row["code"] == EXTERNAL_ACTIONS.get(action):
+            return {"operation_id": row["id"], "outcome": "SUCCEEDED", "code": row["code"]}
+        if action == START and row["state"] in ("DISPATCHING", "UNKNOWN_OUTCOME"):
+            return {"operation_id": row["id"], "outcome": "UNKNOWN_OUTCOME", "code": "APP_ADOPTED_START_UNVERIFIED"}
+        refuse("APP_ADOPTION_RECEIPT_UNVERIFIED")
 
-    def reconcile(self, operation, *, action, binding, review=None):
-        with self.locked(), self.journal.connect() as db:
+    def reconcile(self, operation, *, action, binding, review=None, registration_id=None):
+        with self.locked():
             definition = self.definition()
             if digest(definition) != binding or (action == "adopt" and review != definition["baseline"]["identity"]):
                 refuse("APP_ADOPTION_DRIFT")
-            saved = db.execute("SELECT * FROM operations WHERE id=?", (operation,)).fetchone()
-            return self.receipt(saved, action, binding)
+            if action != "adopt" and review is not None:
+                refuse("APP_ACTION_INVALID")
+            with self.journal.connect() as db:
+                saved = db.execute("SELECT * FROM operations WHERE id=?", (operation,)).fetchone()
+                installation = db.execute("SELECT * FROM installation WHERE id=1").fetchone()
+            result = self.receipt(saved, action, self.operation_binding(action, binding, registration_id))
+            if action != START or result["outcome"] == "SUCCEEDED":
+                return result
+            if installation is None or installation["spec_digest"] != binding or installation["inventory"] is None:
+                refuse("APP_ADOPTION_DRIFT")
+            try:
+                current = self.verify_node(definition["layout"], json.loads(installation["inventory"]), stopped=False)
+            except Denied:
+                return result
+            return self.record_started(operation, current)
