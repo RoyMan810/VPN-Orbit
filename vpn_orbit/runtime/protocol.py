@@ -10,7 +10,7 @@ from ..errors import Denied
 
 
 MAX_FRAME = 16384
-PROBE_VERSION = 15
+PROBE_VERSION = 16
 PROBE_COMMAND = f"vpn-orbit.v{PROBE_VERSION}.probe"
 PROBE_REQUEST = b'{"operation":"probe","version":%d}\n' % PROBE_VERSION
 MAX_PROBE_REPLY = 15360
@@ -228,7 +228,10 @@ def compose_summary(value):
 
 
 def compose_evidence(evidence, rows):
-    fields(evidence, ("images", "networks", "volumes"))
+    has_usage = isinstance(evidence, dict) and "usage" in evidence
+    fields(evidence, ("images", "networks", "volumes", "usage") if has_usage else ("images", "networks", "volumes"))
+    if has_usage:
+        fields(evidence["usage"], ("networks", "volumes"))
     images = evidence["images"]
     if not isinstance(images, dict) or not images.keys() <= {row["image_id"] for row in rows}:
         raise Denied("PROBE_COMPOSE_INVALID")
@@ -247,6 +250,11 @@ def compose_evidence(evidence, rows):
         for project in labels.values():
             if project is not None:
                 text(project, COMPOSE_PROJECT, "PROBE_COMPOSE_INVALID")
+        if has_usage:
+            observed = evidence["usage"][kind]
+            if (not isinstance(observed, dict) or not observed.keys() <= names
+                    or any(status not in ("COMPOSE_ONLY", "OUTSIDE_COMPOSE") for status in observed.values())):
+                raise Denied("PROBE_COMPOSE_INVALID")
 
 
 def docker_summary(value):

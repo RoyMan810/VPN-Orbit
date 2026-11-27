@@ -58,8 +58,9 @@ export function AdoptionPreview({ project, resource, sample, expired, t }: Adopt
         const { coverage, claims, shared } = result.attachments[kind]
         return <section key={kind}>
           <h6>{kind === 'networks' ? t.composeNetworks : t.composeVolumes}</h6>
-          {claims.length > 0 && <ul>{claims.map(({ name, status, project }) => <li key={name}>
+          {claims.length > 0 && <ul>{claims.map(({ name, status, project, usage }) => <li key={name}>
             <code>{name}</code> · {t.adoptionClaimStatus[status]}{project && <> · <code>{project}</code></>}
+            <div>{t.adoptionUsageStatus[usage]}</div>
           </li>)}</ul>}
           {shared.length > 0 && <ul>{shared.map(({ name, other_projects }) =>
             <li key={name}><code>{name}</code> · {t.adoptionSharedWith} <code>{other_projects.join(', ')}</code></li>,

@@ -182,8 +182,8 @@ class Inventory:
                     members[name].add(row['project'])
             attachments[kind] = {
                 'coverage': 'PARTIAL' if any(row.get(kind) is None for row in rows) else 'OBSERVED_COMPOSE_ONLY',
-                'claims': resource_claims(project, {name for name, projects in members.items() if project in projects},
-                                          evidence.get(kind, {})),
+                'claims': resource_claims(project, members, evidence.get(kind, {}),
+                                          evidence.get('usage', {}).get(kind, {})),
                 'shared': [
                     {'name': name, 'other_projects': sorted(projects - {project})}
                     for name, projects in sorted(members.items()) if project in projects and len(projects) > 1

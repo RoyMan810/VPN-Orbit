@@ -66,7 +66,12 @@ export interface ComposeAdoptionPreview {
   }
   attachments: Record<'networks' | 'volumes', {
     coverage: 'PARTIAL' | 'OBSERVED_COMPOSE_ONLY'
-    claims: { name: string; project: string | null; status: 'PROJECT_LABEL' | 'OTHER_PROJECT_LABEL' | 'UNLABELED' | 'UNKNOWN' }[]
+    claims: {
+      name: string
+      project: string | null
+      status: 'PROJECT_LABEL' | 'OTHER_PROJECT_LABEL' | 'UNLABELED' | 'UNKNOWN'
+      usage: 'PROJECT_ONLY' | 'OTHER_PROJECTS' | 'OUTSIDE_COMPOSE' | 'UNKNOWN'
+    }[]
     shared: { name: string; other_projects: string[] }[]
   }>
 }

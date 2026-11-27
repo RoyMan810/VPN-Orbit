@@ -60,9 +60,11 @@ def assess_profiles(containers, observed_images):
     return {"status": status, "profiles": profiles, "services": services}
 
 
-def resource_claims(project, names, labels):
+def resource_claims(project, members, labels, usage):
     claims = []
-    for name in sorted(names):
+    for name, projects in sorted(members.items()):
+        if project not in projects:
+            continue
         claimant = labels.get(name)
         if name not in labels:
             status = "UNKNOWN"
@@ -70,5 +72,8 @@ def resource_claims(project, names, labels):
             status = "UNLABELED"
         else:
             status = "PROJECT_LABEL" if claimant == project else "OTHER_PROJECT_LABEL"
-        claims.append({"name": name, "status": status, "project": claimant})
+        consumer_status = usage.get(name, "UNKNOWN")
+        if consumer_status == "COMPOSE_ONLY":
+            consumer_status = "PROJECT_ONLY" if len(projects) == 1 else "OTHER_PROJECTS"
+        claims.append({"name": name, "status": status, "project": claimant, "usage": consumer_status})
     return claims

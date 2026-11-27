@@ -33,12 +33,14 @@ LOCAL_HTTPS_SCOPE = Path("/etc/vpn-orbit/local-https.names")
 DOCKER_SOCKET = Path("/run/docker.sock")
 MAX_CONTAINERS = 8
 MAX_COMPOSE_CONTAINERS = 12
+MAX_ATTACHMENT_CONSUMERS = 32
 MAX_PUBLISHED_PORTS = 8
 MAX_DOCKER_REPLY = 256 * 1024
 MAX_PROBE_REPLY = 15360
 MAX_ATTACHMENT_NAMES = 8
 NFT_CHAIN_NAME = r"[A-Za-z0-9_.-]{1,64}"
 DNS_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+BUILTIN_NETWORKS = {"bridge", "host", "none"}
 DOCKER_RESOURCE = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
 DOCKER_STATES = {"created", "restarting", "running", "removing", "paused", "exited", "dead"}
 DOCKER_ID = r"[0-9a-f]{64}"
@@ -391,6 +393,72 @@ def digest_evidence(refs):
     return sorted(result)
 
 
+def network_identity(details):
+    identity = details.get("NetworkID") if isinstance(details, dict) else None
+    return identity if isinstance(identity, str) and re.fullmatch(DOCKER_ID, identity) else None
+
+
+def attachment_usage(path, rows, network_ids):
+    """Compare the Compose snapshot with a bounded list of all Docker consumers."""
+    kinds = ("networks", "volumes")
+    expected = {kind: {} for kind in kinds}
+    complete = {kind: True for kind in kinds}
+    for row in rows:
+        for kind in kinds:
+            names = row[kind]
+            complete[kind] &= names is not None
+            for name in names or ():
+                if kind != "networks" or name not in BUILTIN_NETWORKS:
+                    expected[kind].setdefault(name, set()).add(row["id"])
+
+    result = {kind: {} for kind in kinds}
+    if not any(expected.values()):
+        return result
+    host = docker_listing(path, f"/v1.44/containers/json?all=1&limit={MAX_ATTACHMENT_CONSUMERS + 1}")
+    if not 0 < len(host) <= MAX_ATTACHMENT_CONSUMERS:
+        return result
+
+    compose = {row["id"]: row for row in rows}
+    seen = set()
+    attached = {kind: {} for kind in kinds}
+    confirmed_compose = set()
+    ambiguous_networks = set()
+    for row in host:
+        identity = row.get("Id")
+        if not isinstance(identity, str) or not re.fullmatch(DOCKER_ID, identity) or identity in seen:
+            return result
+        seen.add(identity)
+        if identity in compose and matches_compose(row.get("Labels"), compose[identity]):
+            confirmed_compose.add(identity)
+        config = row.get("HostConfig")
+        mode = config.get("NetworkMode") if isinstance(config, dict) else None
+        if not isinstance(mode, str) or not mode or mode.startswith("container:"):
+            complete["networks"] = False
+        for kind, names in compose_attachments(row).items():
+            complete[kind] &= names is not None
+            for name in names or ():
+                if name not in expected[kind]:
+                    continue
+                if kind == "networks":
+                    network = network_identity(row["NetworkSettings"]["Networks"][name])
+                    if network is None or network_ids.get(name) != {network}:
+                        ambiguous_networks.add(name)
+                        continue
+                attached[kind].setdefault(name, set()).add(identity)
+
+    stable_compose = confirmed_compose == compose.keys()
+    for kind in kinds:
+        for name, consumers in expected[kind].items():
+            if kind == "networks" and name in ambiguous_networks:
+                continue
+            observed = attached[kind].get(name, set())
+            if observed.difference(compose):
+                result[kind][name] = "OUTSIDE_COMPOSE"
+            elif complete[kind] and stable_compose and observed == consumers:
+                result[kind][name] = "COMPOSE_ONLY"
+    return result
+
+
 def compose_adoption_evidence(path, rows, network_ids):
     result = {"images": {}, "networks": {}, "volumes": {}}
     images = docker_listing(path, "/v1.44/images/json?all=1")
@@ -400,7 +468,7 @@ def compose_adoption_evidence(path, rows, network_ids):
     for kind, key in (("networks", None), ("volumes", "Volumes")):
         names = {name for row in rows for name in row[kind] or ()}
         if kind == "networks":
-            names -= {"bridge", "host", "none"}
+            names -= BUILTIN_NETWORKS
         if not names:
             continue
         records = docker_listing(path, "/v1.44/" + kind, key=key)
@@ -463,9 +531,7 @@ def observe_compose(switch=COMPOSE_DISCOVERY, socket_path=DOCKER_SOCKET):
             if scope == COMPOSE_ADOPTION_SCOPE:
                 for name in item["networks"] or ():
                     details = row["NetworkSettings"]["Networks"][name]
-                    identity = details.get("NetworkID") if isinstance(details, dict) else None
-                    valid = isinstance(identity, str) and re.fullmatch(DOCKER_ID, identity)
-                    network_ids.setdefault(name, set()).add(identity if valid else None)
+                    network_ids.setdefault(name, set()).add(network_identity(details))
             rows[item["id"]] = item
         containers = sorted(rows.values(), key=lambda row: (row["project"], row["service"], row["id"]))
         result = {"status": "OBSERVED", "containers": containers}
@@ -474,6 +540,10 @@ def observe_compose(switch=COMPOSE_DISCOVERY, socket_path=DOCKER_SOCKET):
                 result["adoption_evidence"] = compose_adoption_evidence(socket_path, containers, network_ids)
             except TimeoutError:
                 # Keep the base inventory when the shared Docker deadline expires.
+                return result
+            try:
+                result["adoption_evidence"]["usage"] = attachment_usage(socket_path, containers, network_ids)
+            except TimeoutError:
                 pass
         return result
     except (OSError, ValueError, RecursionError, http.client.HTTPException):
@@ -724,13 +794,13 @@ def probe_reply(value):
 def main():
     if os.geteuid() != 0 or len(sys.argv) != 1:
         return 65
-    request = b'{"operation":"probe","version":15}\n'
+    request = b'{"operation":"probe","version":16}\n'
     signal.alarm(5)
     payload = sys.stdin.buffer.read(len(request) + 1)
     signal.alarm(0)
     if payload != request:
         return 65
-    value = {"v": 15, "uid": 0, "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+    value = {"v": 16, "uid": 0, "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
              "observed_at": int(time.time()),
              "software": {"docker": tool_status("/usr/bin/docker"), "nginx": tool_status("/usr/sbin/nginx"),
                           "nginx_service": nginx_service_state()}}

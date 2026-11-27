@@ -82,13 +82,16 @@ class DockerPayloadTests(unittest.TestCase):
         image = "sha256:" + FOREIGN
         row = {**ROW, "image_id": image, "networks": ["backend"], "volumes": ["data"]}
         fingerprint = "c" * 64 + ":" + "d" * 64
-        evidence = {"images": {image: [fingerprint]}, "networks": {"backend": "fixture"}, "volumes": {"data": None}}
+        evidence = {"images": {image: [fingerprint]}, "networks": {"backend": "fixture"}, "volumes": {"data": None},
+                    "usage": {"networks": {"backend": "COMPOSE_ONLY"}, "volumes": {"data": "OUTSIDE_COMPOSE"}}}
         compose = {"status": "OBSERVED", "containers": [row], "adoption_evidence": evidence}
         self.assertEqual(compose_summary(compose), compose)
         for invalid in ({"images": {"sha256:" + TARGET: [fingerprint]}},
                         {"images": {image: ["remnawave/node@sha256:" + FOREIGN]}},
                         {"images": {image: [fingerprint] * 5}},
-                        {"networks": {"alien": "fixture"}}, {"volumes": {"data": "/host/project"}}):
+                        {"networks": {"alien": "fixture"}}, {"volumes": {"data": "/host/project"}},
+                        {"usage": {"volumes": {}, "networks": {"backend": "UNKNOWN"}}},
+                        {"usage": {"volumes": {"unobserved": "COMPOSE_ONLY"}, "networks": {}}}):
             with self.subTest(invalid=invalid), self.assertRaises(Denied):
                 compose_summary({**compose, "adoption_evidence": {**evidence, **invalid}})
 
@@ -354,6 +357,7 @@ class DockerTransportTests(unittest.TestCase):
                 {"Name": "drifted", "Id": FOREIGN, "Labels": {"com.docker.compose.project": "fixture"}},
             ],
             "/v1.44/volumes": {"Volumes": [{"Name": "data", "Labels": None, "Mountpoint": "/volume-canary"}]},
+            "/v1.44/containers/json?all=1&limit=33": None,
         }
         observe = HELPER["observe_compose"]
         with patch.dict(observe.__globals__, {"require_docker_socket": lambda _: None,
@@ -362,7 +366,7 @@ class DockerTransportTests(unittest.TestCase):
             digest = hashlib.sha256(b"docker.io/remnawave/node").hexdigest()
             self.assertEqual(result["adoption_evidence"], {
                 "images": {image: [digest + ":" + FOREIGN]}, "networks": {"backend": "fixture"},
-                "volumes": {"data": None},
+                "volumes": {"data": None}, "usage": {"networks": {}, "volumes": {}},
             })
             self.assertEqual(self.requests[1:], list(self.listings))
             self.assertNotIn("canary", json.dumps(result))
@@ -379,6 +383,41 @@ class DockerTransportTests(unittest.TestCase):
                 unavailable = observe()
             self.assertEqual(unavailable["containers"], result["containers"])
             self.assertNotIn("adoption_evidence", unavailable)
+
+    def test_attachment_usage_is_bounded_checks_network_identity_and_includes_non_compose_consumers(self):
+        consume = HELPER["attachment_usage"]
+        networks = {"backend": {"NetworkID": TARGET}}
+        mount = {"Type": "volume", "Name": "data"}
+        app = {**self.response[0], "HostConfig": {"NetworkMode": "backend"},
+               "NetworkSettings": {"Networks": networks}, "Mounts": [mount]}
+        standalone = {"Id": FOREIGN, "State": "exited", "HostConfig": {"NetworkMode": "none"},
+                      "NetworkSettings": {"Networks": {}}, "Mounts": [mount]}
+        rows = [{**ROW, "networks": ["backend"], "volumes": ["data"]}]
+        no_evidence = {"networks": {}, "volumes": {}}
+        cases = (
+            ([app, standalone], {"networks": {"backend": "COMPOSE_ONLY"}, "volumes": {"data": "OUTSIDE_COMPOSE"}}),
+            ([app], {"networks": {"backend": "COMPOSE_ONLY"}, "volumes": {"data": "COMPOSE_ONLY"}}),
+            ([app, {**standalone, "NetworkSettings": {"Networks": networks}}],
+             {"networks": {"backend": "OUTSIDE_COMPOSE"}, "volumes": {"data": "OUTSIDE_COMPOSE"}}),
+            ([app, {**standalone, "NetworkSettings": {"Networks": {"backend": {"NetworkID": FOREIGN}}}}],
+             {"networks": {}, "volumes": {"data": "OUTSIDE_COMPOSE"}}),
+            ([app, {**standalone, "HostConfig": {"NetworkMode": "container:" + TARGET}, "Mounts": []}],
+             {"networks": {}, "volumes": {"data": "COMPOSE_ONLY"}}),
+            ([app, {**standalone, "Mounts": None}], {"networks": {"backend": "COMPOSE_ONLY"}, "volumes": {}}),
+            ([{**app, "Labels": {}}], no_evidence),
+            ([app, app], no_evidence),
+            ([app, *[{**standalone, "Id": f"{i:064x}", "Mounts": []} for i in range(32)]], no_evidence),
+            (None, no_evidence),
+        )
+        path = "/v1.44/containers/json?all=1&limit=33"
+        for values, expected in cases:
+            with self.subTest(expected=expected):
+                self.listings = {path: values}
+                self.requests.clear()
+                result = consume(Path("/unused.sock"), rows, {"backend": {TARGET}})
+                self.assertEqual(result, expected)
+                self.assertEqual(self.requests, [path])
+                self.assertNotIn(FOREIGN, json.dumps(result))
 
     def test_reads_only_approved_ids_and_projects_fixed_fields(self):
         self.assertEqual(self.observe(), [ROW])
