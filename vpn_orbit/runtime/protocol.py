@@ -176,15 +176,31 @@ def _validate_published_ports(ports, state):
         seen.add((address, host, private, protocol))
 
 
-def compose_summary(value):
+def compose_summary(value, *, allow_attachments=True):
     fields(value, ("status", "containers"))
     status, rows = value["status"], value["containers"]
     if (status not in ("OBSERVED", "NOT_CONFIGURED", "POLICY_INVALID", "UNAVAILABLE", "LIMIT_EXCEEDED")
             or not isinstance(rows, list) or len(rows) > 12 or rows and status != "OBSERVED"):
         raise Denied("PROBE_COMPOSE_INVALID")
     seen = set()
+    attachments = ("networks", "volumes")
+    # Historical rows use the old shape. A new snapshot either carries both
+    # attachment lists on every container or omits them from the entire list.
+    include = allow_attachments and any(isinstance(row, dict) and ("networks" in row or "volumes" in row) for row in rows)
+    names = ("id", "image_id", "project", "service", "state") + (attachments if include else ())
     for row in rows:
-        fields(row, ("id", "image_id", "project", "service", "state"))
+        fields(row, names)
+        if include:
+            for key in attachments:
+                items = row[key]
+                if items is None:
+                    continue
+                if not isinstance(items, list) or len(items) > 8:
+                    raise Denied("PROBE_COMPOSE_INVALID")
+                for name in items:
+                    text(name, r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", "PROBE_COMPOSE_INVALID")
+                if items != sorted(set(items)):
+                    raise Denied("PROBE_COMPOSE_INVALID")
         identity = text(row["id"], SHA256)
         text(row["image_id"], "sha256:" + SHA256)
         text(row["project"], r"[a-z0-9][a-z0-9_-]{0,62}")

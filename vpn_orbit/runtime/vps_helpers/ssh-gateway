@@ -17,6 +17,7 @@ def main():
         "vpn-orbit.v7.probe": b'{"operation":"probe","version":7}\n',
         "vpn-orbit.v8.probe": b'{"operation":"probe","version":8}\n',
         "vpn-orbit.v9.probe": b'{"operation":"probe","version":9}\n',
+        "vpn-orbit.v10.probe": b'{"operation":"probe","version":10}\n',
     }.get(os.environ.get("SSH_ORIGINAL_COMMAND"))
     if len(sys.argv) != 1 or request is None:
         return 65

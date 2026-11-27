@@ -65,6 +65,24 @@ class DockerPayloadTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(Denied):
                 compose_summary(bad)
 
+    def test_v10_requires_typed_complete_attachment_fields(self):
+        base = {**ROW, "image_id": "sha256:" + FOREIGN}
+        row = {**base, "networks": ["backend", "frontend"], "volumes": None}
+        scoped = {"status": "NOT_CONFIGURED", "containers": []}
+        value = {"v": 10, "uid": 0, "boot_id": "12345678-1234-1234-1234-123456789abc",
+                 "observed_at": 1000, "software": {"docker": "PRESENT", "nginx": "NOT_DETECTED"},
+                 "docker": scoped, "compose": {"status": "OBSERVED", "containers": [row]}}
+        self.assertEqual(parse_probe(canonical(value), 10, now=1000)["compose"], value["compose"])
+        with self.assertRaises(Denied):
+            parse_probe(canonical({**value, "v": 9}), 9, now=1000)
+        for rows in ([{**base, "networks": []}], [row, {**base, "id": FOREIGN}],
+                     [{**row, "volumes": ["/host/private"]}], [{**row, "volumes": ["x" * 65]}],
+                     [{**row, "volumes": ["data", "data"]}], [{**row, "volumes": ["web", "data"]}],
+                     [{**row, "volumes": [str(i) for i in range(9)]}],
+                     [{**row, "networks": {"frontend": "192.0.2.1"}}]):
+            with self.subTest(rows=rows), self.assertRaises(Denied):
+                compose_summary({"status": "OBSERVED", "containers": rows})
+
     def test_largest_supported_compose_and_scoped_inventory_fit_the_frame(self):
         row = {"project": "p" * 63, "service": "s" * 63, "state": "RESTARTING"}
         address = "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
@@ -80,6 +98,21 @@ class DockerPayloadTests(unittest.TestCase):
                  "compose": {"status": "OBSERVED", "containers": compose}}
         result = parse_probe(canonical(value), 9, now=1000)
         self.assertLess(len(canonical(value)) + 1, 15360)
+        self.assertLess(len(canonical(result)) + 1024, MAX_FRAME)
+        value["v"] = 10
+        names = [f"{i:064x}" for i in range(8)]
+        for item in compose:
+            item.update(networks=names, volumes=names)
+        compose[0]["volumes"] = []
+        self.assertGreater(len(canonical(value)), 15360)
+        wire = HELPER["probe_reply"](value).encode() + b"\n"
+        self.assertLessEqual(len(wire), 15360)
+        result = parse_probe(wire, 10, now=1000)
+        self.assertEqual(result["docker"], value["docker"])
+        self.assertEqual(len(result["compose"]["containers"]), 12)
+        self.assertEqual(result["compose"]["containers"][0]["volumes"], [])
+        self.assertIsNone(result["compose"]["containers"][1]["volumes"])
+        self.assertIsNone(result["compose"]["containers"][1]["networks"])
         self.assertLess(len(canonical(result)) + 1024, MAX_FRAME)
 
     def test_v3_accepts_only_the_bounded_typed_summary(self):
@@ -242,6 +275,30 @@ class DockerTransportTests(unittest.TestCase):
                 self.assertEqual(observe(), {"status": "OBSERVED", "containers": []})
             with patch.dict(observe.__globals__, {"read_root_config": lambda *_: b"invalid"}):
                 self.assertEqual(observe(), {"status": "POLICY_INVALID", "containers": []})
+
+    def test_compose_attachments_require_extended_scope_and_use_one_read(self):
+        row = self.response[0]
+        row.update(ImageID="sha256:" + FOREIGN,
+                   NetworkSettings={"Networks": {"bridge": {"IPAddress": "192.0.2.1", "Aliases": ["alias-canary"]}}},
+                   Mounts=[{"Type": "volume", "Name": "named-data", "Source": "/private/path"},
+                           {"Type": "volume", "Name": "named-data", "Destination": "/private/destination"},
+                           {"Type": "bind", "Name": "bind-canary", "Source": "/private/bind"}])
+        observe = HELPER["observe_compose"]
+        base = {**ROW, "image_id": "sha256:" + FOREIGN}
+        with patch.dict(observe.__globals__, {"require_docker_socket": lambda _: None}):
+            for switch, extended, expected in (
+                (b"enabled\n", True, base),
+                (b"enabled-with-resources\n", False, base),
+                (b"enabled-with-resources\n", True, {**base, "networks": ["bridge"], "volumes": ["named-data"]}),
+            ):
+                self.requests.clear()
+                with patch.dict(observe.__globals__, {"read_root_config": lambda *_: switch}):
+                    self.assertEqual(observe(include_attachments=extended), {"status": "OBSERVED", "containers": [expected]})
+                self.assertEqual(len(self.requests), 1)
+            row.update(NetworkSettings={"Networks": {}}, Mounts=[{"Type": "volume"}])
+            with patch.dict(observe.__globals__, {"read_root_config": lambda *_: b"enabled-with-resources\n"}):
+                result = observe(include_attachments=True)["containers"][0]
+                self.assertEqual(result, {**base, "networks": [], "volumes": None})
 
     def test_reads_only_approved_ids_and_projects_fixed_fields(self):
         self.assertEqual(self.observe(), [ROW])

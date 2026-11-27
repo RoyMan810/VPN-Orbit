@@ -31,6 +31,7 @@ def main():
     discover = helper["observe_compose"]
     prefix = "vpn-orbit-discovery-" + uuid4().hex[:10]
     ids = []
+    network = volume = None
 
     def docker(*values):
         return subprocess.check_output(["docker", "--host", host, *values], text=True, timeout=45).strip()
@@ -47,11 +48,15 @@ def main():
         return identity
 
     try:
-        running = create(prefix, "web", "--publish", "127.0.0.1::8080/tcp", "--expose", "8081/tcp")
+        network = docker("network", "create", prefix + "-network")
+        volume = docker("volume", "create", prefix + "-data")
+        running = create(prefix, "web", "--network", prefix + "-network", "--network-alias", "alias-canary",
+                         "--publish", "127.0.0.1::8080/tcp", "--expose", "8081/tcp")
         stopped = create(prefix, "worker", "--network", "none", "--ipc", "private", "--cgroupns", "private",
                          "--runtime", "runc", "--log-driver", "local")
-        foreign = create(prefix + "-foreign", "private", "--network", "none")
-        mounted = create(prefix, "mounted", "--network", "none", "--tmpfs", "/fixture-tmpfs")
+        mount = f"type=volume,source={volume},target=/mount-canary"
+        foreign = create(prefix + "-foreign", "private", "--network", "none", "--mount", mount)
+        mounted = create(prefix, "mounted", "--network", "none", "--tmpfs", "/fixture-tmpfs", "--mount", mount)
         docker("start", running, mounted)
         scope = [{"id": running, "project": prefix, "service": "web"},
                  {"id": stopped, "project": prefix, "service": "worker"}]
@@ -92,6 +97,16 @@ def main():
             assert {row["image_id"] for row in projects["containers"]} == {image}
             assert {row["state"] for row in projects["containers"]} == {"RUNNING", "CREATED"}
             assert "label-canary" not in json.dumps(projects)
+            assert discover(switch, protected_socket, include_attachments=True) == projects
+            switch.write_bytes(b"enabled-with-resources\n")
+            assert discover(switch, protected_socket) == projects
+            attachments = discover(switch, protected_socket, include_attachments=True)
+            assert attachments["status"] == "OBSERVED", attachments
+            by_id = {row["id"]: row for row in attachments["containers"]}
+            assert by_id[running]["networks"] == [prefix + "-network"] and by_id[running]["volumes"] == [], attachments
+            assert by_id[foreign]["volumes"] == by_id[mounted]["volumes"] == [volume], attachments
+            assert by_id[stopped]["volumes"] == [], attachments
+            assert all(value not in json.dumps(attachments) for value in ("label-canary", "mount-canary", "alias-canary"))
             assert docker("inspect", "--format", "{{.Id}} {{.State.Status}} {{.State.StartedAt}}", *ids) == before
             mounted_scope = {"id": mounted, "project": prefix, "service": "mounted"}
             registry.write_text(json.dumps({"v": 1, "containers": [*scope, mounted_scope]}))
@@ -132,6 +147,10 @@ def main():
     finally:
         if ids:
             docker("rm", "-f", *ids)
+        if volume:
+            docker("volume", "rm", volume)
+        if network:
+            docker("network", "rm", network)
 
 
 if __name__ == "__main__":

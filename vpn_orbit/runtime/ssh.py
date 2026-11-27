@@ -13,6 +13,7 @@ from .storage import new_private_file, protected_bytes
 
 
 PROBES = (
+    (10, "vpn-orbit.v10.probe", b'{"operation":"probe","version":10}\n'),
     (9, "vpn-orbit.v9.probe", b'{"operation":"probe","version":9}\n'),
     (8, "vpn-orbit.v8.probe", b'{"operation":"probe","version":8}\n'),
     (7, "vpn-orbit.v7.probe", b'{"operation":"probe","version":7}\n'),
@@ -63,7 +64,7 @@ async def exchange(target, key, known_hosts):
     try:
         for version, command, request in PROBES:
             process = await connection.create_process(command, input=request, encoding=None, request_pty=False)
-            limit = {9: 15360, 3: 4096, 2: 2048, 1: 2048}.get(version, 12288)
+            limit = {10: 15360, 9: 15360, 3: 4096, 2: 2048, 1: 2048}.get(version, 12288)
             output, error, _ = await asyncio.gather(
                 bounded_read(process.stdout, limit),
                 bounded_read(process.stderr), process.wait_closed())
@@ -316,7 +317,7 @@ def parse_probe(output, version, *, now):
     except Denied:
         raise Denied("SSH_UNSUPPORTED_OUTPUT") from None
     names = ("v", "uid", "boot_id", "observed_at")
-    if version not in (1, 2, 3, 4, 5, 6, 7, 8, 9):
+    if version not in range(1, 11):
         raise Denied("SSH_PROBE_INVALID")
     if version >= 9:
         names += ("software", "docker", "compose")
@@ -334,7 +335,7 @@ def parse_probe(output, version, *, now):
         result["docker"] = docker_summary(value["docker"], include_ports=version >= 4, include_mounts=version >= 5,
                                          include_network=version >= 6, include_dependencies=version >= 7, include_started_at=version >= 8)
     if version >= 9:
-        result["compose"] = compose_summary(value["compose"])
+        result["compose"] = compose_summary(value["compose"], allow_attachments=version >= 10)
     return result
 
 

@@ -72,7 +72,9 @@ def fixture(directory):
             result["docker"] = {"status": "NOT_CONFIGURED", "containers": []}
             result["compose"] = {"status": "OBSERVED", "containers": [
                 {"id": "a" * 64, "image_id": "sha256:" + "b" * 64, "project": "external",
-                 "service": "web", "state": "RUNNING"},
+                 "service": "web", "state": "RUNNING", "networks": ["external_frontend"], "volumes": ["external_data"]},
+                {"id": "c" * 64, "image_id": "sha256:" + "b" * 64, "project": "external",
+                 "service": "worker", "state": "RUNNING", "networks": ["external_frontend"], "volumes": None},
             ]}
         queue.finish(claim, "SUCCEEDED", "PROBE_VERIFIED", result=result)
 

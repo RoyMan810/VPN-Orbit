@@ -32,7 +32,11 @@ export interface DockerObservation {
 }
 export interface ComposeObservation {
   status: 'OBSERVED' | 'NOT_CONFIGURED' | 'POLICY_INVALID' | 'UNAVAILABLE' | 'LIMIT_EXCEEDED'
-  containers: (DockerContainer & { image_id: string })[]
+  containers: (DockerContainer & {
+    image_id: string
+    networks?: string[] | null
+    volumes?: string[] | null
+  })[]
 }
 export interface DockerRestartPreview {
   version: 1
