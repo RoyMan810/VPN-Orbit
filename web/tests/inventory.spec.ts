@@ -532,7 +532,7 @@ test('shows imported Docker state and labels it historical when the sample expir
   await signIn(page)
   const detail = page.getByRole('region', { name: 'VPS details' })
   await expect(detail.getByRole('heading', { name: 'Docker containers' })).toBeVisible()
-  await expect(detail.getByText('fixture / web', { exact: true })).toBeVisible()
+  await expect(detail.locator('.docker-list').getByText('fixture / web', { exact: true })).toBeVisible()
   await expect(detail.getByText('Running', { exact: true })).toBeVisible()
   await page.clock.fastForward(301_000)
   await expect(detail.getByText('Historical container observation.', { exact: true })).toBeVisible()
