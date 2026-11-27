@@ -46,7 +46,15 @@ def binding(p, job_id):
 
 
 def observation():
-    return {"status": "REACHABLE", "source": "restricted_helper", "observed_at": int(time.time()), "boot_id": "12345678-1234-1234-1234-123456789abc"}
+    return {
+        "status": "REACHABLE", "source": "restricted_helper", "observed_at": int(time.time()),
+        "boot_id": "12345678-1234-1234-1234-123456789abc",
+        "software": {"docker": "UNKNOWN", "nginx": "UNKNOWN", "nginx_service": "UNKNOWN"},
+        "docker": {"status": "NOT_CONFIGURED", "containers": []},
+        "local_https": {"status": "NOT_CONFIGURED", "sites": []},
+        "compose": {"status": "NOT_CONFIGURED", "containers": []},
+    }
+
 
 
 class TestWatch:

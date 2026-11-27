@@ -29,7 +29,13 @@ interface DockerPortBinding {
 }
 export interface DockerObservation {
   status: 'OBSERVED' | 'NOT_CONFIGURED' | 'POLICY_INVALID' | 'UNAVAILABLE'
-  containers: (DockerContainer & { published_ports?: DockerPortBinding[] | null })[]
+  containers: (DockerContainer & {
+    published_ports: DockerPortBinding[] | null
+    mount_status: 'NONE' | 'PRESENT' | 'UNKNOWN'
+    network_status: 'ISOLATED' | 'OTHER' | 'UNKNOWN'
+    dependency_status: 'ISOLATED' | 'OTHER' | 'UNKNOWN'
+    started_at: string | null
+  })[]
 }
 export interface ComposeObservation {
   status: 'OBSERVED' | 'NOT_CONFIGURED' | 'POLICY_INVALID' | 'UNAVAILABLE' | 'LIMIT_EXCEEDED'
@@ -50,6 +56,14 @@ export interface DockerRestartPreview {
   boot_id: string
   risk: 'TEMPORARY_SERVICE_INTERRUPTION'
 }
+interface LocalHttpsObservation {
+  status: 'OBSERVED' | 'NOT_CONFIGURED' | 'POLICY_INVALID' | 'UNAVAILABLE'
+  sites: {
+    name: string
+    state: 'VERIFIED' | 'CERTIFICATE_INVALID' | 'UNAVAILABLE'
+    expires_at: number | null
+  }[]
+}
 export interface Observation {
   status: Status
   reason: string
@@ -57,9 +71,10 @@ export interface Observation {
   last_success: {
     observed_at: number
     boot_id: string
-    software?: Record<'docker' | 'nginx', Presence> & { nginx_service?: NginxServiceState }
-    docker?: DockerObservation
-    compose?: ComposeObservation
+    software: Record<'docker' | 'nginx', Presence> & { nginx_service: NginxServiceState }
+    docker: DockerObservation
+    compose: ComposeObservation
+    local_https: LocalHttpsObservation
   } | null
 }
 export interface Resource {

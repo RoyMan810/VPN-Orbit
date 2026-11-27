@@ -26,7 +26,7 @@ async function signIn(page: Page, username = 'fixture-owner') {
   await expect(page.getByRole('heading', { name: 'VPS inventory' })).toBeVisible()
 }
 
-test('distinguishes missing dependency data on earlier SSH observations', async ({ page }) => {
+test('shows unknown dependency states from the SSH observation', async ({ page }) => {
   await signIn(page)
   const details = page.locator('.docker-list > li').filter({ hasText: 'fixture / web' })
   await details.getByText('Restart dependencies', { exact: true }).click()
@@ -555,6 +555,10 @@ test('shows verified Compose services per project from the selected VPS observat
     }
   })
   await expect(page.locator('.software dl > div').filter({ hasText: 'Nginx systemd service' }).locator('dd')).toHaveText('Active')
+  const https = page.getByRole('region', { name: 'Local HTTPS certificates' })
+  await expect(https.getByText('cabinet.example.test', { exact: true })).toBeVisible()
+  await expect(https.getByText(/^Expires /)).toBeVisible()
+  await expect(https.getByText('Certificate rejected', { exact: true })).toBeVisible()
   const projects = page.getByRole('region', { name: 'Compose projects' })
   await expect(projects.getByRole('row')).toHaveCount(3)
   await expect(projects.getByRole('columnheader', { name: 'Docker networks' })).toHaveCount(0)
@@ -566,6 +570,7 @@ test('shows verified Compose services per project from the selected VPS observat
   await page.getByLabel('Тема').selectOption('dark')
   await expect(page.locator('html')).toHaveAttribute('data-mantine-color-scheme', 'dark')
   await expect(page.locator('.software dl > div').filter({ hasText: 'Служба Nginx в systemd' }).locator('dd')).toHaveText('Активна')
+  await expect(page.getByRole('region', { name: 'Локальные HTTPS-сертификаты' }).getByText('Сертификат отклонён')).toBeVisible()
   const russianProjects = page.getByRole('region', { name: 'Проекты Compose' })
   await expect(russianProjects.getByRole('columnheader', { name: 'Обнаруженные сервисы' })).toBeVisible()
   await page.clock.fastForward(301_000)
@@ -659,12 +664,12 @@ test('resumes a firewall operation after a lost enqueue response and requests re
   await expect(apply).toHaveCount(0)
 })
 
-test('treats the missing Docker v3 port field as unavailable', async ({ page }) => {
+test('shows unavailable Docker bindings when the helper returns null', async ({ page }) => {
   await page.route('**/api/v1/resources/' + fresh, async route => {
     const response = await route.fetch()
     const resource = await response.json()
     for (const container of resource.observation.last_success.docker.containers) {
-      delete container.published_ports
+      container.published_ports = null
     }
     await route.fulfill({ response, json: resource })
   })

@@ -88,7 +88,9 @@ def observe(queue, auth, tokens, target, containers):
     queue.finish(claim, "SUCCEEDED", "PROBE_VERIFIED", result={
         "status": "REACHABLE", "source": "restricted_helper", "observed_at": int(queue.clock()),
         "boot_id": "11111111-1111-1111-1111-111111111111",
-        "software": {"docker": "PRESENT", "nginx": "NOT_DETECTED"},
+        "software": {"docker": "PRESENT", "nginx": "NOT_DETECTED", "nginx_service": "NOT_FOUND"},
+        "local_https": {"status": "NOT_CONFIGURED", "sites": []},
+        "compose": {"status": "NOT_CONFIGURED", "containers": []},
         "docker": {"status": "OBSERVED", "containers": containers},
     })
 
@@ -101,7 +103,8 @@ def seed(store, auth, tokens):
         queue.register_resource(target, hashlib.sha256(target.encode()).hexdigest(), 1)
         inventory[target] = [
             {"id": hashlib.sha256(f"{index}/{service}".encode()).hexdigest(), "project": "capacity",
-             "service": f"fixture-{service}", "state": "RUNNING", "published_ports": []}
+             "service": f"fixture-{service}", "state": "RUNNING", "published_ports": [],
+             "mount_status": "UNKNOWN", "network_status": "UNKNOWN", "dependency_status": "UNKNOWN", "started_at": None}
             for service in range(SERVICES_PER_HOST)
         ]
     now = int(time.time())

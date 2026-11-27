@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import signal
 import socket
+import ssl
 import stat
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from urllib.parse import urlencode
 DOCKER_SCOPE = Path("/etc/vpn-orbit/docker-discovery.json")
 COMPOSE_DISCOVERY = Path("/etc/vpn-orbit/compose-discovery.enabled")
 COMPOSE_RESOURCE_SCOPE = b"enabled-with-resources\n"
+LOCAL_HTTPS_SCOPE = Path("/etc/vpn-orbit/local-https.names")
 DOCKER_SOCKET = Path("/run/docker.sock")
 MAX_CONTAINERS = 8
 MAX_COMPOSE_CONTAINERS = 12
@@ -26,6 +28,7 @@ MAX_PUBLISHED_PORTS = 8
 MAX_DOCKER_REPLY = 256 * 1024
 MAX_PROBE_REPLY = 15360
 MAX_ATTACHMENT_NAMES = 8
+DNS_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 DOCKER_RESOURCE = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
 DOCKER_STATES = {"created", "restarting", "running", "removing", "paused", "exited", "dead"}
 DOCKER_ID = r"[0-9a-f]{64}"
@@ -412,6 +415,41 @@ def nginx_service_state():
     return "UNKNOWN"
 
 
+def local_https_endpoint(context, name):
+    result = {"name": name, "expires_at": None}
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+            connection.settimeout(0.4)
+            connection.connect(("127.0.0.1", 443))
+            with context.wrap_socket(connection, server_hostname=name) as secured:
+                expires_at = ssl.cert_time_to_seconds(secured.getpeercert()["notAfter"])
+        return {**result, "state": "VERIFIED", "expires_at": expires_at}
+    except ssl.SSLCertVerificationError:
+        return {**result, "state": "CERTIFICATE_INVALID"}
+    except (OSError, ValueError, KeyError):
+        return {**result, "state": "UNAVAILABLE"}
+
+
+def observe_local_https(path=LOCAL_HTTPS_SCOPE):
+    try:
+        names = read_root_config(path, 1024).decode("ascii").splitlines()
+        if (not 1 <= len(names) <= 4 or len(set(names)) != len(names)
+                or any(len(name) > 253 or name.rsplit(".", 1)[-1].isdigit()
+                       or not re.fullmatch(rf"{DNS_LABEL}(?:\.{DNS_LABEL})+", name) for name in names)):
+            raise ValueError("invalid HTTPS observation scope")
+    except FileNotFoundError:
+        return {"status": "NOT_CONFIGURED", "sites": []}
+    except (OSError, ValueError):
+        return {"status": "POLICY_INVALID", "sites": []}
+    try:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.hostname_checks_common_name = False
+        context.load_default_certs()
+    except OSError:
+        return {"status": "UNAVAILABLE", "sites": []}
+    return {"status": "OBSERVED", "sites": [local_https_endpoint(context, name) for name in sorted(names)]}
+
+
 def probe_reply(value):
     output = json.dumps(value, sort_keys=True, separators=(",", ":"))
     if len(output) + 1 > MAX_PROBE_REPLY:
@@ -421,19 +459,22 @@ def probe_reply(value):
                 if row.get(name):
                     row[name] = None
         output = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    if len(output) + 1 > MAX_PROBE_REPLY:
+        value["local_https"] = {"status": "UNAVAILABLE", "sites": []}
+        output = json.dumps(value, sort_keys=True, separators=(",", ":"))
     return output
 
 
 def main():
     if os.geteuid() != 0 or len(sys.argv) != 1:
         return 65
-    request = b'{"operation":"probe","version":11}\n'
+    request = b'{"operation":"probe","version":12}\n'
     signal.alarm(5)
     payload = sys.stdin.buffer.read(len(request) + 1)
     signal.alarm(0)
     if payload != request:
         return 65
-    value = {"v": 11, "uid": 0, "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+    value = {"v": 12, "uid": 0, "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
              "observed_at": int(time.time()),
              "software": {"docker": tool_status("/usr/bin/docker"), "nginx": tool_status("/usr/sbin/nginx"),
                           "nginx_service": nginx_service_state()}}
@@ -457,6 +498,7 @@ def main():
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous)
+    value["local_https"] = observe_local_https()
     print(probe_reply(value))
     return 0
 

@@ -200,6 +200,7 @@ function Detail({ resource, t, lang, now, expired, session }: {
   const presence = (value: Presence) => value === 'PRESENT' ? t.present : value === 'NOT_DETECTED' ? t.notDetected : t.unknown
   const software = observation.last_success?.software
   const sample = observation.last_success
+  const localHttps = sample?.local_https
   const docker = sample?.docker
   const isolation = (value?: 'ISOLATED' | 'OTHER' | 'UNKNOWN') =>
     value === 'ISOLATED' ? t.isolated : value === 'OTHER' ? t.sharedOrExternal : t.dependencyUnavailable
@@ -218,20 +219,26 @@ function Detail({ resource, t, lang, now, expired, session }: {
       <div><dt>{t.firewallSshChanges}</dt><dd>{t.unsupported}</dd></div>
       <div><dt>{t.caddyManagement}</dt><dd>{t.unsupported}</dd></div>
     </dl>
-    {observation.last_success && <div className="software">
+    {software && <div className="software">
       <h3>{t.observedSoftware}</h3>
-      {software ? <>
-        <p>{t.softwareHint}</p>
-        <dl>
-          <div><dt>Docker</dt><dd>{presence(software.docker)}</dd></div>
-          <div><dt>Nginx</dt><dd>{presence(software.nginx)}</dd></div>
-          {software.nginx_service && <div>
-            <dt>{t.nginxService}</dt><dd>{t.nginxServiceState[software.nginx_service]}</dd>
-          </div>}
-        </dl>
-      </> : <p>{t.noSoftware}</p>}
+      <p>{t.softwareHint}</p>
+      <dl>
+        <div><dt>Docker</dt><dd>{presence(software.docker)}</dd></div>
+        <div><dt>Nginx</dt><dd>{presence(software.nginx)}</dd></div>
+        <div><dt>{t.nginxService}</dt><dd>{t.nginxServiceState[software.nginx_service]}</dd></div>
+      </dl>
     </div>}
-    {(sample?.compose || docker?.status === 'OBSERVED') && <ComposeInventory compose={sample?.compose}
+    {localHttps && <section className="software" aria-labelledby="local-https-heading">
+      <h3 id="local-https-heading">{t.localHttps}</h3>
+      <p>{t.localHttpsScope}</p>
+      {localHttps.status === 'OBSERVED' ? <dl>
+        {localHttps.sites.map(site => <div key={site.name}>
+          <dt><code className="server-name">{site.name}</code></dt>
+          <dd>{t.localHttpsState[site.state]}{site.expires_at !== null && <p>{t.localHttpsExpires} {time(site.expires_at)}</p>}</dd>
+        </div>)}
+      </dl> : <p>{t.localHttpsStatus[localHttps.status]}</p>}
+    </section>}
+    {sample && <ComposeInventory compose={sample.compose}
       scoped={docker?.status === 'OBSERVED' ? docker.containers : []} historical={current.status !== 'REACHABLE'} t={t}/>}
     {docker && <div className="software">
       <h3>{t.dockerHeading}</h3>

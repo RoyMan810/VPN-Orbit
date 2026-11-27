@@ -22,6 +22,7 @@ class DiscoveryPayloadTests(unittest.TestCase):
     def test_current_probe_requires_complete_scoped_observation(self):
         value = {"v": PROBE_VERSION, "uid": 0, "boot_id": BOOT, "observed_at": 1000, "software": SOFTWARE,
                  "docker": {"status": "NOT_CONFIGURED", "containers": []},
+                 "local_https": {"status": "NOT_CONFIGURED", "sites": []},
                  "compose": {"status": "NOT_CONFIGURED", "containers": []}}
         self.assertEqual(parse_probe(canonical(value), now=1000)["software"], SOFTWARE)
         for invalid in (
@@ -30,15 +31,16 @@ class DiscoveryPayloadTests(unittest.TestCase):
             {**value, "software": {"docker": "PRESENT", "nginx": "PRESENT"}},
             {**value, "docker": {"status": "OBSERVED", "containers": [
                 {"id": "a" * 64, "project": "fixture", "service": "web", "state": "RUNNING"}]}},
-            {**value, "v": 10},
+            {**value, "v": 11},
             {k: v for k, v in value.items() if k != "compose"},
         ):
             with self.subTest(invalid=invalid), self.assertRaises(Denied):
                 parse_probe(canonical(invalid), now=1000)
 
-    def test_nginx_service_state_is_bounded_and_historical_software_still_validates(self):
+    def test_nginx_service_state_is_bounded(self):
         previous = {"docker": "PRESENT", "nginx": "NOT_DETECTED"}
-        self.assertEqual(software_summary(previous), previous)
+        with self.assertRaises(Denied):
+            software_summary(previous)
         helper = runpy.run_path(str(Path(__file__).resolve().parents[2] / 'remote/typed-helper'))
         observe = helper["nginx_service_state"]
         for code, output, state in (
@@ -106,9 +108,9 @@ class ProbeNegotiationTests(unittest.IsolatedAsyncioTestCase):
     async def probe(self):
         return await asyncio.wait_for(exchange(self.target, self.client_key, self.known_hosts), 5)
 
-    async def test_v11_uses_one_fixed_request(self):
+    async def test_v12_uses_one_fixed_request(self):
         self.assertEqual(await self.probe(), b'probe')
-        self.assertEqual(self.requests, [('vpn-orbit.v11.probe', b'{"operation":"probe","version":11}\n')])
+        self.assertEqual(self.requests, [('vpn-orbit.v12.probe', b'{"operation":"probe","version":12}\n')])
 
     async def test_failed_or_noisy_probe_does_not_fall_back(self):
         for status, data in ((65, b''), (65, b'canary'), (1, b'')):

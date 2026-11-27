@@ -10,13 +10,14 @@ from ..errors import Denied
 
 
 MAX_FRAME = 16384
-PROBE_VERSION = 11
+PROBE_VERSION = 12
 PROBE_COMMAND = f"vpn-orbit.v{PROBE_VERSION}.probe"
 PROBE_REQUEST = b'{"operation":"probe","version":%d}\n' % PROBE_VERSION
 MAX_PROBE_REPLY = 15360
 PARTIAL_PREPARATION = "VPS_PREPARATION_PARTIAL_VERIFIED"
 ULID = r"[0-7][0-9A-HJKMNP-TV-Z]{25}"
 SHA256 = r"[0-9a-f]{64}"
+DNS_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 BOOT_ID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
 DOCKER_STARTED_AT = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z"
 
@@ -151,13 +152,12 @@ def integer(value, low, high):
     return value
 
 
-def software_summary(value, *, complete=False):
+def software_summary(value):
     names = ("docker", "nginx")
-    includes_service = complete or isinstance(value, dict) and "nginx_service" in value
-    fields(value, names + (("nginx_service",) if includes_service else ()))
+    fields(value, (*names, "nginx_service"))
     if any(value[name] not in ("PRESENT", "NOT_DETECTED", "UNKNOWN") for name in names):
         raise Denied("PROBE_SOFTWARE_INVALID")
-    if includes_service and value["nginx_service"] not in (
+    if value["nginx_service"] not in (
         "ACTIVE", "INACTIVE", "FAILED", "TRANSITIONING", "NOT_FOUND", "UNKNOWN",
     ):
         raise Denied("PROBE_SOFTWARE_INVALID")
@@ -194,8 +194,7 @@ def compose_summary(value):
         raise Denied("PROBE_COMPOSE_INVALID")
     seen = set()
     attachments = ("networks", "volumes")
-    # Historical rows use the old shape. A new snapshot either carries both
-    # attachment lists on every container or omits them from the entire list.
+    # Attachment discovery is opt-in for the entire Compose scope.
     include = any(isinstance(row, dict) and ("networks" in row or "volumes" in row) for row in rows)
     names = ("id", "image_id", "project", "service", "state") + (attachments if include else ())
     for row in rows:
@@ -221,17 +220,14 @@ def compose_summary(value):
     return value
 
 
-def docker_summary(value, *, complete=False):
+def docker_summary(value):
     fields(value, ("status", "containers"))
     status, rows = value["status"], value["containers"]
     if (status not in ("OBSERVED", "NOT_CONFIGURED", "POLICY_INVALID", "UNAVAILABLE")
             or not isinstance(rows, list) or len(rows) > 8 or bool(rows) != (status == "OBSERVED")):
         raise Denied("PROBE_DOCKER_INVALID")
-    # Stored observations may omit the newer suffix of fields.
-    optional = ("published_ports", "mount_status", "network_status", "dependency_status", "started_at")
-    first = rows[0] if rows and isinstance(rows[0], dict) else {}
-    count = len(optional) if complete else sum(name in first for name in optional)
-    names = ("id", "project", "service", "state") + optional[:count]
+    names = ("id", "project", "service", "state", "published_ports", "mount_status", "network_status",
+             "dependency_status", "started_at")
     seen = set()
     for item in rows:
         fields(item, names)
@@ -243,25 +239,24 @@ def docker_summary(value, *, complete=False):
         ):
             raise Denied("PROBE_DOCKER_INVALID")
         seen.add(identity)
-        if "published_ports" in item:
-            _validate_published_ports(item["published_ports"], item["state"])
-        if "mount_status" in item and (
+        _validate_published_ports(item["published_ports"], item["state"])
+        if (
             item["mount_status"] not in ("NONE", "PRESENT", "UNKNOWN")
             or item["state"] != "RUNNING" and item["mount_status"] != "UNKNOWN"
         ):
             raise Denied("PROBE_DOCKER_INVALID")
-        if "network_status" in item and (
+        if (
             item["network_status"] not in ("ISOLATED", "OTHER", "UNKNOWN")
             or item["state"] != "RUNNING" and item["network_status"] != "UNKNOWN"
         ):
             raise Denied("PROBE_DOCKER_INVALID")
-        if "dependency_status" in item and (
+        if (
             item["dependency_status"] not in ("ISOLATED", "OTHER", "UNKNOWN")
             or (item["mount_status"] != "NONE" or item["network_status"] != "ISOLATED")
             and item["dependency_status"] != "UNKNOWN"
         ):
             raise Denied("PROBE_DOCKER_INVALID")
-        if "started_at" in item and item["started_at"] is not None:
+        if item["started_at"] is not None:
             started_at = item["started_at"]
             if (item["state"] != "RUNNING" or not isinstance(started_at, str)
                     or started_at.startswith("0001-01-01T00:00:00")
@@ -271,4 +266,38 @@ def docker_summary(value, *, complete=False):
                 datetime.fromisoformat(started_at)
             except ValueError:
                 raise Denied("PROBE_DOCKER_INVALID") from None
+    return value
+
+
+def local_https_summary(value):
+    fields(value, ("status", "sites"))
+    status, sites = value["status"], value["sites"]
+    if (status not in ("OBSERVED", "NOT_CONFIGURED", "POLICY_INVALID", "UNAVAILABLE")
+            or not isinstance(sites, list) or len(sites) > 4 or bool(sites) != (status == "OBSERVED")):
+        raise Denied("PROBE_LOCAL_HTTPS_INVALID")
+    previous = ""
+    for site in sites:
+        fields(site, ("name", "state", "expires_at"))
+        name = site["name"]
+        if (not isinstance(name, str) or len(name) > 253 or name <= previous or name.rsplit(".", 1)[-1].isdigit()
+                or not re.fullmatch(rf"{DNS_LABEL}(?:\.{DNS_LABEL})+", name)):
+            raise Denied("PROBE_LOCAL_HTTPS_INVALID")
+        previous = name
+        if site["state"] == "VERIFIED":
+            integer(site["expires_at"], 0, 253402300799)
+        elif site["state"] not in ("CERTIFICATE_INVALID", "UNAVAILABLE") or site["expires_at"] is not None:
+            raise Denied("PROBE_LOCAL_HTTPS_INVALID")
+    return value
+
+
+def observation_summary(value):
+    fields(value, ("status", "source", "observed_at", "boot_id", "software", "docker", "compose", "local_https"))
+    if value["status"] != "REACHABLE" or value["source"] != "restricted_helper":
+        raise Denied("BROKER_OBSERVATION_INVALID")
+    integer(value["observed_at"], 0, 2**63 - 1)
+    text(value["boot_id"], BOOT_ID)
+    software_summary(value["software"])
+    docker_summary(value["docker"])
+    compose_summary(value["compose"])
+    local_https_summary(value["local_https"])
     return value

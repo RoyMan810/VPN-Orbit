@@ -17,7 +17,9 @@ TARGET = "a" * 64
 FOREIGN = "b" * 64
 SCOPE = [{"id": TARGET, "project": "fixture", "service": "web"}]
 ROW = {**SCOPE[0], "state": "RUNNING"}
-SUMMARY = {"status": "OBSERVED", "containers": [ROW]}
+SCOPED_ROW = {**ROW, "published_ports": None, "mount_status": "UNKNOWN", "network_status": "UNKNOWN",
+              "dependency_status": "UNKNOWN", "started_at": None}
+SUMMARY = {"status": "OBSERVED", "containers": [SCOPED_ROW]}
 BINDING = {"address": "127.0.0.1", "host_port": 49152, "container_port": 8080, "protocol": "tcp"}
 IPV6_BINDING = {"address": "::", "host_port": 49152, "container_port": 8080, "protocol": "udp"}
 DAEMON_PORTS = [
@@ -46,7 +48,7 @@ class DockerPayloadTests(unittest.TestCase):
         compose = {"status": "OBSERVED", "containers": [{**ROW, "image_id": "sha256:" + FOREIGN}]}
         value = {"v": PROBE_VERSION, "uid": 0, "boot_id": "12345678-1234-1234-1234-123456789abc",
                  "observed_at": 1000, "software": {"docker": "PRESENT", "nginx": "NOT_DETECTED", "nginx_service": "NOT_FOUND"},
-                 "docker": scoped, "compose": compose}
+                 "docker": scoped, "local_https": {"status": "NOT_CONFIGURED", "sites": []}, "compose": compose}
         result = parse_probe(canonical(value), now=1000)
         self.assertEqual(result["docker"], scoped)
         self.assertEqual(result["compose"], compose)
@@ -63,10 +65,10 @@ class DockerPayloadTests(unittest.TestCase):
         scoped = {"status": "NOT_CONFIGURED", "containers": []}
         value = {"v": PROBE_VERSION, "uid": 0, "boot_id": "12345678-1234-1234-1234-123456789abc",
                  "observed_at": 1000, "software": {"docker": "PRESENT", "nginx": "NOT_DETECTED", "nginx_service": "NOT_FOUND"},
-                 "docker": scoped, "compose": {"status": "OBSERVED", "containers": [row]}}
+                 "docker": scoped, "local_https": {"status": "NOT_CONFIGURED", "sites": []}, "compose": {"status": "OBSERVED", "containers": [row]}}
         self.assertEqual(parse_probe(canonical(value), now=1000)["compose"], value["compose"])
         with self.assertRaises(Denied):
-            parse_probe(canonical({**value, "v": 10}), now=1000)
+            parse_probe(canonical({**value, "v": 11}), now=1000)
         for rows in ([{**base, "networks": []}], [row, {**base, "id": FOREIGN}],
                      [{**row, "volumes": ["/host/private"]}], [{**row, "volumes": ["x" * 65]}],
                      [{**row, "volumes": ["data", "data"]}], [{**row, "volumes": ["web", "data"]}],
@@ -87,6 +89,10 @@ class DockerPayloadTests(unittest.TestCase):
         value = {"v": PROBE_VERSION, "uid": 0, "boot_id": "12345678-1234-1234-1234-123456789abc", "observed_at": 1000,
                  "software": {"docker": "PRESENT", "nginx": "NOT_DETECTED", "nginx_service": "NOT_FOUND"},
                  "docker": {"status": "OBSERVED", "containers": scoped},
+                 "local_https": {"status": "OBSERVED", "sites": [
+                     {"name": chr(97 + i) + "a" * 62 + "." + "b" * 63 + "." + "c" * 63 + "." + "d" * 61,
+                      "state": "VERIFIED", "expires_at": 253402300799} for i in range(2)
+                 ]},
                  "compose": {"status": "OBSERVED", "containers": compose}}
         result = parse_probe(canonical(value), now=1000)
         self.assertLess(len(canonical(value)) + 1, MAX_PROBE_REPLY)
@@ -105,21 +111,34 @@ class DockerPayloadTests(unittest.TestCase):
         self.assertIsNone(result["compose"]["containers"][1]["volumes"])
         self.assertIsNone(result["compose"]["containers"][1]["networks"])
         self.assertLess(len(canonical(result)) + 1024, MAX_FRAME)
+        self.assertEqual(result["local_https"], value["local_https"])
+
+        value["local_https"]["sites"] += [
+            {**site, "name": chr(99 + i) + site["name"][1:]} for i, site in enumerate(value["local_https"]["sites"])
+        ]
+        reply = HELPER["probe_reply"]
+        with patch.dict(reply.__globals__, {"MAX_PROBE_REPLY": len(canonical(value)) - 1}):
+            wire = reply(value).encode() + b"\n"
+        self.assertLessEqual(len(wire), MAX_PROBE_REPLY)
+        result = parse_probe(wire, now=1000)
+        self.assertEqual(result["local_https"], {"status": "UNAVAILABLE", "sites": []})
+        self.assertEqual(result["docker"], value["docker"])
 
     def test_saved_summary_remains_bounded_and_typed(self):
         self.assertEqual(docker_summary(SUMMARY), SUMMARY)
         for payload in ({"status": "OBSERVED", "containers": []},
+                        {"status": "OBSERVED", "containers": [ROW]},
                         {"status": "NOT_CONFIGURED", "containers": [ROW]},
-                        {"status": "OBSERVED", "containers": [ROW, ROW]},
-                        {"status": "OBSERVED", "containers": [{**ROW, "env": ["canary"]}]},
-                        {"status": "OBSERVED", "containers": [{**ROW, "state": "HEALTHY"}]},
-                        {"status": "OBSERVED", "containers": [{**ROW, "project": "../private"}]}):
+                        {"status": "OBSERVED", "containers": [SCOPED_ROW, SCOPED_ROW]},
+                        {"status": "OBSERVED", "containers": [{**SCOPED_ROW, "env": ["canary"]}]},
+                        {"status": "OBSERVED", "containers": [{**SCOPED_ROW, "state": "HEALTHY"}]},
+                        {"status": "OBSERVED", "containers": [{**SCOPED_ROW, "project": "../private"}]}):
             with self.subTest(payload=payload), self.assertRaises(Denied):
                 docker_summary(payload)
 
     def test_bindings_are_typed_and_bounded(self):
         def summary(ports, *, state="RUNNING"):
-            return {"status": "OBSERVED", "containers": [{**ROW, "state": state, "published_ports": ports}]}
+            return {"status": "OBSERVED", "containers": [{**SCOPED_ROW, "state": state, "published_ports": ports}]}
 
         for ports in (None, [], [BINDING, IPV6_BINDING]):
             with self.subTest(ports=ports):
@@ -143,17 +162,17 @@ class DockerPayloadTests(unittest.TestCase):
     def test_mount_status_is_typed_and_consistent(self):
         for status in ("NONE", "PRESENT", "UNKNOWN"):
             payload = {"status": "OBSERVED", "containers": [
-                {**ROW, "published_ports": [], "mount_status": status},
+                {**SCOPED_ROW, "published_ports": [], "mount_status": status},
             ]}
             self.assertEqual(docker_summary(payload), payload)
-        for row in ({**ROW, "mount_status": "NONE"},
-                    {**ROW, "published_ports": [], "mount_status": []},
-                    {**ROW, "state": "NOT_FOUND", "published_ports": None, "mount_status": "NONE"}):
+        for row in ({k: v for k, v in SCOPED_ROW.items() if k != "published_ports"},
+                    {**SCOPED_ROW, "published_ports": [], "mount_status": []},
+                    {**SCOPED_ROW, "state": "NOT_FOUND", "published_ports": None, "mount_status": "NONE"}):
             with self.subTest(row=row), self.assertRaises(Denied):
                 docker_summary({"status": "OBSERVED", "containers": [row]})
 
     def test_network_status_is_typed_and_consistent(self):
-        row = {**ROW, "published_ports": [], "mount_status": "NONE"}
+        row = {**SCOPED_ROW, "published_ports": [], "mount_status": "NONE"}
         for status in ("ISOLATED", "OTHER", "UNKNOWN"):
             summary = {"status": "OBSERVED", "containers": [{**row, "network_status": status}]}
             self.assertEqual(docker_summary(summary), summary)
@@ -163,7 +182,7 @@ class DockerPayloadTests(unittest.TestCase):
                 docker_summary({"status": "OBSERVED", "containers": [invalid]})
 
     def test_dependency_scope_is_consistent(self):
-        row = {**ROW, "published_ports": [], "mount_status": "NONE", "network_status": "ISOLATED"}
+        row = {**SCOPED_ROW, "published_ports": [], "mount_status": "NONE", "network_status": "ISOLATED"}
         for status in ("ISOLATED", "OTHER", "UNKNOWN"):
             payload = {"status": "OBSERVED", "containers": [{**row, "dependency_status": status}]}
             self.assertEqual(docker_summary(payload), payload)

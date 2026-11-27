@@ -49,7 +49,13 @@ def fixture(directory):
             queue.advance(claim, state)
         result = {"status": "REACHABLE", "source": "restricted_helper", "observed_at": int(time.time()) - age,
                   "boot_id": "11111111-1111-1111-1111-111111111111"}
+        result["local_https"] = {"status": "NOT_CONFIGURED", "sites": []}
+        result["compose"] = {"status": "NOT_CONFIGURED", "containers": []}
         if index == 0:
+            result["local_https"] = {"status": "OBSERVED", "sites": [
+                {"name": "cabinet.example.test", "state": "VERIFIED", "expires_at": int(time.time()) + 86400},
+                {"name": "panel.example.test", "state": "CERTIFICATE_INVALID", "expires_at": None},
+            ]}
             result["software"] = {"docker": "PRESENT", "nginx": "PRESENT", "nginx_service": "ACTIVE"}
             result["docker"] = {"status": "OBSERVED", "containers": [
                 {"id": "a" * 64, "project": "fixture", "service": "web", "state": "RUNNING",
@@ -67,8 +73,10 @@ def fixture(directory):
                 {"id": "e" * 64, "project": "unverified-project", "service": "web", "state": "UNKNOWN",
                  "published_ports": None},
             ]}
+            for container in result["docker"]["containers"]:
+                container.update(mount_status="UNKNOWN", network_status="UNKNOWN", dependency_status="UNKNOWN", started_at=None)
         else:
-            result["software"] = {"docker": "PRESENT", "nginx": "NOT_DETECTED"}
+            result["software"] = {"docker": "PRESENT", "nginx": "NOT_DETECTED", "nginx_service": "NOT_FOUND"}
             result["docker"] = {"status": "NOT_CONFIGURED", "containers": []}
             result["compose"] = {"status": "OBSERVED", "containers": [
                 {"id": "a" * 64, "image_id": "sha256:" + "b" * 64, "project": "external",
@@ -103,8 +111,11 @@ def fixture(directory):
         if outcome == "SUCCEEDED":
             result = {"status": "REACHABLE", "source": "restricted_helper", "observed_at": int(time.time()),
                       "boot_id": "11111111-1111-1111-1111-111111111111"}
+            result["software"] = {"docker": "PRESENT", "nginx": "NOT_DETECTED", "nginx_service": "NOT_FOUND"}
+            result["docker"] = {"status": "NOT_CONFIGURED", "containers": []}
+            result["local_https"] = {"status": "NOT_CONFIGURED", "sites": []}
+            result["compose"] = {"status": "NOT_CONFIGURED", "containers": []}
             if restart:
-                result["software"] = {"docker": "PRESENT", "nginx": "NOT_DETECTED"}
                 result["docker"] = {"status": "OBSERVED", "containers": [{
                     "id": "a" * 64, "project": "fixture", "service": "web", "state": "RUNNING",
                     "published_ports": [], "mount_status": "NONE", "network_status": "ISOLATED",

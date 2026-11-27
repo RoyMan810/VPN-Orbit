@@ -36,7 +36,9 @@ class ChangePlanAPITests(Fixture):
         self.queue.finish(claim, "SUCCEEDED", "PROBE_VERIFIED", result={
             "status": "REACHABLE", "source": "restricted_helper", "observed_at": self.now,
             "boot_id": "11111111-1111-1111-1111-111111111111",
-            "software": {"docker": "PRESENT", "nginx": "UNKNOWN"},
+            "software": {"docker": "PRESENT", "nginx": "UNKNOWN", "nginx_service": "UNKNOWN"},
+            "local_https": {"status": "NOT_CONFIGURED", "sites": []},
+            "compose": {"status": "NOT_CONFIGURED", "containers": []},
             "docker": {"status": "OBSERVED", "containers": [{
                 "id": CONTAINER, "project": "fixture", "service": "web", "state": "RUNNING",
                 "mount_status": "NONE", "network_status": "ISOLATED",
