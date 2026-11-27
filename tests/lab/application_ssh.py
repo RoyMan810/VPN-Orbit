@@ -127,7 +127,7 @@ LogLevel ERROR
                         break
                 except OSError:
                     time.sleep(0.1)
-            images = json.loads((REPOSITORY / "deploy/application-images.json").read_text())["images"]
+            images = json.loads((REPOSITORY / "vpn_orbit/application-images.json").read_text())["images"]
             import secrets
             spec = {"v": 1, "id": ACTOR, "profiles": ["remnawave-panel"],
                     "images": {name: images[name] for name in ("remnawave-panel", "postgres", "redis")},

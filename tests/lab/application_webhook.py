@@ -42,7 +42,7 @@ with TestClient(app) as client:
 
 
 def webhook_acceptance():
-    pins = json.loads((REPOSITORY / "deploy/application-images.json").read_text())["images"]
+    pins = json.loads((REPOSITORY / "vpn_orbit/application-images.json").read_text())["images"]
     image = pins["bedolaga-bot"]
     subprocess.run(["/usr/bin/docker", "pull", "--platform", "linux/amd64", image],
                    check=True, timeout=240)

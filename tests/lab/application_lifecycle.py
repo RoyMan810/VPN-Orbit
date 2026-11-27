@@ -18,7 +18,7 @@ IDENTITY = "01JCYQZ4T9V8MNVYEH3D2M7Q1A"
 def panel_acceptance():
     if ROOT.exists() or ROOT.is_symlink():
         raise RuntimeError("Disposable app namespace must be absent")
-    images = json.loads((Path(__file__).resolve().parents[2] / "deploy/application-images.json").read_text())["images"]
+    images = json.loads((Path(__file__).resolve().parents[2] / "vpn_orbit/application-images.json").read_text())["images"]
     spec = {"v": 1, "id": IDENTITY, "profiles": ["remnawave-panel"],
             "images": {name: images[name] for name in ("remnawave-panel", "postgres", "redis")},
             "settings": {"remnawave-panel": {

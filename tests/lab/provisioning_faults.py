@@ -160,8 +160,8 @@ def probe(directory, key, fingerprint):
         ["ssh", "-F", "/dev/null", "-p", str(PORT), "-i", str(directory / "output" / "probe"),
          "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes",
          "-o", "GlobalKnownHostsFile=/dev/null", "-o", f"UserKnownHostsFile={known}",
-         f"{SERVICE}@{ADDRESS}", "vpn-orbit.v14.probe"],
-        input='{"operation":"probe","version":14}\n', capture_output=True, text=True)
+         f"{SERVICE}@{ADDRESS}", "vpn-orbit.v15.probe"],
+        input='{"operation":"probe","version":15}\n', capture_output=True, text=True)
 
 
 def state(directory):

@@ -22,7 +22,7 @@ IDENTITY = "01JCYQZ4T9V8MNVYEH3D2M7Q1N"
 def node_acceptance():
     if ROOT.exists() or ROOT.is_symlink():
         raise RuntimeError("Disposable app namespace must be absent")
-    images = json.loads((Path(__file__).resolve().parents[2] / "deploy/application-images.json").read_text())["images"]
+    images = json.loads((Path(__file__).resolve().parents[2] / "vpn_orbit/application-images.json").read_text())["images"]
     with tempfile.TemporaryDirectory(prefix="vo-node-pki-") as directory:
         directory = Path(directory)
 

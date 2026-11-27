@@ -151,9 +151,9 @@ class ProbeNegotiationTests(unittest.IsolatedAsyncioTestCase):
     async def probe(self):
         return await asyncio.wait_for(exchange(self.target, self.client_key, self.known_hosts), 5)
 
-    async def test_v14_uses_one_fixed_request(self):
+    async def test_v15_uses_one_fixed_request(self):
         self.assertEqual(await self.probe(), b'probe')
-        self.assertEqual(self.requests, [('vpn-orbit.v14.probe', b'{"operation":"probe","version":14}\n')])
+        self.assertEqual(self.requests, [('vpn-orbit.v15.probe', b'{"operation":"probe","version":15}\n')])
 
     async def test_failed_or_noisy_probe_does_not_fall_back(self):
         for status, data in ((65, b''), (65, b'canary'), (1, b'')):

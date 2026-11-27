@@ -36,7 +36,7 @@ def main():
     if (os.geteuid() != 0 or os.environ.get("GITHUB_ACTIONS") != "true"
             or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted" or ROOT.exists()):
         raise SystemExit("Disposable GitHub-hosted VM required")
-    pins = json.loads((Path(__file__).resolve().parents[2] / "deploy/application-images.json").read_text())["images"]
+    pins = json.loads((Path(__file__).resolve().parents[2] / "vpn_orbit/application-images.json").read_text())["images"]
     profiles = ["remnawave-panel", "bedolaga-bot"]
     identity = "01JCYQZ4T9V8MNVYEH3D2M7Q1A"
     spec = {"v": 1, "id": identity, "profiles": profiles,

@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+from vpn_orbit.adoption import image_catalog
 from vpn_orbit.database import identifier
 from vpn_orbit.queue import JobQueue
 from vpn_orbit.runtime.protocol import checksum
@@ -117,9 +118,18 @@ class InventoryTests(Fixture):
         self.assertEqual(preview["target"], {"resource_id": SCOPE, "project": "external"})
         self.assertEqual(preview["status"], "PREVIEW_ONLY")
         self.assertEqual(preview["containers"], [target])
+        self.assertEqual(preview["compatibility"]["status"], "UNVERIFIED")
         self.assertEqual(preview["attachments"], {
-            "networks": {"coverage": "OBSERVED_COMPOSE_ONLY", "shared": [{"name": "common", "other_projects": ["proxy"]}]},
-            "volumes": {"coverage": "PARTIAL", "shared": [{"name": "data", "other_projects": ["proxy"]}]},
+            "networks": {
+                "coverage": "OBSERVED_COMPOSE_ONLY",
+                "claims": [{"name": "common", "project": None, "status": "UNKNOWN"}],
+                "shared": [{"name": "common", "other_projects": ["proxy"]}],
+            },
+            "volumes": {
+                "coverage": "PARTIAL",
+                "claims": [{"name": name, "project": None, "status": "UNKNOWN"} for name in ("data", "external_data")],
+                "shared": [{"name": "data", "other_projects": ["proxy"]}],
+            },
         })
         self.assertEqual(self.client.get(path).json()["preview_digest"], digest)
         self.assertEqual(self.store.verify_audit(), before)
@@ -131,6 +141,41 @@ class InventoryTests(Fixture):
         self.assertNotEqual(updated["preview_digest"], digest)
         self.assertEqual(updated["attachments"]["volumes"]["coverage"], "OBSERVED_COMPOSE_ONLY")
 
+    def test_adoption_preview_checks_exact_image_digests_and_reports_resource_claims(self):
+        _, pins = image_catalog()
+        node = {**CONTAINER_IDENTITY, "service": "node-custom", "image_id": "sha256:" + CONTAINER,
+                "networks": ["unlabeled"], "volumes": ["local", "shared"]}
+        evidence = {"images": {node["image_id"]: [pins["remnawave-node"]]},
+                    "networks": {"unlabeled": None}, "volumes": {"local": "fixture", "shared": "foreign"}}
+        compose = {"status": "OBSERVED", "containers": [node], "adoption_evidence": evidence}
+        self.complete(compose=compose)
+        path = f"/api/v1/resources/{SCOPE}/compose/projects/fixture/adoption-preview"
+        preview = self.client.get(path).json()
+        self.assertEqual(preview["compatibility"], {
+            "status": "PROFILE_MATCH", "profiles": ["remnawave-node"], "services": [
+                {"container_id": CONTAINER, "role": "remnawave-node", "status": "PIN_MATCH"},
+            ],
+        })
+        self.assertEqual(preview["attachments"]["networks"]["claims"], [
+            {"name": "unlabeled", "project": None, "status": "UNLABELED"},
+        ])
+        self.assertEqual(preview["attachments"]["volumes"]["claims"], [
+            {"name": "local", "project": "fixture", "status": "PROJECT_LABEL"},
+            {"name": "shared", "project": "foreign", "status": "OTHER_PROJECT_LABEL"},
+        ])
+        for refs, status, service_status in (
+            ([pins["remnawave-node"][:65] + "0" * 64], "UNVERIFIED", "PIN_NOT_VERIFIED"),
+            ([pins["remnawave-panel"]], "MISMATCH", "PIN_MATCH"),
+            ([pins["bedolaga-cabinet"]], "MISMATCH", "PIN_MATCH"),
+            (sorted([pins["remnawave-panel"], pins["remnawave-node"]]), "UNVERIFIED", "AMBIGUOUS"),
+            (["a" * 64 + ":" + "0" * 64], "MISMATCH", "OTHER_IMAGE"),
+        ):
+            with self.subTest(status=status, service_status=service_status):
+                self.complete(compose={**compose, "adoption_evidence": {**evidence, "images": {node["image_id"]: refs}}})
+                result = self.client.get(path).json()["compatibility"]
+                self.assertEqual(result["services"][0]["status"], service_status)
+                self.assertEqual(result["status"], status)
+
     def test_adoption_preview_requires_owner_and_fresh_compose_discovery(self):
         prefix = f"/api/v1/resources/{SCOPE}/compose/projects"
         path = prefix + "/fixture/adoption-preview"
@@ -141,7 +186,7 @@ class InventoryTests(Fixture):
             {**CONTAINER_IDENTITY, "image_id": "sha256:" + CONTAINER},
         ]})
         self.assertEqual(self.client.get(path).json()["attachments"], {
-            kind: {"coverage": "PARTIAL", "shared": []} for kind in ("networks", "volumes")
+            kind: {"coverage": "PARTIAL", "claims": [], "shared": []} for kind in ("networks", "volumes")
         })
         for project in ("other", "Invalid", "a" * 64):
             with self.subTest(project=project):

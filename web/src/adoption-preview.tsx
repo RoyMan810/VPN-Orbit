@@ -40,18 +40,29 @@ export function AdoptionPreview({ project, resource, sample, expired, t }: Adopt
       {{ denied: t.restartPreviewDenied, stale: t.restartPreviewStale, rateLimited: t.rateLimited, error: t.requestError }[result]}
     </p> : <>
       <p>{t.adoptionScope}</p>
-      <ul>{result.containers.map(container => <li key={container.id}>
-        <strong>{container.service}</strong> · {t.containerState[container.state]}
-        <div>{t.adoptionImage} <code>{container.image_id}</code></div>
-        <div>{t.adoptionContainer} <code>{container.id}</code></div>
-      </li>)}</ul>
-      <h5>{t.composeShared}</h5>
+      <h5>{t.adoptionCompatibility}</h5>
+      <p>{t.adoptionProfileStatus[result.compatibility.status]}</p>
+      {result.compatibility.profiles.length > 0 && <p><code>{result.compatibility.profiles.join(', ')}</code></p>}
+      <ul>{result.containers.map(container => {
+        const evidence = result.compatibility.services.find(item => item.container_id === container.id)
+        return <li key={container.id}>
+          <strong>{container.service}</strong> · {t.containerState[container.state]}
+          {evidence && <div>{evidence.role && <><code>{evidence.role}</code> · </>}
+            {t.adoptionImageStatus[evidence.status]}</div>}
+          <div>{t.adoptionImage} <code>{container.image_id}</code></div>
+          <div>{t.adoptionContainer} <code>{container.id}</code></div>
+        </li>
+      })}</ul>
+      <h5>{t.adoptionOwnership}</h5>
       {(['networks', 'volumes'] as const).map(kind => {
-        const { coverage, shared } = result.attachments[kind]
+        const { coverage, claims, shared } = result.attachments[kind]
         return <section key={kind}>
           <h6>{kind === 'networks' ? t.composeNetworks : t.composeVolumes}</h6>
+          {claims.length > 0 && <ul>{claims.map(({ name, status, project }) => <li key={name}>
+            <code>{name}</code> · {t.adoptionClaimStatus[status]}{project && <> · <code>{project}</code></>}
+          </li>)}</ul>}
           {shared.length > 0 && <ul>{shared.map(({ name, other_projects }) =>
-            <li key={name}><code>{name}</code> · <code>{other_projects.join(', ')}</code></li>,
+            <li key={name}><code>{name}</code> · {t.adoptionSharedWith} <code>{other_projects.join(', ')}</code></li>,
           )}</ul>}
           {coverage === 'PARTIAL' && <p>{t.composeAttachmentsIncomplete}</p>}
           {coverage === 'OBSERVED_COMPOSE_ONLY' && !shared.length && <p>{t.adoptionNoSharedObserved}</p>}
