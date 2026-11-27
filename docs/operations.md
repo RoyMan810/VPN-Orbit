@@ -25,7 +25,7 @@ curl --cacert /opt/vpn-orbit-bootstrap/web-ca.pem https://127.0.0.1:18443/health
 | `/etc/vpn-orbit/runtime.json` и `/etc/vpn-orbit/targets.json` | Защищённая конфигурация и утверждённые SSH-цели. |
 | `/var/lib/vpn-orbit` | База контроллера и отдельные журналы Authority/Broker; не редактируйте вручную. |
 
-API слушает loopback. Worker изолирован от сети и не имеет Docker socket, ключей SSH или доступа к Vault; удалённое подключение выполняет Broker. Не изменяйте эти границы ради диагностики. Набор [systemd-профилей](../deploy/systemd) и [пример конфигурации](../deploy/runtime.example.json) описывают соответствующие границы; фактические UID/GID берите из установленного `runtime.json`.
+API слушает loopback. Worker изолирован от сети и не имеет Docker socket, ключей SSH или доступа к Vault; удалённое подключение выполняет Broker. Не изменяйте эти границы ради диагностики. API и Worker запускает `vpn-orbit-compose.service`. [Профили systemd](../deploy/systemd) задают хостовые службы и сокеты Broker и Supervisor. Фактические UID/GID берите из установленного `runtime.json`.
 
 ## Резервная копия контроллера
 
