@@ -201,6 +201,7 @@ function Detail({ resource, t, lang, now, expired, session }: {
   const software = observation.last_success?.software
   const sample = observation.last_success
   const localHttps = sample?.local_https
+  const nginx = sample?.nginx
   const docker = sample?.docker
   const isolation = (value?: 'ISOLATED' | 'OTHER' | 'UNKNOWN') =>
     value === 'ISOLATED' ? t.isolated : value === 'OTHER' ? t.sharedOrExternal : t.dependencyUnavailable
@@ -228,6 +229,14 @@ function Detail({ resource, t, lang, now, expired, session }: {
         <div><dt>{t.nginxService}</dt><dd>{t.nginxServiceState[software.nginx_service]}</dd></div>
       </dl>
     </div>}
+    {nginx && nginx.status !== 'NOT_CONFIGURED' && <section className="software" aria-labelledby="nginx-hosts-heading">
+      <h3 id="nginx-hosts-heading">{t.nginxHosts}</h3>
+      {nginx.status === 'OBSERVED' ? <>
+        {nginx.names.length ? <ul>{nginx.names.map(name => <li key={name}><code>{name}</code></li>)}</ul>
+          : <p>{t.nginxHostsEmpty}</p>}
+        {nginx.partial && <p>{t.nginxHostsPartial}</p>}
+      </> : <p>{t.nginxHostsStatus[nginx.status]}</p>}
+    </section>}
     {localHttps && <section className="software" aria-labelledby="local-https-heading">
       <h3 id="local-https-heading">{t.localHttps}</h3>
       <p>{t.localHttpsScope}</p>

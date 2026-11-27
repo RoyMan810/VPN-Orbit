@@ -89,6 +89,7 @@ def observe(queue, auth, tokens, target, containers):
         "status": "REACHABLE", "source": "restricted_helper", "observed_at": int(queue.clock()),
         "boot_id": "11111111-1111-1111-1111-111111111111",
         "software": {"docker": "PRESENT", "nginx": "NOT_DETECTED", "nginx_service": "NOT_FOUND"},
+        "nginx": {"status": "NOT_CONFIGURED", "names": [], "partial": False},
         "local_https": {"status": "NOT_CONFIGURED", "sites": []},
         "compose": {"status": "NOT_CONFIGURED", "containers": []},
         "docker": {"status": "OBSERVED", "containers": containers},

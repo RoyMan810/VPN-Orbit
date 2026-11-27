@@ -46,6 +46,7 @@ class ChangeDraftTests(Fixture):
         result = {"status": "REACHABLE", "source": "restricted_helper", "observed_at": self.now,
                   "boot_id": boot_id,
                   "software": {"docker": "PRESENT", "nginx": "UNKNOWN", "nginx_service": "UNKNOWN"},
+                  "nginx": {"status": "NOT_CONFIGURED", "names": [], "partial": False},
                   "local_https": {"status": "NOT_CONFIGURED", "sites": []},
                   "compose": {"status": "NOT_CONFIGURED", "containers": []},
                   "docker": {"status": "OBSERVED", "containers": [

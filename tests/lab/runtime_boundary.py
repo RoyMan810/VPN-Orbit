@@ -219,6 +219,7 @@ def main():
             for name in ("ssh-gateway", "typed-helper"):
                 shutil.copyfile(REPO / "remote" / name, helper_dir / name)
                 (helper_dir / name).chmod(0o755)
+            shutil.copyfile(REPO / "vpn_orbit/runtime/nginx_inventory.py", helper_dir / "nginx_inventory.py")
             sudoers.write_text('Defaults:vpn-orbit-svc env_reset,secure_path="/usr/sbin:/usr/bin:/sbin:/bin"\nvpn-orbit-svc ALL=(root) NOPASSWD: /usr/local/libexec/vpn-orbit/typed-helper ""\n')
             sudoers.chmod(0o440)
             sudoers_created = True
@@ -457,7 +458,7 @@ Match User {account}
             if sudoers_created:
                 sudoers.unlink(missing_ok=True)
             if helper_created:
-                for name in ("ssh-gateway", "typed-helper"):
+                for name in ("ssh-gateway", "typed-helper", "nginx_inventory.py"):
                     (helper_dir / name).unlink(missing_ok=True)
                 helper_dir.rmdir()
             if user_created:

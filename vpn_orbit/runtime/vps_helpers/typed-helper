@@ -1,5 +1,6 @@
 #!/usr/bin/python3 -I
 """Read-only root observation. No command, path or target arguments are accepted."""
+from contextlib import ExitStack
 from datetime import datetime
 import http.client
 from ipaddress import ip_address
@@ -7,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import signal
 import socket
 import ssl
@@ -20,6 +22,7 @@ from urllib.parse import urlencode
 DOCKER_SCOPE = Path("/etc/vpn-orbit/docker-discovery.json")
 COMPOSE_DISCOVERY = Path("/etc/vpn-orbit/compose-discovery.enabled")
 COMPOSE_RESOURCE_SCOPE = b"enabled-with-resources\n"
+NGINX_SCOPE = Path("/etc/vpn-orbit/nginx-inventory.files")
 LOCAL_HTTPS_SCOPE = Path("/etc/vpn-orbit/local-https.names")
 DOCKER_SOCKET = Path("/run/docker.sock")
 MAX_CONTAINERS = 8
@@ -450,8 +453,61 @@ def observe_local_https(path=LOCAL_HTTPS_SCOPE):
     return {"status": "OBSERVED", "sites": [local_https_endpoint(context, name) for name in sorted(names)]}
 
 
+def read_nginx_config(root, relative):
+    with ExitStack() as stack:
+        directory = None
+        for path in (root, *[Path(part) for part in relative.parts[:-1]]):
+            directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            stack.callback(os.close, directory)
+            if not protected_directory(os.fstat(directory)):
+                raise ValueError("unprotected Nginx directory")
+        fd = os.open(relative.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory)
+        with os.fdopen(fd, "rb") as config:
+            entry = os.fstat(config.fileno())
+            if (not stat.S_ISREG(entry.st_mode) or entry.st_uid != 0 or entry.st_nlink != 1
+                    or entry.st_mode & 0o022):
+                raise ValueError("unprotected Nginx configuration")
+            return config.read(128 * 1024 + 1)
+
+
+def observe_nginx(path=NGINX_SCOPE, root=Path("/etc/nginx")):
+    empty = {"names": [], "partial": False}
+    try:
+        files = read_root_config(path, 1024).decode("ascii").splitlines()
+        if (not 1 <= len(files) <= 8 or len(set(files)) != len(files)
+                or any(not re.fullmatch(r"nginx\.conf|(?:sites-available|conf\.d)/[A-Za-z0-9][A-Za-z0-9_.-]{0,119}", f)
+                       for f in files)):
+            raise ValueError("invalid Nginx observation scope")
+    except FileNotFoundError:
+        return {"status": "NOT_CONFIGURED", **empty}
+    except (OSError, ValueError):
+        return {"status": "POLICY_INVALID", **empty}
+
+    names = set()
+    partial = "nginx.conf" not in files
+    try:
+        parser = runpy.run_path(str(Path(__file__).resolve().with_name("nginx_inventory.py")))["inspect_config"]
+        for name in files:
+            config = read_nginx_config(root, Path(name))
+            if len(config) > 128 * 1024:
+                return {"status": "LIMIT_EXCEEDED", **empty}
+            report = parser(config, http_fragment=name != "nginx.conf")
+            partial |= report["includes_unread"]
+            for server in report["servers"]:
+                names.update(server["names"])
+                partial |= server["other_names"]
+            if len(names) > 16 or sum(map(len, names)) > 1024:
+                return {"status": "LIMIT_EXCEEDED", **empty}
+    except (OSError, ValueError):
+        return {"status": "UNAVAILABLE", **empty}
+    return {"status": "OBSERVED", "names": sorted(names), "partial": partial}
+
+
 def probe_reply(value):
     output = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    if len(output) + 1 > MAX_PROBE_REPLY and value["nginx"]["status"] == "OBSERVED":
+        value["nginx"] = {"status": "LIMIT_EXCEEDED", "names": [], "partial": False}
+        output = json.dumps(value, sort_keys=True, separators=(",", ":"))
     if len(output) + 1 > MAX_PROBE_REPLY:
         # Keep the container inventory within the existing SSH and IPC limits.
         for row in value["compose"]["containers"]:
@@ -468,20 +524,20 @@ def probe_reply(value):
 def main():
     if os.geteuid() != 0 or len(sys.argv) != 1:
         return 65
-    request = b'{"operation":"probe","version":12}\n'
+    request = b'{"operation":"probe","version":13}\n'
     signal.alarm(5)
     payload = sys.stdin.buffer.read(len(request) + 1)
     signal.alarm(0)
     if payload != request:
         return 65
-    value = {"v": 12, "uid": 0, "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+    value = {"v": 13, "uid": 0, "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
              "observed_at": int(time.time()),
              "software": {"docker": tool_status("/usr/bin/docker"), "nginx": tool_status("/usr/sbin/nginx"),
                           "nginx_service": nginx_service_state()}}
 
     # A total deadline also bounds responses which deliver bytes slowly.
     def timed_out(_signum, _frame):
-        raise TimeoutError("Docker observation timed out")
+        raise TimeoutError("Observation timed out")
 
     previous = signal.signal(signal.SIGALRM, timed_out)
     deadline = time.monotonic() + 4
@@ -499,6 +555,13 @@ def main():
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous)
     value["local_https"] = observe_local_https()
+    previous = signal.signal(signal.SIGALRM, timed_out)
+    signal.alarm(1)
+    try:
+        value["nginx"] = observe_nginx()
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
     print(probe_reply(value))
     return 0
 

@@ -52,7 +52,8 @@ FIREWALL_SSH_PROFILE = SSH_PROFILE.removesuffix("Match all\n") + f"""Match User 
 Match all
 """
 
-HELPER_FILES = ("ssh-gateway", "typed-helper", "firewall-gateway", "firewall-apply", "firewall-rollback")
+PROBE_FILES = ("ssh-gateway", "typed-helper", "nginx_inventory.py")
+HELPER_FILES = (*PROBE_FILES, "firewall-gateway", "firewall-apply", "firewall-rollback")
 
 
 def _protected_ancestors(path):
@@ -270,9 +271,11 @@ trap 'rm -f "$work/file"; rmdir "$work"' EXIT
 
 
 def _phase_helpers(ctx, *, inspect=False):
-    helper_names = HELPER_FILES if ctx["firewall"] else ("ssh-gateway", "typed-helper")
-    files = [(f"{LIBEXEC}/{name}", (ASSETS / "vps_helpers" / name).read_bytes(), "0755", f"helper-{name}")
-             for name in helper_names]
+    helper_names = HELPER_FILES if ctx["firewall"] else PROBE_FILES
+    files = []
+    for name in helper_names:
+        asset = ASSETS / name if name == "nginx_inventory.py" else ASSETS / "vps_helpers" / name
+        files.append((f"{LIBEXEC}/{name}", asset.read_bytes(), "0755", f"helper-{name}"))
     if ctx["firewall"]:
         policy = json.dumps({"v": 1, "ssh_port": ctx["ssh_port"], "max_rules": 32,
                              "rollback_seconds": 60}, sort_keys=True, separators=(",", ":")) + "\n"

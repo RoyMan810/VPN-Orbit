@@ -10,7 +10,7 @@ from ..errors import Denied
 
 
 MAX_FRAME = 16384
-PROBE_VERSION = 12
+PROBE_VERSION = 13
 PROBE_COMMAND = f"vpn-orbit.v{PROBE_VERSION}.probe"
 PROBE_REQUEST = b'{"operation":"probe","version":%d}\n' % PROBE_VERSION
 MAX_PROBE_REPLY = 15360
@@ -290,8 +290,24 @@ def local_https_summary(value):
     return value
 
 
+def nginx_summary(value):
+    fields(value, ("status", "names", "partial"))
+    status, names, partial = value["status"], value["names"], value["partial"]
+    if (status not in ("OBSERVED", "NOT_CONFIGURED", "POLICY_INVALID", "UNAVAILABLE", "LIMIT_EXCEEDED")
+            or type(partial) is not bool or not isinstance(names, list) or len(names) > 16
+            or status != "OBSERVED" and (names or partial)):
+        raise Denied("PROBE_NGINX_INVALID")
+    for name in names:
+        if (not isinstance(name, str) or len(name) > 253 or name.rsplit(".", 1)[-1].isdigit()
+                or not re.fullmatch(rf"{DNS_LABEL}(?:\.{DNS_LABEL})+", name)):
+            raise Denied("PROBE_NGINX_INVALID")
+    if names != sorted(set(names)) or sum(map(len, names)) > 1024:
+        raise Denied("PROBE_NGINX_INVALID")
+    return value
+
+
 def observation_summary(value):
-    fields(value, ("status", "source", "observed_at", "boot_id", "software", "docker", "compose", "local_https"))
+    fields(value, ("status", "source", "observed_at", "boot_id", "software", "docker", "compose", "local_https", "nginx"))
     if value["status"] != "REACHABLE" or value["source"] != "restricted_helper":
         raise Denied("BROKER_OBSERVATION_INVALID")
     integer(value["observed_at"], 0, 2**63 - 1)
@@ -300,4 +316,5 @@ def observation_summary(value):
     docker_summary(value["docker"])
     compose_summary(value["compose"])
     local_https_summary(value["local_https"])
+    nginx_summary(value["nginx"])
     return value

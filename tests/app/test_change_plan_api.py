@@ -37,6 +37,7 @@ class ChangePlanAPITests(Fixture):
             "status": "REACHABLE", "source": "restricted_helper", "observed_at": self.now,
             "boot_id": "11111111-1111-1111-1111-111111111111",
             "software": {"docker": "PRESENT", "nginx": "UNKNOWN", "nginx_service": "UNKNOWN"},
+            "nginx": {"status": "NOT_CONFIGURED", "names": [], "partial": False},
             "local_https": {"status": "NOT_CONFIGURED", "sites": []},
             "compose": {"status": "NOT_CONFIGURED", "containers": []},
             "docker": {"status": "OBSERVED", "containers": [{

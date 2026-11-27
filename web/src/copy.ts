@@ -145,6 +145,14 @@ export const copy = {
     observedSoftware: 'Observed software',
     softwareHint: 'Host executables and service state at the time of the last observation.',
     nginxService: 'Nginx systemd service',
+    nginxHosts: 'Configured Nginx names',
+    nginxHostsPartial: 'Partial snapshot. Includes or patterns may contain other names.',
+    nginxHostsEmpty: 'No exact DNS names found in the selected files.',
+    nginxHostsStatus: {
+      POLICY_INVALID: 'The Nginx file list is invalid or inaccessible.',
+      UNAVAILABLE: 'The selected Nginx files could not be read.',
+      LIMIT_EXCEEDED: 'The Nginx snapshot exceeds the observation limit.',
+    },
     localHttps: 'Local HTTPS certificates',
     localHttpsScope: 'TLS on 127.0.0.1:443 for names selected on this VPS.',
     localHttpsStatus: {
@@ -433,6 +441,14 @@ export const copy = {
     observedSoftware: 'Обнаруженное ПО',
     softwareHint: 'Исполняемые файлы и состояние службы на момент последнего наблюдения.',
     nginxService: 'Служба Nginx в systemd',
+    nginxHosts: 'Имена в конфигурации Nginx',
+    nginxHostsPartial: 'Неполный снимок. Подключаемые файлы и шаблоны могут содержать другие имена.',
+    nginxHostsEmpty: 'В выбранных файлах нет точных DNS-имён.',
+    nginxHostsStatus: {
+      POLICY_INVALID: 'Список файлов Nginx недоступен или некорректен.',
+      UNAVAILABLE: 'Не удалось прочитать выбранные файлы Nginx.',
+      LIMIT_EXCEEDED: 'Снимок Nginx превысил лимит наблюдения.',
+    },
     localHttps: 'Локальные HTTPS-сертификаты',
     localHttpsScope: 'Проверка TLS на 127.0.0.1:443 для имён, заданных на VPS.',
     localHttpsStatus: {

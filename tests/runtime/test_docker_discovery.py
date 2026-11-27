@@ -48,7 +48,7 @@ class DockerPayloadTests(unittest.TestCase):
         compose = {"status": "OBSERVED", "containers": [{**ROW, "image_id": "sha256:" + FOREIGN}]}
         value = {"v": PROBE_VERSION, "uid": 0, "boot_id": "12345678-1234-1234-1234-123456789abc",
                  "observed_at": 1000, "software": {"docker": "PRESENT", "nginx": "NOT_DETECTED", "nginx_service": "NOT_FOUND"},
-                 "docker": scoped, "local_https": {"status": "NOT_CONFIGURED", "sites": []}, "compose": compose}
+                 "docker": scoped, "nginx": {"status": "NOT_CONFIGURED", "names": [], "partial": False}, "local_https": {"status": "NOT_CONFIGURED", "sites": []}, "compose": compose}
         result = parse_probe(canonical(value), now=1000)
         self.assertEqual(result["docker"], scoped)
         self.assertEqual(result["compose"], compose)
@@ -65,10 +65,10 @@ class DockerPayloadTests(unittest.TestCase):
         scoped = {"status": "NOT_CONFIGURED", "containers": []}
         value = {"v": PROBE_VERSION, "uid": 0, "boot_id": "12345678-1234-1234-1234-123456789abc",
                  "observed_at": 1000, "software": {"docker": "PRESENT", "nginx": "NOT_DETECTED", "nginx_service": "NOT_FOUND"},
-                 "docker": scoped, "local_https": {"status": "NOT_CONFIGURED", "sites": []}, "compose": {"status": "OBSERVED", "containers": [row]}}
+                 "docker": scoped, "nginx": {"status": "NOT_CONFIGURED", "names": [], "partial": False}, "local_https": {"status": "NOT_CONFIGURED", "sites": []}, "compose": {"status": "OBSERVED", "containers": [row]}}
         self.assertEqual(parse_probe(canonical(value), now=1000)["compose"], value["compose"])
         with self.assertRaises(Denied):
-            parse_probe(canonical({**value, "v": 11}), now=1000)
+            parse_probe(canonical({**value, "v": 12}), now=1000)
         for rows in ([{**base, "networks": []}], [row, {**base, "id": FOREIGN}],
                      [{**row, "volumes": ["/host/private"]}], [{**row, "volumes": ["x" * 65]}],
                      [{**row, "volumes": ["data", "data"]}], [{**row, "volumes": ["web", "data"]}],
@@ -89,6 +89,7 @@ class DockerPayloadTests(unittest.TestCase):
         value = {"v": PROBE_VERSION, "uid": 0, "boot_id": "12345678-1234-1234-1234-123456789abc", "observed_at": 1000,
                  "software": {"docker": "PRESENT", "nginx": "NOT_DETECTED", "nginx_service": "NOT_FOUND"},
                  "docker": {"status": "OBSERVED", "containers": scoped},
+                 "nginx": {"status": "NOT_CONFIGURED", "names": [], "partial": False},
                  "local_https": {"status": "OBSERVED", "sites": [
                      {"name": chr(97 + i) + "a" * 62 + "." + "b" * 63 + "." + "c" * 63 + "." + "d" * 61,
                       "state": "VERIFIED", "expires_at": 253402300799} for i in range(2)
@@ -96,7 +97,7 @@ class DockerPayloadTests(unittest.TestCase):
                  "compose": {"status": "OBSERVED", "containers": compose}}
         result = parse_probe(canonical(value), now=1000)
         self.assertLess(len(canonical(value)) + 1, MAX_PROBE_REPLY)
-        self.assertLess(len(canonical(result)) + 1024, MAX_FRAME)
+        self.assertLessEqual(len(canonical(result)) + 1024, MAX_FRAME)
         names = [f"{i:064x}" for i in range(8)]
         for item in compose:
             item.update(networks=names, volumes=names)
@@ -110,13 +111,20 @@ class DockerPayloadTests(unittest.TestCase):
         self.assertEqual(result["compose"]["containers"][0]["volumes"], [])
         self.assertIsNone(result["compose"]["containers"][1]["volumes"])
         self.assertIsNone(result["compose"]["containers"][1]["networks"])
-        self.assertLess(len(canonical(result)) + 1024, MAX_FRAME)
+        self.assertLessEqual(len(canonical(result)) + 1024, MAX_FRAME)
         self.assertEqual(result["local_https"], value["local_https"])
+
+        value["nginx"] = {"status": "OBSERVED", "partial": True, "names": ["panel.example"]}
+        reply = HELPER["probe_reply"]
+        with patch.dict(reply.__globals__, {"MAX_PROBE_REPLY": len(canonical(value)) - 1}):
+            wire = reply(value).encode() + b"\n"
+        nginx_limited = parse_probe(wire, now=1000)
+        self.assertEqual(nginx_limited["nginx"], {"status": "LIMIT_EXCEEDED", "names": [], "partial": False})
+        self.assertEqual(nginx_limited["local_https"], result["local_https"])
 
         value["local_https"]["sites"] += [
             {**site, "name": chr(99 + i) + site["name"][1:]} for i, site in enumerate(value["local_https"]["sites"])
         ]
-        reply = HELPER["probe_reply"]
         with patch.dict(reply.__globals__, {"MAX_PROBE_REPLY": len(canonical(value)) - 1}):
             wire = reply(value).encode() + b"\n"
         self.assertLessEqual(len(wire), MAX_PROBE_REPLY)

@@ -555,6 +555,9 @@ test('shows verified Compose services per project from the selected VPS observat
     }
   })
   await expect(page.locator('.software dl > div').filter({ hasText: 'Nginx systemd service' }).locator('dd')).toHaveText('Active')
+  const names = page.getByRole('region', { name: 'Configured Nginx names' })
+  await expect(names.getByText('www.example.test', { exact: true })).toBeVisible()
+  await expect(names.getByText(/^Partial snapshot/)).toBeVisible()
   const https = page.getByRole('region', { name: 'Local HTTPS certificates' })
   await expect(https.getByText('cabinet.example.test', { exact: true })).toBeVisible()
   await expect(https.getByText(/^Expires /)).toBeVisible()
