@@ -303,7 +303,7 @@ def parse_probe(output, *, now):
     text(value["boot_id"], r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}")
     integer(value["observed_at"], now - 300, now + 2)
     return {"status": "REACHABLE", "source": "restricted_helper", "observed_at": value["observed_at"],
-            "boot_id": value["boot_id"], "software": software_summary(value["software"]),
+            "boot_id": value["boot_id"], "software": software_summary(value["software"], complete=True),
             "docker": docker_summary(value["docker"], complete=True), "compose": compose_summary(value["compose"])}
 
 

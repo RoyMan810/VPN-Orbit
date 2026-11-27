@@ -10,7 +10,7 @@ from ..errors import Denied
 
 
 MAX_FRAME = 16384
-PROBE_VERSION = 10
+PROBE_VERSION = 11
 PROBE_COMMAND = f"vpn-orbit.v{PROBE_VERSION}.probe"
 PROBE_REQUEST = b'{"operation":"probe","version":%d}\n' % PROBE_VERSION
 MAX_PROBE_REPLY = 15360
@@ -151,9 +151,15 @@ def integer(value, low, high):
     return value
 
 
-def software_summary(value):
-    fields(value, ("docker", "nginx"))
-    if any(state not in ("PRESENT", "NOT_DETECTED", "UNKNOWN") for state in value.values()):
+def software_summary(value, *, complete=False):
+    names = ("docker", "nginx")
+    includes_service = complete or isinstance(value, dict) and "nginx_service" in value
+    fields(value, names + (("nginx_service",) if includes_service else ()))
+    if any(value[name] not in ("PRESENT", "NOT_DETECTED", "UNKNOWN") for name in names):
+        raise Denied("PROBE_SOFTWARE_INVALID")
+    if includes_service and value["nginx_service"] not in (
+        "ACTIVE", "INACTIVE", "FAILED", "TRANSITIONING", "NOT_FOUND", "UNKNOWN",
+    ):
         raise Denied("PROBE_SOFTWARE_INVALID")
     return value
 

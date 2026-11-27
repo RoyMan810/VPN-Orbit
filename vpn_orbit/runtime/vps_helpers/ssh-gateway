@@ -7,9 +7,9 @@ import sys
 
 
 def main():
-    if len(sys.argv) != 1 or os.environ.get("SSH_ORIGINAL_COMMAND") != "vpn-orbit.v10.probe":
+    if len(sys.argv) != 1 or os.environ.get("SSH_ORIGINAL_COMMAND") != "vpn-orbit.v11.probe":
         return 65
-    request = b'{"operation":"probe","version":10}\n'
+    request = b'{"operation":"probe","version":11}\n'
     signal.alarm(5)
     payload = sys.stdin.buffer.read(len(request) + 1)
     signal.alarm(0)
@@ -17,7 +17,7 @@ def main():
         return 65
     try:
         return subprocess.run(["/usr/bin/sudo", "-n", "--", "/usr/local/libexec/vpn-orbit/typed-helper"],
-                              input=request, timeout=5, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}).returncode
+                              input=request, timeout=6, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}).returncode
     except (OSError, subprocess.SubprocessError):
         return 70
 

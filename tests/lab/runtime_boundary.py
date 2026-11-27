@@ -351,8 +351,9 @@ Match User {account}
             assert job(job_id)["status"] == "SUCCEEDED", job(job_id)
             assert job(job_id)["result"]["status"] == "REACHABLE"
             software = job(job_id)["result"]["software"]
-            assert software.keys() == {"docker", "nginx"}
-            assert set(software.values()) <= {"PRESENT", "NOT_DETECTED", "UNKNOWN"}
+            assert software.keys() == {"docker", "nginx", "nginx_service"}
+            assert {software["docker"], software["nginx"]} <= {"PRESENT", "NOT_DETECTED", "UNKNOWN"}
+            assert software["nginx_service"] in {"ACTIVE", "INACTIVE", "FAILED", "TRANSITIONING", "NOT_FOUND"}
             docker_summary = job(job_id)["result"]["docker"]
             assert docker_summary == {"status": "NOT_CONFIGURED", "containers": []}
             inventory = client.get(f"/api/v1/resources/{TARGET}")
@@ -360,7 +361,7 @@ Match User {account}
             assert inventory.json()["observation"]["last_success"]["software"] == software
             assert inventory.json()["observation"]["last_success"]["docker"] == docker_summary
             print("Distinct API and Worker UIDs committed one verified SSH observation through Broker and host authority.", flush=True)
-            print("The restricted v4 helper returned software metadata and a fail-closed Docker scope through the inventory API.", flush=True)
+            print("The restricted SSH helper returned software metadata and a fail-closed Docker scope through the inventory API.", flush=True)
             for role in ("api", "preparation-api", "worker"):
                 blocked = json.loads(invoke("access", role).stdout)
                 for name in ("vault", "gate_journal", "credential"):

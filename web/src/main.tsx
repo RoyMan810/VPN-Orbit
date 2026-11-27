@@ -225,6 +225,9 @@ function Detail({ resource, t, lang, now, expired, session }: {
         <dl>
           <div><dt>Docker</dt><dd>{presence(software.docker)}</dd></div>
           <div><dt>Nginx</dt><dd>{presence(software.nginx)}</dd></div>
+          {software.nginx_service && <div>
+            <dt>{t.nginxService}</dt><dd>{t.nginxServiceState[software.nginx_service]}</dd>
+          </div>}
         </dl>
       </> : <p>{t.noSoftware}</p>}
     </div>}
