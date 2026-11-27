@@ -45,6 +45,21 @@ export interface ComposeObservation {
     volumes?: string[] | null
   })[]
 }
+export interface ComposeAdoptionPreview {
+  version: 1
+  action: 'compose.adopt'
+  status: 'PREVIEW_ONLY'
+  target: { resource_id: string; project: string }
+  resource_revision: number
+  policy_revision: number
+  observed_at: number
+  boot_id: string
+  containers: ComposeObservation['containers']
+  attachments: Record<'networks' | 'volumes', {
+    coverage: 'PARTIAL' | 'OBSERVED_COMPOSE_ONLY'
+    shared: { name: string; other_projects: string[] }[]
+  }>
+}
 export interface DockerRestartPreview {
   version: 1
   action: 'docker.restart'
