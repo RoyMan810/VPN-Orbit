@@ -22,8 +22,10 @@ from urllib.parse import urlencode
 
 DOCKER_SCOPE = Path("/etc/vpn-orbit/docker-discovery.json")
 COMPOSE_DISCOVERY = Path("/etc/vpn-orbit/compose-discovery.enabled")
+COMPOSE_BASIC_SCOPE = b"enabled\n"
 COMPOSE_RESOURCE_SCOPE = b"enabled-with-resources\n"
 COMPOSE_ADOPTION_SCOPE = b"enabled-with-adoption\n"
+COMPOSE_SCOPES = (COMPOSE_BASIC_SCOPE, COMPOSE_RESOURCE_SCOPE, COMPOSE_ADOPTION_SCOPE)
 APP_LINKS_SCOPE = Path("/etc/vpn-orbit/application-links.txt")
 FIREWALL_SCOPE = Path("/etc/vpn-orbit/firewall-inventory.enabled")
 NGINX_SCOPE = Path("/etc/vpn-orbit/nginx-inventory.files")
@@ -421,8 +423,8 @@ def compose_adoption_evidence(path, rows, network_ids):
 
 def observe_compose(switch=COMPOSE_DISCOVERY, socket_path=DOCKER_SOCKET):
     try:
-        scope = read_root_config(switch, len(COMPOSE_ADOPTION_SCOPE))
-        if scope not in (b"enabled\n", COMPOSE_RESOURCE_SCOPE, COMPOSE_ADOPTION_SCOPE):
+        scope = read_root_config(switch, max(map(len, COMPOSE_SCOPES)))
+        if scope not in COMPOSE_SCOPES:
             raise ValueError("invalid Compose discovery setting")
     except FileNotFoundError:
         return {"status": "NOT_CONFIGURED", "containers": []}
@@ -456,7 +458,7 @@ def observe_compose(switch=COMPOSE_DISCOVERY, socket_path=DOCKER_SOCKET):
                     or not isinstance(state, str) or state not in DOCKER_STATES):
                 raise ValueError("invalid or duplicate Compose container")
             item["state"] = state.upper()
-            if scope != b"enabled\n":
+            if scope != COMPOSE_BASIC_SCOPE:
                 item.update(compose_attachments(row))
             if scope == COMPOSE_ADOPTION_SCOPE:
                 for name in item["networks"] or ():

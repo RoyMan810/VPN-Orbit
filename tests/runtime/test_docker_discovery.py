@@ -324,7 +324,13 @@ class DockerTransportTests(unittest.TestCase):
                 (b"enabled-with-resources\n", {**base, "networks": ["bridge"], "volumes": ["named-data"]}),
             ):
                 self.requests.clear()
-                with patch.dict(observe.__globals__, {"read_root_config": lambda *_: switch}):
+
+                def read_switch(_path, limit):
+                    if len(switch) > limit:
+                        raise ValueError("Docker configuration too large")
+                    return switch
+
+                with patch.dict(observe.__globals__, {"read_root_config": read_switch}):
                     self.assertEqual(observe(), {"status": "OBSERVED", "containers": [expected]})
                 self.assertEqual(len(self.requests), 1)
             row.update(NetworkSettings={"Networks": {}}, Mounts=[{"Type": "volume"}])
