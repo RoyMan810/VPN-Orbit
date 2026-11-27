@@ -272,6 +272,10 @@ function Detail({ resource, t, lang, now, expired, session }: {
       </> : <p>{t.appLinksStatus[appLinks.status]}</p>}
     </section>}
     {sample && <ComposeInventory compose={sample.compose}
+      key={JSON.stringify([resource.id, resource.revision, resource.policy_revision, current.status,
+        observation.last_checked_at, sample.observed_at, sample.boot_id])}
+      adoption={session.user.role === 'Owner' && current.status === 'REACHABLE' && sample.compose?.status === 'OBSERVED'
+        ? { resource, sample, expired } : undefined}
       scoped={docker?.status === 'OBSERVED' ? docker.containers : []} historical={current.status !== 'REACHABLE'} t={t}/>}
     {docker && <div className="software">
       <h3>{t.dockerHeading}</h3>

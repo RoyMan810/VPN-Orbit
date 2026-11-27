@@ -85,6 +85,11 @@ def fixture(directory):
             ]}
             for container in result["docker"]["containers"]:
                 container.update(mount_status="UNKNOWN", network_status="UNKNOWN", dependency_status="UNKNOWN", started_at=None)
+            result["compose"] = {"status": "OBSERVED", "containers": [
+                {**{name: container[name] for name in ("id", "project", "service", "state")},
+                 "image_id": "sha256:" + "b" * 64}
+                for container in result["docker"]["containers"] if container["state"] in ("RUNNING", "CREATED", "EXITED")
+            ]}
         else:
             result["software"] = {"docker": "PRESENT", "nginx": "NOT_DETECTED", "nginx_service": "NOT_FOUND"}
             result["docker"] = {"status": "NOT_CONFIGURED", "containers": []}

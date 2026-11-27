@@ -18,6 +18,7 @@ PARTIAL_PREPARATION = "VPS_PREPARATION_PARTIAL_VERIFIED"
 ULID = r"[0-7][0-9A-HJKMNP-TV-Z]{25}"
 SHA256 = r"[0-9a-f]{64}"
 DNS_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+COMPOSE_PROJECT = r"[a-z0-9][a-z0-9_-]{0,62}"
 BOOT_ID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
 DOCKER_STARTED_AT = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z"
 
@@ -212,7 +213,7 @@ def compose_summary(value):
                     raise Denied("PROBE_COMPOSE_INVALID")
         identity = text(row["id"], SHA256)
         text(row["image_id"], "sha256:" + SHA256)
-        text(row["project"], r"[a-z0-9][a-z0-9_-]{0,62}")
+        text(row["project"], COMPOSE_PROJECT)
         text(row["service"], r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}")
         if identity in seen or row["state"] not in ("CREATED", "RESTARTING", "RUNNING", "REMOVING", "PAUSED", "EXITED", "DEAD"):
             raise Denied("PROBE_COMPOSE_INVALID")

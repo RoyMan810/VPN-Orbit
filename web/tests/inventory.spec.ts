@@ -605,6 +605,28 @@ test('shows verified Compose services per project from the selected VPS observat
   expect(policyErrors).toEqual([])
 })
 
+test('previews an observed Compose project on demand and clears the preview when stale', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 })
+  await page.clock.install()
+  await signIn(page)
+  const button = page.getByRole('button', { name: 'Adoption preview · fixture', exact: true })
+  const preview = page.getByRole('region', { name: 'Adoption preview · fixture', exact: true })
+  await expect(preview).toHaveCount(0)
+  const requested = page.waitForResponse(reply => reply.url().endsWith('/compose/projects/fixture/adoption-preview'))
+  await button.click()
+  const reply = await requested
+  expect(reply.request().method()).toBe('GET')
+  expect(reply.status()).toBe(200)
+  await expect(preview.getByText('Local image ID', { exact: false })).toHaveCount(2)
+  await expect(preview.getByText('Partial data', { exact: true })).toHaveCount(2)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320)
+  await page.getByLabel('Language').selectOption('ru')
+  await expect(page.getByRole('region', { name: 'Предпросмотр принятия · fixture', exact: true })).toBeVisible()
+  await page.clock.fastForward(301_000)
+  await expect(page.getByRole('region', { name: 'Предпросмотр принятия · fixture', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Предпросмотр принятия · fixture', exact: true })).toHaveCount(0)
+})
+
 test('shows Docker host bindings, unavailable data and historical observations in both languages', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 844 })
   await page.clock.install()

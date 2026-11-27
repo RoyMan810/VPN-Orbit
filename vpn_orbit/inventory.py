@@ -1,5 +1,6 @@
 """Scoped, bounded read model over registered resources and completed probes."""
 
+from collections import defaultdict
 import json
 import re
 import time
@@ -7,7 +8,7 @@ import time
 from .auth import AuthService, Role, etag
 from .errors import Denied
 from .queue import JobQueue
-from .runtime.protocol import SHA256, ULID, checksum, observation_summary
+from .runtime.protocol import COMPOSE_PROJECT, SHA256, ULID, checksum, observation_summary
 
 
 _SELECT = """
@@ -150,5 +151,52 @@ class Inventory:
             'observed_at': sample['observed_at'],
             'boot_id': sample['boot_id'],
             'risk': 'TEMPORARY_SERVICE_INTERRUPTION',
+        }
+        return {**preview, 'preview_digest': checksum(preview)}
+
+    def adoption_preview(self, auth, token, identity, project):
+        if re.fullmatch(COMPOSE_PROJECT, project) is None:
+            raise Denied('COMPOSE_PROJECT_NOT_FOUND', 404)
+        resource = self._resource(auth, token, identity)
+        observation = resource['observation']
+        if observation['status'] != 'REACHABLE':
+            raise Denied('FRESH_OBSERVATION_REQUIRED', 409)
+        sample = observation['last_success']
+        compose = sample['compose']
+        if compose['status'] != 'OBSERVED':
+            raise Denied('COMPOSE_OBSERVATION_REQUIRED', 409)
+        rows = compose['containers']
+        containers = [row for row in rows if row['project'] == project]
+        if not containers:
+            raise Denied('COMPOSE_PROJECT_NOT_FOUND', 404)
+
+        attachments = {}
+        for kind in ('networks', 'volumes'):
+            members = defaultdict(set)
+            for row in rows:
+                for name in row.get(kind) or ():
+                    if kind == 'networks' and name in {'bridge', 'host', 'none'}:
+                        continue
+                    members[name].add(row['project'])
+            attachments[kind] = {
+                'coverage': 'PARTIAL' if any(row.get(kind) is None for row in rows) else 'OBSERVED_COMPOSE_ONLY',
+                'shared': [
+                    {'name': name, 'other_projects': sorted(projects - {project})}
+                    for name, projects in sorted(members.items()) if project in projects and len(projects) > 1
+                ],
+            }
+
+        preview = {
+            'version': 1,
+            'action': 'compose.adopt',
+            'status': 'PREVIEW_ONLY',
+            'target': {'resource_id': identity, 'project': project},
+            'resource_revision': resource['revision'],
+            'policy_revision': resource['policy_revision'],
+            'observed_at': sample['observed_at'],
+            'boot_id': sample['boot_id'],
+            'snapshot_digest': checksum(sample),
+            'containers': containers,
+            'attachments': attachments,
         }
         return {**preview, 'preview_digest': checksum(preview)}

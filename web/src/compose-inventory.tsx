@@ -1,4 +1,7 @@
 import { Table } from '@mantine/core'
+import { useState } from 'react'
+import { AdoptionPreview } from './adoption-preview'
+import type { AdoptionContext } from './adoption-preview'
 import type { ComposeObservation, DockerContainer } from './api'
 import type { Copy } from './copy'
 
@@ -13,9 +16,10 @@ function Attachments({ containers, kind, t }: { containers: ProjectContainer[]; 
   return <><code>{names.join(', ')}</code>{incomplete && <div>{t.composeAttachmentsIncomplete}</div>}</>
 }
 
-export function ComposeInventory({ compose, scoped, historical, t }: {
-  compose?: ComposeObservation; scoped: DockerContainer[]; historical: boolean; t: Copy
+export function ComposeInventory({ compose, scoped, historical, adoption, t }: {
+  compose?: ComposeObservation; scoped: DockerContainer[]; historical: boolean; adoption?: AdoptionContext; t: Copy
 }) {
+  const [selected, setSelected] = useState<string | null>(null)
   const discovered = compose?.status === 'OBSERVED'
   const showAttachments = discovered && compose.containers.some(container => container.networks !== undefined)
   const projects = new Map<string, ProjectContainer[]>()
@@ -57,11 +61,19 @@ export function ComposeInventory({ compose, scoped, historical, t }: {
       </Table.Tr></Table.Thead>
       <Table.Tbody>{[...projects].map(([project, containers]) => <Table.Tr key={project}>
         <Table.Th scope="row"><code>{project}</code></Table.Th>
-        <Table.Td><code>{[...new Set(containers.map(container => container.service))].join(', ')}</code></Table.Td>
+        <Table.Td><code>{[...new Set(containers.map(container => container.service))].join(', ')}</code>
+          {adoption && <button type="button" className="compose-adoption-trigger"
+            aria-label={`${t.adoptionPreview} · ${project}`} aria-expanded={selected === project}
+            aria-controls={selected === project ? 'compose-adoption-preview' : undefined}
+            onClick={() => setSelected(selected === project ? null : project)}>
+            {t.adoptionOpen}
+          </button>}
+        </Table.Td>
         {showAttachments && <Table.Td><Attachments containers={containers} kind="networks" t={t} /></Table.Td>}
         {showAttachments && <Table.Td><Attachments containers={containers} kind="volumes" t={t} /></Table.Td>}
       </Table.Tr>)}</Table.Tbody>
     </Table> : (discovered || scoped.length > 0) && <p>{t.composeEmpty}</p>}
+    {adoption && selected && projects.has(selected) && <AdoptionPreview key={selected} {...adoption} project={selected} t={t}/>}
     {shared.length > 0 && <section aria-labelledby="compose-shared-heading">
       <h4 id="compose-shared-heading">{t.composeShared}</h4>
       <dl>{shared.map(resource => <div key={JSON.stringify([resource.kind, resource.name])}>

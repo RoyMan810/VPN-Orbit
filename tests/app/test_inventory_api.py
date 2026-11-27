@@ -95,6 +95,63 @@ class InventoryTests(Fixture):
         self.assertEqual(self.restart_preview().status_code, 200)
         self.assertIsNone(self.detail(resource=OTHER).json()["observation"]["last_success"])
 
+    def test_adoption_preview_reports_shared_attachments_from_the_current_scope(self):
+        def row(digit, project, networks, volumes):
+            return {"id": digit * 64, "image_id": "sha256:" + "d" * 64, "project": project,
+                    "service": "web", "state": "RUNNING", "networks": networks, "volumes": volumes}
+
+        target = row("a", "external", ["bridge", "common"], ["data", "external_data"])
+        other = row("b", "proxy", ["bridge", "common"], ["data"])
+        incomplete = row("c", "monitoring", [], None)
+        compose = {"status": "OBSERVED", "containers": [target, other, incomplete]}
+        self.complete(compose=compose)
+        before = self.store.verify_audit()
+        path = f"/api/v1/resources/{SCOPE}/compose/projects/external/adoption-preview"
+        response = self.client.get(path)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        preview = response.json()
+        digest = preview.pop("preview_digest")
+        self.assertEqual(digest, checksum(preview))
+        self.assertEqual(preview["snapshot_digest"], checksum(self.detail().json()["observation"]["last_success"]))
+        self.assertEqual(preview["target"], {"resource_id": SCOPE, "project": "external"})
+        self.assertEqual(preview["status"], "PREVIEW_ONLY")
+        self.assertEqual(preview["containers"], [target])
+        self.assertEqual(preview["attachments"], {
+            "networks": {"coverage": "OBSERVED_COMPOSE_ONLY", "shared": [{"name": "common", "other_projects": ["proxy"]}]},
+            "volumes": {"coverage": "PARTIAL", "shared": [{"name": "data", "other_projects": ["proxy"]}]},
+        })
+        self.assertEqual(self.client.get(path).json()["preview_digest"], digest)
+        self.assertEqual(self.store.verify_audit(), before)
+        with self.store.read() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM jobs").fetchone()[0], 1)
+        self.complete(compose={**compose, "containers": [target, other]})
+        updated = self.client.get(path).json()
+        self.assertNotEqual(updated["snapshot_digest"], preview["snapshot_digest"])
+        self.assertNotEqual(updated["preview_digest"], digest)
+        self.assertEqual(updated["attachments"]["volumes"]["coverage"], "OBSERVED_COMPOSE_ONLY")
+
+    def test_adoption_preview_requires_owner_and_fresh_compose_discovery(self):
+        prefix = f"/api/v1/resources/{SCOPE}/compose/projects"
+        path = prefix + "/fixture/adoption-preview"
+        self.assertEqual(self.client.get(path).status_code, 409)
+        self.complete(docker=RUNNING_DOCKER)
+        self.assertEqual(self.client.get(path).json()["code"], "COMPOSE_OBSERVATION_REQUIRED")
+        self.complete(compose={"status": "OBSERVED", "containers": [
+            {**CONTAINER_IDENTITY, "image_id": "sha256:" + CONTAINER},
+        ]})
+        self.assertEqual(self.client.get(path).json()["attachments"], {
+            kind: {"coverage": "PARTIAL", "shared": []} for kind in ("networks", "volumes")
+        })
+        for project in ("other", "Invalid", "a" * 64):
+            with self.subTest(project=project):
+                self.assertEqual(self.client.get(prefix + f"/{project}/adoption-preview").status_code, 404)
+        self.assertEqual(self.client.get(path.replace(SCOPE, OTHER)).status_code, 409)
+        self.create_user(name="observer", role="Auditor", grants=[{"permission": "vps:read", "resource_id": SCOPE}])
+        self.assertEqual(self.other_client("observer").get(path).status_code, 403)
+        self.now += 301
+        self.assertEqual(self.client.get(path).json()["code"], "FRESH_OBSERVATION_REQUIRED")
+
     def test_restart_preview_requires_read_and_restart_in_the_same_scope(self):
         self.complete(docker=RUNNING_DOCKER)
         read = {"permission": "vps:read", "resource_id": SCOPE}

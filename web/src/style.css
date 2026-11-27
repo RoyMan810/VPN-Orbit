@@ -145,6 +145,11 @@ dd { margin: 5px 0 0; font-size: 14px; font-weight: 650; }
 .software dl div { background: var(--soft); padding: 10px; border-radius: 8px; }
 .compose-projects { margin-top: 12px; table-layout: fixed; }
 .compose-projects th, .compose-projects td { overflow-wrap: anywhere; }
+.compose-adoption-trigger { display: block; margin-top: 6px; padding: 4px; max-width: 100%; }
+.compose-adoption { margin-top: 12px; padding: 12px; background: var(--soft); border-radius: 8px; overflow-wrap: anywhere; }
+.compose-adoption ul { padding-inline-start: 20px; }
+.compose-adoption li + li { margin-top: 8px; }
+.compose-adoption h5, .compose-adoption h6 { margin: 12px 0 0; font-size: 13px; }
 @media (max-width: 760px) {
   .columns { grid-template-columns: minmax(0, 1fr); }
   .topbar { flex-wrap: wrap; align-items: start; gap: 10px; }
