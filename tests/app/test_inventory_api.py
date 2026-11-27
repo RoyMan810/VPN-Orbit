@@ -122,12 +122,13 @@ class InventoryTests(Fixture):
         self.assertEqual(preview["attachments"], {
             "networks": {
                 "coverage": "OBSERVED_COMPOSE_ONLY",
-                "claims": [{"name": "common", "project": None, "status": "UNKNOWN"}],
+                "claims": [{"name": "common", "project": None, "status": "UNKNOWN", "usage": "UNKNOWN"}],
                 "shared": [{"name": "common", "other_projects": ["proxy"]}],
             },
             "volumes": {
                 "coverage": "PARTIAL",
-                "claims": [{"name": name, "project": None, "status": "UNKNOWN"} for name in ("data", "external_data")],
+                "claims": [{"name": name, "project": None, "status": "UNKNOWN", "usage": "UNKNOWN"}
+                           for name in ("data", "external_data")],
                 "shared": [{"name": "data", "other_projects": ["proxy"]}],
             },
         })
@@ -135,18 +136,25 @@ class InventoryTests(Fixture):
         self.assertEqual(self.store.verify_audit(), before)
         with self.store.read() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM jobs").fetchone()[0], 1)
-        self.complete(compose={**compose, "containers": [target, other]})
+        self.complete(compose={**compose, "containers": [target, other], "adoption_evidence": {
+            "images": {}, "networks": {}, "volumes": {},
+            "usage": {"networks": {"common": "COMPOSE_ONLY"}, "volumes": {"data": "COMPOSE_ONLY"}},
+        }})
         updated = self.client.get(path).json()
         self.assertNotEqual(updated["snapshot_digest"], preview["snapshot_digest"])
         self.assertNotEqual(updated["preview_digest"], digest)
         self.assertEqual(updated["attachments"]["volumes"]["coverage"], "OBSERVED_COMPOSE_ONLY")
+        self.assertEqual(updated["attachments"]["networks"]["claims"][0]["usage"], "OTHER_PROJECTS")
+        self.assertEqual([claim["usage"] for claim in updated["attachments"]["volumes"]["claims"]],
+                         ["OTHER_PROJECTS", "UNKNOWN"])
 
     def test_adoption_preview_checks_exact_image_digests_and_reports_resource_claims(self):
         _, pins = image_catalog()
         node = {**CONTAINER_IDENTITY, "service": "node-custom", "image_id": "sha256:" + CONTAINER,
                 "networks": ["unlabeled"], "volumes": ["local", "shared"]}
         evidence = {"images": {node["image_id"]: [pins["remnawave-node"]]},
-                    "networks": {"unlabeled": None}, "volumes": {"local": "fixture", "shared": "foreign"}}
+                    "networks": {"unlabeled": None}, "volumes": {"local": "fixture", "shared": "foreign"},
+                    "usage": {"networks": {}, "volumes": {"local": "COMPOSE_ONLY", "shared": "OUTSIDE_COMPOSE"}}}
         compose = {"status": "OBSERVED", "containers": [node], "adoption_evidence": evidence}
         self.complete(compose=compose)
         path = f"/api/v1/resources/{SCOPE}/compose/projects/fixture/adoption-preview"
@@ -157,11 +165,11 @@ class InventoryTests(Fixture):
             ],
         })
         self.assertEqual(preview["attachments"]["networks"]["claims"], [
-            {"name": "unlabeled", "project": None, "status": "UNLABELED"},
+            {"name": "unlabeled", "project": None, "status": "UNLABELED", "usage": "UNKNOWN"},
         ])
         self.assertEqual(preview["attachments"]["volumes"]["claims"], [
-            {"name": "local", "project": "fixture", "status": "PROJECT_LABEL"},
-            {"name": "shared", "project": "foreign", "status": "OTHER_PROJECT_LABEL"},
+            {"name": "local", "project": "fixture", "status": "PROJECT_LABEL", "usage": "PROJECT_ONLY"},
+            {"name": "shared", "project": "foreign", "status": "OTHER_PROJECT_LABEL", "usage": "OUTSIDE_COMPOSE"},
         ])
         for refs, status, service_status in (
             ([pins["remnawave-node"][:65] + "0" * 64], "UNVERIFIED", "PIN_NOT_VERIFIED"),

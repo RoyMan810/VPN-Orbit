@@ -37,10 +37,11 @@ def main():
         return subprocess.check_output(["docker", "--host", host, *values], text=True, timeout=45).strip()
 
     def create(project, service, *network_args):
+        compose_labels = ("--label", "com.docker.compose.project=" + project,
+                          "--label", "com.docker.compose.service=" + service) if project is not None else ()
         identity = docker("create", *network_args, "--read-only", "--cap-drop", "ALL",
                           "--security-opt", "no-new-privileges=true", "--user", "65534:65534",
-                          "--label", "com.docker.compose.project=" + project,
-                          "--label", "com.docker.compose.service=" + service,
+                          *compose_labels,
                           "--label", "fixture.secret=label-canary",
                           "--entrypoint", "python", args.image, "-c", "import time; time.sleep(30)")
         assert re.fullmatch(r"[0-9a-f]{64}", identity)
@@ -58,6 +59,7 @@ def main():
         mount = f"type=volume,source={volume},target=/mount-canary"
         foreign = create(prefix + "-foreign", "private", "--network", "none", "--mount", mount)
         mounted = create(prefix, "mounted", "--network", "none", "--tmpfs", "/fixture-tmpfs", "--mount", mount)
+        outside = create(None, "standalone", "--network", "none", "--mount", mount)
         docker("start", running, mounted)
         scope = [{"id": running, "project": prefix, "service": "web"},
                  {"id": stopped, "project": prefix, "service": "worker"}]
@@ -92,7 +94,7 @@ def main():
             before = docker("inspect", "--format", "{{.Id}} {{.State.Status}} {{.State.StartedAt}}", *ids)
             projects = discover(switch, protected_socket)
             assert projects["status"] == "OBSERVED", projects
-            assert {row["id"] for row in projects["containers"]} == set(ids), projects
+            assert {row["id"] for row in projects["containers"]} == set(ids) - {outside}, projects
             assert {row["project"] for row in projects["containers"]} == {prefix, prefix + "-foreign"}
             image = docker("inspect", "--format", "{{.Image}}", running)
             assert {row["image_id"] for row in projects["containers"]} == {image}
@@ -113,8 +115,9 @@ def main():
             assert fingerprints, refs
             assert adoption["adoption_evidence"] == {
                 "images": {image: fingerprints}, "networks": {prefix + "-network": prefix}, "volumes": {volume: None},
+                "usage": {"networks": {prefix + "-network": "COMPOSE_ONLY"}, "volumes": {volume: "OUTSIDE_COMPOSE"}},
             }, adoption
-            assert "label-canary" not in json.dumps(adoption)
+            assert all(value not in json.dumps(adoption) for value in ("label-canary", outside))
             assert docker("inspect", "--format", "{{.Id}} {{.State.Status}} {{.State.StartedAt}}", *ids) == before
             mounted_scope = {"id": mounted, "project": prefix, "service": "mounted"}
             registry.write_text(json.dumps({"v": 1, "containers": [*scope, mounted_scope]}))
@@ -134,7 +137,7 @@ def main():
             options = dict(include_ports=True, include_mounts=True, include_network=True, include_dependencies=True)
             result = observe(registry, protected_socket, **options)
             assert result["containers"][0]["dependency_status"] == "OTHER", result
-            docker("rm", "-f", running, foreign, mounted)
+            docker("rm", "-f", running, foreign, mounted, outside)
             ids[:] = [stopped]
             result = observe(registry, protected_socket, **options)
             assert result == {"status": "OBSERVED", "containers": [
