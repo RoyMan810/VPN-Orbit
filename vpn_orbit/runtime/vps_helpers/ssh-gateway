@@ -7,9 +7,9 @@ import sys
 
 
 def main():
-    if len(sys.argv) != 1 or os.environ.get("SSH_ORIGINAL_COMMAND") != "vpn-orbit.v16.probe":
+    if len(sys.argv) != 1 or os.environ.get("SSH_ORIGINAL_COMMAND") != "vpn-orbit.v17.probe":
         return 65
-    request = b'{"operation":"probe","version":16}\n'
+    request = b'{"operation":"probe","version":17}\n'
     signal.alarm(5)
     payload = sys.stdin.buffer.read(len(request) + 1)
     signal.alarm(0)

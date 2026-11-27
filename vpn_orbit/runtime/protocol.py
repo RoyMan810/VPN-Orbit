@@ -10,7 +10,7 @@ from ..errors import Denied
 
 
 MAX_FRAME = 16384
-PROBE_VERSION = 16
+PROBE_VERSION = 17
 PROBE_COMMAND = f"vpn-orbit.v{PROBE_VERSION}.probe"
 PROBE_REQUEST = b'{"operation":"probe","version":%d}\n' % PROBE_VERSION
 MAX_PROBE_REPLY = 15360
@@ -228,10 +228,19 @@ def compose_summary(value):
 
 
 def compose_evidence(evidence, rows):
-    has_usage = isinstance(evidence, dict) and "usage" in evidence
-    fields(evidence, ("images", "networks", "volumes", "usage") if has_usage else ("images", "networks", "volumes"))
-    if has_usage:
+    optional = tuple(key for key in ("usage", "configuration") if isinstance(evidence, dict) and key in evidence)
+    fields(evidence, ("images", "networks", "volumes") + optional)
+    if "usage" in evidence:
         fields(evidence["usage"], ("networks", "volumes"))
+    if "configuration" in evidence:
+        configuration = evidence["configuration"]
+        if not isinstance(configuration, dict) or configuration.keys() != {row["id"] for row in rows}:
+            raise Denied("PROBE_COMPOSE_INVALID")
+        for container in configuration.values():
+            fields(container, ("service_config", "bind_mounts"))
+            if (container["service_config"] not in ("LABEL_PRESENT", "DIVERGENT", "UNKNOWN")
+                    or container["bind_mounts"] not in ("NONE", "READ_ONLY", "WRITABLE", "UNKNOWN")):
+                raise Denied("PROBE_COMPOSE_INVALID")
     images = evidence["images"]
     if not isinstance(images, dict) or not images.keys() <= {row["image_id"] for row in rows}:
         raise Denied("PROBE_COMPOSE_INVALID")
@@ -250,7 +259,7 @@ def compose_evidence(evidence, rows):
         for project in labels.values():
             if project is not None:
                 text(project, COMPOSE_PROJECT, "PROBE_COMPOSE_INVALID")
-        if has_usage:
+        if "usage" in evidence:
             observed = evidence["usage"][kind]
             if (not isinstance(observed, dict) or not observed.keys() <= names
                     or any(status not in ("COMPOSE_ONLY", "OUTSIDE_COMPOSE") for status in observed.values())):

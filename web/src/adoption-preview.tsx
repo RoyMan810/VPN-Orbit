@@ -45,10 +45,13 @@ export function AdoptionPreview({ project, resource, sample, expired, t }: Adopt
       {result.compatibility.profiles.length > 0 && <p><code>{result.compatibility.profiles.join(', ')}</code></p>}
       <ul>{result.containers.map(container => {
         const evidence = result.compatibility.services.find(item => item.container_id === container.id)
+        const configuration = result.configuration[container.id]
         return <li key={container.id}>
           <strong>{container.service}</strong> · {t.containerState[container.state]}
           {evidence && <div>{evidence.role && <><code>{evidence.role}</code> · </>}
             {t.adoptionImageStatus[evidence.status]}</div>}
+          <div>{t.adoptionConfigStatus[configuration.service_config]}</div>
+          <div>{t.adoptionBindStatus[configuration.bind_mounts]}</div>
           <div>{t.adoptionImage} <code>{container.image_id}</code></div>
           <div>{t.adoptionContainer} <code>{container.id}</code></div>
         </li>

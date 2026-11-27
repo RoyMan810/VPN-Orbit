@@ -32,13 +32,15 @@ def main():
     prefix = "vpn-orbit-discovery-" + uuid4().hex[:10]
     ids = []
     network = volume = None
+    config_hash = uuid4().hex * 2
 
     def docker(*values):
         return subprocess.check_output(["docker", "--host", host, *values], text=True, timeout=45).strip()
 
     def create(project, service, *network_args):
         compose_labels = ("--label", "com.docker.compose.project=" + project,
-                          "--label", "com.docker.compose.service=" + service) if project is not None else ()
+                          "--label", "com.docker.compose.service=" + service,
+                          "--label", "com.docker.compose.config-hash=" + config_hash) if project is not None else ()
         identity = docker("create", *network_args, "--read-only", "--cap-drop", "ALL",
                           "--security-opt", "no-new-privileges=true", "--user", "65534:65534",
                           *compose_labels,
@@ -58,7 +60,8 @@ def main():
                          "--runtime", "runc", "--log-driver", "local")
         mount = f"type=volume,source={volume},target=/mount-canary"
         foreign = create(prefix + "-foreign", "private", "--network", "none", "--mount", mount)
-        mounted = create(prefix, "mounted", "--network", "none", "--tmpfs", "/fixture-tmpfs", "--mount", mount)
+        mounted = create(prefix, "mounted", "--network", "none", "--tmpfs", "/fixture-tmpfs", "--mount", mount,
+                         "--mount", "type=bind,source=/etc/hosts,target=/bind-canary,readonly")
         outside = create(None, "standalone", "--network", "none", "--mount", mount)
         docker("start", running, mounted)
         scope = [{"id": running, "project": prefix, "service": "web"},
@@ -116,8 +119,12 @@ def main():
             assert adoption["adoption_evidence"] == {
                 "images": {image: fingerprints}, "networks": {prefix + "-network": prefix}, "volumes": {volume: None},
                 "usage": {"networks": {prefix + "-network": "COMPOSE_ONLY"}, "volumes": {volume: "OUTSIDE_COMPOSE"}},
+                "configuration": {
+                    identity: {"service_config": "LABEL_PRESENT", "bind_mounts": "READ_ONLY" if identity == mounted else "NONE"}
+                    for identity in set(ids) - {outside}
+                },
             }, adoption
-            assert all(value not in json.dumps(adoption) for value in ("label-canary", outside))
+            assert all(value not in json.dumps(adoption) for value in ("label-canary", outside, config_hash, "/bind-canary"))
             assert docker("inspect", "--format", "{{.Id}} {{.State.Status}} {{.State.StartedAt}}", *ids) == before
             mounted_scope = {"id": mounted, "project": prefix, "service": "mounted"}
             registry.write_text(json.dumps({"v": 1, "containers": [*scope, mounted_scope]}))

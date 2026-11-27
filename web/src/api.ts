@@ -64,6 +64,10 @@ export interface ComposeAdoptionPreview {
       status: 'PIN_MATCH' | 'PIN_NOT_VERIFIED' | 'UNKNOWN' | 'AMBIGUOUS' | 'OTHER_IMAGE'
     }[]
   }
+  configuration: Record<string, {
+    service_config: 'LABEL_PRESENT' | 'DIVERGENT' | 'UNKNOWN'
+    bind_mounts: 'NONE' | 'READ_ONLY' | 'WRITABLE' | 'UNKNOWN'
+  }>
   attachments: Record<'networks' | 'volumes', {
     coverage: 'PARTIAL' | 'OBSERVED_COMPOSE_ONLY'
     claims: {

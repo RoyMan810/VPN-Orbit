@@ -489,6 +489,49 @@ def compose_adoption_evidence(path, rows, network_ids):
     return result
 
 
+def bind_mount_status(mounts):
+    if not isinstance(mounts, list):
+        return "UNKNOWN"
+    read_only = incomplete = False
+    for mount in mounts:
+        kind = mount.get("Type") if isinstance(mount, dict) else None
+        if kind == "bind":
+            rw = mount.get("RW")
+            if rw is True:
+                return "WRITABLE"
+            if rw is False:
+                read_only = True
+            else:
+                incomplete = True
+        elif kind not in ("volume", "tmpfs", "image", "npipe", "cluster"):
+            incomplete = True
+    if incomplete:
+        return "UNKNOWN"
+    return "READ_ONLY" if read_only else "NONE"
+
+
+def compose_configuration(rows):
+    observed, hashes = {}, {}
+    for row in rows:
+        labels = row["Labels"]
+        service = (labels["com.docker.compose.project"], labels["com.docker.compose.service"])
+        digest = labels.get("com.docker.compose.config-hash")
+        has_digest = isinstance(digest, str) and re.fullmatch(DOCKER_ID, digest) is not None
+        if has_digest:
+            hashes.setdefault(service, set()).add(digest)
+        observed[row["Id"]] = (service, has_digest, bind_mount_status(row.get("Mounts")))
+
+    # Compare only the labels in this snapshot. Keep hashes and paths on the host.
+    return {
+        identity: {
+            "service_config": ("DIVERGENT" if len(hashes.get(service, ())) > 1
+                               else "LABEL_PRESENT" if has_digest else "UNKNOWN"),
+            "bind_mounts": binds,
+        }
+        for identity, (service, has_digest, binds) in observed.items()
+    }
+
+
 def observe_compose(switch=COMPOSE_DISCOVERY, socket_path=DOCKER_SOCKET):
     try:
         scope = read_root_config(switch, max(map(len, COMPOSE_SCOPES)))
@@ -536,14 +579,13 @@ def observe_compose(switch=COMPOSE_DISCOVERY, socket_path=DOCKER_SOCKET):
         containers = sorted(rows.values(), key=lambda row: (row["project"], row["service"], row["id"]))
         result = {"status": "OBSERVED", "containers": containers}
         if containers and scope == COMPOSE_ADOPTION_SCOPE:
+            evidence = {"images": {}, "networks": {}, "volumes": {}, "configuration": compose_configuration(values)}
+            result["adoption_evidence"] = evidence
             try:
-                result["adoption_evidence"] = compose_adoption_evidence(socket_path, containers, network_ids)
+                evidence.update(compose_adoption_evidence(socket_path, containers, network_ids))
+                evidence["usage"] = attachment_usage(socket_path, containers, network_ids)
             except TimeoutError:
-                # Keep the base inventory when the shared Docker deadline expires.
-                return result
-            try:
-                result["adoption_evidence"]["usage"] = attachment_usage(socket_path, containers, network_ids)
-            except TimeoutError:
+                # Keep the metadata already collected when the shared deadline expires.
                 pass
         return result
     except (OSError, ValueError, RecursionError, http.client.HTTPException):
@@ -794,13 +836,13 @@ def probe_reply(value):
 def main():
     if os.geteuid() != 0 or len(sys.argv) != 1:
         return 65
-    request = b'{"operation":"probe","version":16}\n'
+    request = b'{"operation":"probe","version":17}\n'
     signal.alarm(5)
     payload = sys.stdin.buffer.read(len(request) + 1)
     signal.alarm(0)
     if payload != request:
         return 65
-    value = {"v": 16, "uid": 0, "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+    value = {"v": 17, "uid": 0, "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
              "observed_at": int(time.time()),
              "software": {"docker": tool_status("/usr/bin/docker"), "nginx": tool_status("/usr/sbin/nginx"),
                           "nginx_service": nginx_service_state()}}
