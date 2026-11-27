@@ -469,7 +469,7 @@ def main():
         expect(state(directory)["status"] == "VERIFIED", "Retry must verify the postcondition")
         result = probe(directory, key, fingerprint)
         observation = json.loads(result.stdout) if result.returncode == 0 else {}
-        expect(observation.get("v") == 9 and observation.get("uid") == 0
+        expect(observation.get("v") == 10 and observation.get("uid") == 0
                and observation.get("compose") == {"status": "NOT_CONFIGURED", "containers": []},
                "A fresh SSH connection must observe uid 0 and opt-in Compose disabled", result)
         removed = provision(directory, key, fingerprint, cleanup=True)

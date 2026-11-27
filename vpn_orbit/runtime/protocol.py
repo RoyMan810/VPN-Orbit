@@ -10,6 +10,10 @@ from ..errors import Denied
 
 
 MAX_FRAME = 16384
+PROBE_VERSION = 10
+PROBE_COMMAND = f"vpn-orbit.v{PROBE_VERSION}.probe"
+PROBE_REQUEST = b'{"operation":"probe","version":%d}\n' % PROBE_VERSION
+MAX_PROBE_REPLY = 15360
 PARTIAL_PREPARATION = "VPS_PREPARATION_PARTIAL_VERIFIED"
 ULID = r"[0-7][0-9A-HJKMNP-TV-Z]{25}"
 SHA256 = r"[0-9a-f]{64}"
@@ -176,7 +180,7 @@ def _validate_published_ports(ports, state):
         seen.add((address, host, private, protocol))
 
 
-def compose_summary(value, *, allow_attachments=True):
+def compose_summary(value):
     fields(value, ("status", "containers"))
     status, rows = value["status"], value["containers"]
     if (status not in ("OBSERVED", "NOT_CONFIGURED", "POLICY_INVALID", "UNAVAILABLE", "LIMIT_EXCEEDED")
@@ -186,7 +190,7 @@ def compose_summary(value, *, allow_attachments=True):
     attachments = ("networks", "volumes")
     # Historical rows use the old shape. A new snapshot either carries both
     # attachment lists on every container or omits them from the entire list.
-    include = allow_attachments and any(isinstance(row, dict) and ("networks" in row or "volumes" in row) for row in rows)
+    include = any(isinstance(row, dict) and ("networks" in row or "volumes" in row) for row in rows)
     names = ("id", "image_id", "project", "service", "state") + (attachments if include else ())
     for row in rows:
         fields(row, names)
@@ -211,42 +215,17 @@ def compose_summary(value, *, allow_attachments=True):
     return value
 
 
-def docker_summary(value, *, include_ports=None, include_mounts=None, include_network=None, include_dependencies=None, include_started_at=None):
+def docker_summary(value, *, complete=False):
     fields(value, ("status", "containers"))
     status, rows = value["status"], value["containers"]
     if (status not in ("OBSERVED", "NOT_CONFIGURED", "POLICY_INVALID", "UNAVAILABLE")
             or not isinstance(rows, list) or len(rows) > 8 or bool(rows) != (status == "OBSERVED")):
         raise Denied("PROBE_DOCKER_INVALID")
-    names = ("id", "project", "service", "state")
-    if include_ports is None:
-        # Stored observations and Worker receipts can contain older wire formats.
-        include_ports = bool(rows and isinstance(rows[0], dict) and "published_ports" in rows[0])
-    if include_ports:
-        names += ("published_ports",)
-    if include_mounts is None:
-        include_mounts = bool(rows and isinstance(rows[0], dict) and "mount_status" in rows[0])
-    if include_mounts:
-        if not include_ports:
-            raise Denied("PROBE_DOCKER_INVALID")
-        names += ("mount_status",)
-    if include_network is None:
-        include_network = bool(rows and isinstance(rows[0], dict) and "network_status" in rows[0])
-    if include_network:
-        if not include_mounts:
-            raise Denied("PROBE_DOCKER_INVALID")
-        names += ("network_status",)
-    if include_dependencies is None:
-        include_dependencies = bool(rows and isinstance(rows[0], dict) and "dependency_status" in rows[0])
-    if include_dependencies:
-        if not include_network:
-            raise Denied("PROBE_DOCKER_INVALID")
-        names += ("dependency_status",)
-    if include_started_at is None:
-        include_started_at = bool(rows and isinstance(rows[0], dict) and "started_at" in rows[0])
-    if include_started_at:
-        if not include_dependencies:
-            raise Denied("PROBE_DOCKER_INVALID")
-        names += ("started_at",)
+    # Stored observations may omit the newer suffix of fields.
+    optional = ("published_ports", "mount_status", "network_status", "dependency_status", "started_at")
+    first = rows[0] if rows and isinstance(rows[0], dict) else {}
+    count = len(optional) if complete else sum(name in first for name in optional)
+    names = ("id", "project", "service", "state") + optional[:count]
     seen = set()
     for item in rows:
         fields(item, names)
@@ -258,21 +237,25 @@ def docker_summary(value, *, include_ports=None, include_mounts=None, include_ne
         ):
             raise Denied("PROBE_DOCKER_INVALID")
         seen.add(identity)
-        if include_ports:
+        if "published_ports" in item:
             _validate_published_ports(item["published_ports"], item["state"])
-        if include_mounts and (item["mount_status"] not in ("NONE", "PRESENT", "UNKNOWN")
-                               or item["state"] != "RUNNING" and item["mount_status"] != "UNKNOWN"):
+        if "mount_status" in item and (
+            item["mount_status"] not in ("NONE", "PRESENT", "UNKNOWN")
+            or item["state"] != "RUNNING" and item["mount_status"] != "UNKNOWN"
+        ):
             raise Denied("PROBE_DOCKER_INVALID")
-        if include_network and (item["network_status"] not in ("ISOLATED", "OTHER", "UNKNOWN")
-                                or item["state"] != "RUNNING" and item["network_status"] != "UNKNOWN"):
+        if "network_status" in item and (
+            item["network_status"] not in ("ISOLATED", "OTHER", "UNKNOWN")
+            or item["state"] != "RUNNING" and item["network_status"] != "UNKNOWN"
+        ):
             raise Denied("PROBE_DOCKER_INVALID")
-        if include_dependencies and (
+        if "dependency_status" in item and (
             item["dependency_status"] not in ("ISOLATED", "OTHER", "UNKNOWN")
             or (item["mount_status"] != "NONE" or item["network_status"] != "ISOLATED")
             and item["dependency_status"] != "UNKNOWN"
         ):
             raise Denied("PROBE_DOCKER_INVALID")
-        if include_started_at and item["started_at"] is not None:
+        if "started_at" in item and item["started_at"] is not None:
             started_at = item["started_at"]
             if (item["state"] != "RUNNING" or not isinstance(started_at, str)
                     or started_at.startswith("0001-01-01T00:00:00")

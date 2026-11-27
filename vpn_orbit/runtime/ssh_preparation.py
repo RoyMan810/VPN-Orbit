@@ -75,10 +75,8 @@ class PreparationSSH:
         return int(matched[1])
 
     async def _verify_observation(self):
-        version, output = await asyncio.wait_for(exchange(self.target, self._observation_key, self._known_hosts), 12)
-        if version != 9:
-            raise Denied("VPS_PREPARATION_OBSERVATION_UNCONFIRMED", 502)
-        parse_probe(output, version, now=int(time.time()))
+        output = await asyncio.wait_for(exchange(self.target, self._observation_key, self._known_hosts), 12)
+        parse_probe(output, now=int(time.time()))
 
     async def phase(self, name, *, inspect: bool) -> Literal["APPLIED", "VERIFIED", "INCOMPLETE", "CONFLICT", "BUSY"]:
         if not isinstance(name, str) or name not in PHASE_SCRIPTS or type(inspect) is not bool:

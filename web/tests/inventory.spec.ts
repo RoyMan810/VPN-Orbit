@@ -569,7 +569,7 @@ test('shows verified Compose services per project from the selected VPS observat
   await page.clock.fastForward(301_000)
   await expect(russianProjects.getByText('Эти наблюдения проектов устарели.')).toBeVisible()
   await page.getByRole('button', { name: new RegExp(stale) }).click()
-  const external = russianProjects.getByRole('row').filter({ has: russianProjects.getByText('external', { exact: true }) })
+  const external = russianProjects.getByRole('row').filter({ has: page.getByRole('rowheader', { name: 'external', exact: true }) })
   await expect(external.getByText('web, worker', { exact: true })).toBeVisible()
   await expect(external.getByText('external_frontend', { exact: true })).toBeVisible()
   await expect(external.getByText('external_data', { exact: true })).toBeVisible()

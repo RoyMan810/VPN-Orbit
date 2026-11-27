@@ -329,7 +329,7 @@ def compose_attachments(row):
     return {"networks": attachment_names(networks) if isinstance(networks, dict) else None, "volumes": volumes}
 
 
-def observe_compose(switch=COMPOSE_DISCOVERY, socket_path=DOCKER_SOCKET, *, include_attachments=False):
+def observe_compose(switch=COMPOSE_DISCOVERY, socket_path=DOCKER_SOCKET):
     try:
         scope = read_root_config(switch, len(COMPOSE_RESOURCE_SCOPE))
         if scope not in (b"enabled\n", COMPOSE_RESOURCE_SCOPE):
@@ -366,7 +366,7 @@ def observe_compose(switch=COMPOSE_DISCOVERY, socket_path=DOCKER_SOCKET, *, incl
                     or not isinstance(state, str) or state not in DOCKER_STATES):
                 raise ValueError("invalid or duplicate Compose container")
             item["state"] = state.upper()
-            if include_attachments and scope == COMPOSE_RESOURCE_SCOPE:
+            if scope == COMPOSE_RESOURCE_SCOPE:
                 item.update(compose_attachments(row))
             rows[item["id"]] = item
         return {"status": "OBSERVED", "containers": sorted(rows.values(), key=lambda row: (row["project"], row["service"], row["id"]))}
@@ -389,7 +389,7 @@ def tool_status(path):
 
 def probe_reply(value):
     output = json.dumps(value, sort_keys=True, separators=(",", ":"))
-    if value["v"] == 10 and len(output) + 1 > MAX_PROBE_REPLY:
+    if len(output) + 1 > MAX_PROBE_REPLY:
         # Keep the container inventory within the existing SSH and IPC limits.
         for row in value["compose"]["containers"]:
             for name in ("networks", "volumes"):
@@ -402,39 +402,35 @@ def probe_reply(value):
 def main():
     if os.geteuid() != 0 or len(sys.argv) != 1:
         return 65
-    versions = {b'{"operation":"probe","version":%d}\n' % v: v for v in range(1, 11)}
+    request = b'{"operation":"probe","version":10}\n'
     signal.alarm(5)
-    payload = sys.stdin.buffer.read(max(map(len, versions)) + 1)
+    payload = sys.stdin.buffer.read(len(request) + 1)
     signal.alarm(0)
-    version = versions.get(payload)
-    if version is None:
+    if payload != request:
         return 65
-    value = {"v": version, "uid": 0, "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
-             "observed_at": int(time.time())}
-    if version >= 2:
-        value["software"] = {"docker": tool_status("/usr/bin/docker"), "nginx": tool_status("/usr/sbin/nginx")}
-    if version >= 3:
-        # A total deadline also bounds responses which deliver bytes slowly.
-        def timed_out(_signum, _frame):
-            raise TimeoutError("Docker observation timed out")
+    value = {"v": 10, "uid": 0, "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+             "observed_at": int(time.time()),
+             "software": {"docker": tool_status("/usr/bin/docker"), "nginx": tool_status("/usr/sbin/nginx")}}
 
-        previous = signal.signal(signal.SIGALRM, timed_out)
-        deadline = time.monotonic() + 4
-        signal.alarm(4)
-        try:
-            value["docker"] = observe_docker(include_ports=version >= 4, include_mounts=version >= 5,
-                                             include_network=version >= 6, include_dependencies=version >= 7,
-                                             include_started_at=version >= 8)
-            if version >= 9:
-                value["compose"] = (observe_compose(include_attachments=version >= 10) if time.monotonic() < deadline
-                                    else {"status": "UNAVAILABLE", "containers": []})
-        except TimeoutError:
-            if version < 9 or "docker" not in value:
-                raise
-            value["compose"] = {"status": "UNAVAILABLE", "containers": []}
-        finally:
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, previous)
+    # A total deadline also bounds responses which deliver bytes slowly.
+    def timed_out(_signum, _frame):
+        raise TimeoutError("Docker observation timed out")
+
+    previous = signal.signal(signal.SIGALRM, timed_out)
+    deadline = time.monotonic() + 4
+    signal.alarm(4)
+    try:
+        value["docker"] = observe_docker(include_ports=True, include_mounts=True, include_network=True,
+                                         include_dependencies=True, include_started_at=True)
+        value["compose"] = (observe_compose() if time.monotonic() < deadline
+                            else {"status": "UNAVAILABLE", "containers": []})
+    except TimeoutError:
+        if "docker" not in value:
+            raise
+        value["compose"] = {"status": "UNAVAILABLE", "containers": []}
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
     print(probe_reply(value))
     return 0
 

@@ -129,6 +129,7 @@ def observation_target(transfer):
     """Use a real SSH transport with a bounded synthetic observation command."""
     code = """import asyncio,asyncssh,json,sys,time
 from pathlib import Path
+from vpn_orbit.runtime.protocol import PROBE_COMMAND, PROBE_REQUEST, PROBE_VERSION
 key=asyncssh.read_public_key(sys.argv[2])
 class Peer(asyncssh.SSHServer):
     def public_key_auth_supported(self):
@@ -137,10 +138,13 @@ class Peer(asyncssh.SSHServer):
         return username=='vpn-orbit-svc' and candidate.public_data == key.public_data
 async def probe(process):
     payload=await process.stdin.read()
-    if process.command != 'vpn-orbit.v1.probe' or payload != b'{"operation":"probe","version":1}\\n':
+    if process.command != PROBE_COMMAND or payload != PROBE_REQUEST:
         process.exit(65)
         return
-    result={'v':1,'uid':0,'observed_at':int(time.time()),
+    result={'v':PROBE_VERSION,'uid':0,'observed_at':int(time.time()),
+            'software':{'docker':'UNKNOWN','nginx':'UNKNOWN'},
+            'docker':{'status':'NOT_CONFIGURED','containers':[]},
+            'compose':{'status':'NOT_CONFIGURED','containers':[]},
             'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip()}
     process.stdout.write(json.dumps(result,sort_keys=True,separators=(',',':')).encode()+b'\\n')
     process.exit(0)

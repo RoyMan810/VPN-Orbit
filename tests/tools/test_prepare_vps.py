@@ -21,7 +21,7 @@ class FakeRemote:
 
     def __init__(self, *, fault=None, probe_result=None):
         self.fault = fault
-        self.probe_result = probe_result if probe_result is not None else {"v": 8, "uid": 0}
+        self.probe_result = probe_result if probe_result is not None else {"v": prepare_vps.PROBE_VERSION, "uid": 0}
         self.calls = []
         self.readbacks = []
         self.readback_errors = {}
@@ -184,7 +184,7 @@ class PrepareVpsTests(unittest.TestCase):
                       patch.object(prepare_vps.subprocess, "run", side_effect=run) as runner,
                       patch.object(prepare_vps, "_check_remote_reply", side_effect=assert_admin_verification_command) as admin,
                       patch.object(prepare_vps.subprocess, "check_output", side_effect=[
-                          f"[192.0.2.20]:2222 ssh-ed25519 {encoded}\n", '{"v":8,"uid":0}']) as reader):
+                          f"[192.0.2.20]:2222 ssh-ed25519 {encoded}\n", json.dumps({"v": prepare_vps.PROBE_VERSION, "uid": 0})]) as reader):
                     prepare_vps.main()
                 self.assertEqual(runner.call_count, 1 + len(preparation.PHASES))
                 self.assertEqual(admin.call_count, 2)
@@ -482,7 +482,7 @@ class PrepareVpsTests(unittest.TestCase):
                 provisioner.run()
             self.assertEqual(remote.calls.count("sshd"), 1)
             self.assertEqual(remote.readbacks, ["sshd"])
-            remote.probe_result = {"v": 8, "uid": 0}
+            remote.probe_result = {"v": prepare_vps.PROBE_VERSION, "uid": 0}
             self.assertEqual(provisioner.run()["status"], "VERIFIED")
             self.assertEqual(remote.calls.count("sshd"), 1)
 
@@ -543,7 +543,7 @@ class PrepareVpsTests(unittest.TestCase):
 
     def test_failed_postcondition_without_cleanup_keeps_state_for_repair(self):
         with tempfile.TemporaryDirectory() as tmp:
-            remote = FakeRemote(probe_result={"v": 8, "uid": 1000})
+            remote = FakeRemote(probe_result={"v": prepare_vps.PROBE_VERSION, "uid": 1000})
             provisioner, output = make_provisioner(Path(tmp), remote)
             with self.assertRaisesRegex(ValueError, "Postcondition verification failed"):
                 provisioner.run()
@@ -553,7 +553,7 @@ class PrepareVpsTests(unittest.TestCase):
             self.assertEqual(state["status"], "FAILED")
             self.assertEqual(state["error"], "POSTCONDITION_FAILED")
             self.assertEqual(state["phases"]["verify"], "FAILED")
-            provisioner.probe = lambda _: {"v": 8, "uid": 0}
+            provisioner.probe = lambda _: {"v": prepare_vps.PROBE_VERSION, "uid": 0}
             provisioner.run()
             self.assertEqual(json.loads((output / prepare_vps.STATE_FILE).read_text())["status"], "VERIFIED")
 
@@ -631,7 +631,7 @@ class PrepareVpsTests(unittest.TestCase):
                   patch.object(prepare_vps.subprocess, "run", side_effect=run) as runner,
                   patch.object(prepare_vps, "_check_remote_reply", side_effect=assert_admin_verification_command) as admin,
                   patch.object(prepare_vps.subprocess, "check_output", side_effect=[
-                      f"[192.0.2.20]:2222 ssh-ed25519 {encoded}\n", '{"v":8,"uid":0}'])):
+                      f"[192.0.2.20]:2222 ssh-ed25519 {encoded}\n", json.dumps({"v": prepare_vps.PROBE_VERSION, "uid": 0})])):
                 prepare_vps.main()
             self.assertEqual(runner.call_count, 2 + len(preparation.PHASES))
             self.assertEqual(admin.call_count, 2)

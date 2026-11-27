@@ -97,10 +97,8 @@ def main():
             assert {row["image_id"] for row in projects["containers"]} == {image}
             assert {row["state"] for row in projects["containers"]} == {"RUNNING", "CREATED"}
             assert "label-canary" not in json.dumps(projects)
-            assert discover(switch, protected_socket, include_attachments=True) == projects
             switch.write_bytes(b"enabled-with-resources\n")
-            assert discover(switch, protected_socket) == projects
-            attachments = discover(switch, protected_socket, include_attachments=True)
+            attachments = discover(switch, protected_socket)
             assert attachments["status"] == "OBSERVED", attachments
             by_id = {row["id"]: row for row in attachments["containers"]}
             assert by_id[running]["networks"] == [prefix + "-network"] and by_id[running]["volumes"] == [], attachments

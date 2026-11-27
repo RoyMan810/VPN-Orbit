@@ -29,6 +29,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from vpn_orbit.runtime import vps_preparation as preparation
+from vpn_orbit.runtime.protocol import PROBE_COMMAND, PROBE_REQUEST, PROBE_VERSION
 
 
 STATE_FILE = ".provision-state.json"
@@ -204,7 +205,7 @@ class Provisioner:
             observation = self.probe(self.key)
         except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError):
             return False
-        return isinstance(observation, dict) and observation.get("v") == 8 and observation.get("uid") == 0
+        return isinstance(observation, dict) and observation.get("v") == PROBE_VERSION and observation.get("uid") == 0
 
     def _reconcile_phase(self, journal, phase, context):
         script = preparation.PHASE_SCRIPTS[phase](context, inspect=True)
@@ -365,8 +366,8 @@ def make_probe(ip, port, key, known_hosts_path):
              "-o", "GlobalKnownHostsFile=/dev/null", "-o", f"UserKnownHostsFile={known_hosts_path}",
              "-o", "HostKeyAlgorithms=ssh-ed25519", "-o", "ConnectTimeout=10",
              "-T", "-i", str(key_path), "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
-             f"{preparation.PROBE_ACCOUNT}@{ip}", "vpn-orbit.v8.probe"],
-            input='{"operation":"probe","version":8}\n', text=True, timeout=SSH_PROBE_TIMEOUT,
+             f"{preparation.PROBE_ACCOUNT}@{ip}", PROBE_COMMAND],
+            input=PROBE_REQUEST.decode("ascii"), text=True, timeout=SSH_PROBE_TIMEOUT,
         )
         return json.loads(result)
     return probe
