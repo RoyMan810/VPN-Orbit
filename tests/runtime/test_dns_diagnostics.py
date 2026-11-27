@@ -3,7 +3,7 @@ import io
 import json
 import socket
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from vpn_orbit.runtime.listener_diagnostics import main
 
@@ -68,5 +68,38 @@ class DnsDiagnosticsTests(unittest.TestCase):
                      ["--port", "443", "--expect-ip", "192.0.2.1"]):
             with self.subTest(args=args), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as exc:
                 main(args)
+            self.assertEqual(exc.exception.code, 2)
+        lookup.assert_not_called()
+
+    @patch("vpn_orbit.runtime.listener_diagnostics.probe_port")
+    @patch.object(socket, "getaddrinfo")
+    def test_site_checks_only_expected_ips_despite_dns_mismatch(self, lookup, probe):
+        lookup.return_value = [
+            _address_info(socket.AF_INET, "192.0.2.10"),
+            _address_info(socket.AF_INET, "192.0.2.99"),
+        ]
+        probe.side_effect = [
+            {"tcp_reachability": "CONNECTED", "tls": {"state": "VERIFIED", "expires_at": 2000000000}},
+            {"tcp_reachability": "REFUSED", "tls": {"state": "NOT_TESTED"}},
+        ]
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = main(["--check-site", "Site.Example.", "--expect-ip", "2001:db8::10", "--expect-ip", "192.0.2.10"])
+        self.assertEqual(code, 1)
+        value = json.loads(output.getvalue())
+        self.assertEqual(value["dns"]["missing_addresses"], ["2001:db8::10"])
+        self.assertEqual(value["dns"]["unexpected_addresses"], ["192.0.2.99"])
+        self.assertEqual([row["tls"]["state"] for row in value["endpoints"]], ["VERIFIED", "NOT_TESTED"])
+        self.assertEqual(probe.call_args_list, [
+            call("192.0.2.10", 443, tls_name="site.example"),
+            call("2001:db8::10", 443, tls_name="site.example"),
+        ])
+
+    @patch.object(socket, "getaddrinfo")
+    def test_site_validates_the_entire_input_before_dns(self, lookup):
+        for args in ([], ["--expect-ip", "192.0.2.10", "--expect-ip", "ff02::1"],
+                     ["--expect-ip", "192.0.2.10", "--port", "0"], ["--expect-ip", "192.0.2.10"] * 9):
+            with self.subTest(args=args), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as exc:
+                main(["--check-site", "site.example", *args])
             self.assertEqual(exc.exception.code, 2)
         lookup.assert_not_called()

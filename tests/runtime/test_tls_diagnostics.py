@@ -86,7 +86,20 @@ class TlsDiagnosticsTests(unittest.TestCase):
                         self.assertGreater(report["tls"]["expires_at"], time.time())
                     else:
                         self.assertNotIn("expires_at", report["tls"])
-        self.assertEqual(names, ["site.example"] * 4 + ["legacy.example", "site.example"])
+            future = executor.submit(handshake, None)
+            output = io.StringIO()
+            result = [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 0))]
+            with patch.object(socket, "getaddrinfo", return_value=result), patch.dict(os.environ, {"SSL_CERT_FILE": str(cert)}), \
+                 redirect_stdout(output):
+                code = main(["--check-site", "site.example", "--expect-ip", "127.0.0.1",
+                             "--port", str(listener.getsockname()[1])])
+            self.assertTrue(future.result(timeout=5))
+            self.assertEqual(code, 0)
+            site = json.loads(output.getvalue())
+            self.assertEqual(site["dns"]["state"], "MATCH")
+            self.assertEqual(site["endpoints"][0]["tls"]["state"], "VERIFIED")
+            self.assertGreater(site["endpoints"][0]["tls"]["expires_at"], time.time())
+        self.assertEqual(names, ["site.example"] * 4 + ["legacy.example", "site.example", "site.example"])
 
     def test_local_https_observation_requires_protected_names_and_checks_real_sni(self):
         helper = runpy.run_path(str(Path(__file__).resolve().parents[2] / "remote/typed-helper"))

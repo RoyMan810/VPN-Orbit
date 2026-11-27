@@ -1,4 +1,4 @@
-"""Diagnose one TCP port locally or from the host running an explicit probe."""
+"""Inspect local listeners or check DNS, TCP and TLS from the probe host."""
 
 import argparse
 import errno
@@ -157,6 +157,17 @@ def _probe_tls(connection, server_name, port, https_path):
     return result, https
 
 
+def _destination_address(destination):
+    address = ip_address(destination)
+    if address.version == 6:
+        if address.scope_id is not None or address.is_link_local:
+            raise ValueError("IPv6 addresses that require an interface scope are unsupported")
+        address = address.ipv4_mapped or address
+    if address.is_unspecified or address.is_multicast or str(address) == "255.255.255.255":
+        raise ValueError("a unicast destination address is required")
+    return address
+
+
 def probe_port(destination, port, *, tls_name=None, https_path=None):
     _validate_port(port)
     if https_path is not None and (
@@ -168,13 +179,7 @@ def probe_port(destination, port, *, tls_name=None, https_path=None):
         tls_name = _dns_name(tls_name)
         tls = {"server_name": tls_name, "state": "NOT_TESTED"}
     https = {"state": "NOT_TESTED"}
-    address = ip_address(destination)
-    if address.version == 6:
-        if address.scope_id is not None or address.is_link_local:
-            raise ValueError("IPv6 addresses that require an interface scope are unsupported")
-        address = address.ipv4_mapped or address
-    if address.is_unspecified or address.is_multicast or str(address) == "255.255.255.255":
-        raise ValueError("a unicast destination address is required")
+    address = _destination_address(destination)
 
     family = socket.AF_INET if address.version == 4 else socket.AF_INET6
     try:
@@ -198,29 +203,49 @@ def probe_port(destination, port, *, tls_name=None, https_path=None):
     return report
 
 
+def check_site(name, expected_ips, port):
+    name = _dns_name(name)
+    _validate_port(port)
+    if not 1 <= len(expected_ips) <= 8:
+        raise ValueError("--check-site requires one to eight --expect-ip values")
+    addresses = _format_addresses({_destination_address(value) for value in expected_ips})
+    dns = _resolve_addresses(name, addresses)
+    # Use the explicit IPs even when DNS disagrees.
+    endpoints = [probe_port(address, port, tls_name=name) for address in addresses]
+    return {"dns": dns, "endpoints": endpoints}
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Inspect TCP listeners, probe TCP/TLS/HTTPS, or resolve a DNS name")
+    parser = argparse.ArgumentParser(description="Inspect TCP listeners, probe TCP/TLS/HTTPS, or check a site's DNS and TLS")
     parser.add_argument("--port", type=int)
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--check-bind", metavar="IP", help="check for overlapping local TCP listeners")
     modes.add_argument("--connect", metavar="IP", help="numeric IPv4 or IPv6 destination")
     modes.add_argument("--resolve", metavar="DNS", help="look up addresses using the system resolver")
+    modes.add_argument("--check-site", metavar="DNS", help="compare DNS and check TLS on expected IPs (port 443 by default)")
     parser.add_argument("--expect-ip", action="append", default=[], metavar="IP", help="expected address; repeat for a set")
     parser.add_argument("--tls-name", metavar="DNS", help="verify the TLS certificate for this DNS name")
     parser.add_argument("--https-path", metavar="PATH", help="send HEAD over the verified TLS connection")
     args = parser.parse_args(argv)
     if args.resolve is not None and args.port is not None:
         parser.error("--resolve does not use --port")
-    if args.resolve is None and args.port is None:
+    if args.resolve is None and args.check_site is None and args.port is None:
         parser.error("--port is required for TCP checks")
-    if args.expect_ip and args.resolve is None:
-        parser.error("--expect-ip requires --resolve")
+    if args.expect_ip and args.resolve is None and args.check_site is None:
+        parser.error("--expect-ip requires --resolve or --check-site")
     if args.tls_name is not None and args.connect is None:
         parser.error("--tls-name requires --connect")
     if args.https_path is not None and args.tls_name is None:
         parser.error("--https-path requires --tls-name")
     try:
-        if args.resolve is not None:
+        if args.check_site is not None:
+            port = 443 if args.port is None else args.port
+            report = check_site(args.check_site, args.expect_ip, port)
+            ok = report["dns"]["state"] == "MATCH" and all(
+                endpoint["tcp_reachability"] == "CONNECTED" and endpoint["tls"]["state"] == "VERIFIED"
+                for endpoint in report["endpoints"]
+            )
+        elif args.resolve is not None:
             report = _resolve_addresses(args.resolve, args.expect_ip)
             ok = report["state"] in ("RESOLVED", "MATCH")
         elif args.connect is not None:
