@@ -42,6 +42,8 @@ class InventoryTests(Fixture):
                  "boot_id": "11111111-1111-1111-1111-111111111111",
                  "software": {"docker": "PRESENT", "nginx": "UNKNOWN", "nginx_service": "UNKNOWN"},
                  "docker": docker or {"status": "NOT_CONFIGURED", "containers": []},
+                 "app_links": {"status": "NOT_CONFIGURED", "links": []},
+                 "firewall": {"status": "NOT_CONFIGURED", "chains": []},
                  "nginx": {"status": "NOT_CONFIGURED", "names": [], "partial": False},
                  "local_https": {"status": "NOT_CONFIGURED", "sites": []},
                  "compose": compose or {"status": "NOT_CONFIGURED", "containers": []}}

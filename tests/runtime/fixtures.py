@@ -51,6 +51,8 @@ def observation():
         "boot_id": "12345678-1234-1234-1234-123456789abc",
         "software": {"docker": "UNKNOWN", "nginx": "UNKNOWN", "nginx_service": "UNKNOWN"},
         "docker": {"status": "NOT_CONFIGURED", "containers": []},
+        "app_links": {"status": "NOT_CONFIGURED", "links": []},
+        "firewall": {"status": "NOT_CONFIGURED", "chains": []},
         "nginx": {"status": "NOT_CONFIGURED", "names": [], "partial": False},
         "local_https": {"status": "NOT_CONFIGURED", "sites": []},
         "compose": {"status": "NOT_CONFIGURED", "containers": []},

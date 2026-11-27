@@ -145,6 +145,8 @@ async def probe(process):
             'software':{'docker':'UNKNOWN','nginx':'UNKNOWN','nginx_service':'UNKNOWN'},
             'docker':{'status':'NOT_CONFIGURED','containers':[]},
             'compose':{'status':'NOT_CONFIGURED','containers':[]},
+            'app_links':{'status':'NOT_CONFIGURED','links':[]},
+            'firewall':{'status':'NOT_CONFIGURED','chains':[]},
             'nginx':{'status':'NOT_CONFIGURED','names':[],'partial':False},
             'local_https':{'status':'NOT_CONFIGURED','sites':[]},
             'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip()}

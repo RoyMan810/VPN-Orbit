@@ -202,6 +202,8 @@ function Detail({ resource, t, lang, now, expired, session }: {
   const sample = observation.last_success
   const localHttps = sample?.local_https
   const nginx = sample?.nginx
+  const firewall = sample?.firewall
+  const appLinks = sample?.app_links
   const docker = sample?.docker
   const isolation = (value?: 'ISOLATED' | 'OTHER' | 'UNKNOWN') =>
     value === 'ISOLATED' ? t.isolated : value === 'OTHER' ? t.sharedOrExternal : t.dependencyUnavailable
@@ -229,6 +231,18 @@ function Detail({ resource, t, lang, now, expired, session }: {
         <div><dt>{t.nginxService}</dt><dd>{t.nginxServiceState[software.nginx_service]}</dd></div>
       </dl>
     </div>}
+    {firewall && firewall.status !== 'NOT_CONFIGURED' && <section className="software" aria-labelledby="firewall-inventory-heading">
+      <h3 id="firewall-inventory-heading">{t.firewallInventory}</h3>
+      {firewall.status === 'OBSERVED' ? <>
+        <p>{t.firewallInventoryScope}</p>
+        {firewall.chains.length ? <dl>
+          {firewall.chains.map(chain => <div key={JSON.stringify([chain.family, chain.table, chain.name])}>
+            <dt><code>{chain.family} / {chain.table} / {chain.name}</code></dt>
+            <dd>{chain.hook} · {t.firewallDefaultPolicy[chain.policy]} · {t.firewallPriority} {chain.prio}</dd>
+          </div>)}
+        </dl> : <p>{t.firewallInventoryEmpty}</p>}
+      </> : <p>{t.firewallInventoryStatus[firewall.status]}</p>}
+    </section>}
     {nginx && nginx.status !== 'NOT_CONFIGURED' && <section className="software" aria-labelledby="nginx-hosts-heading">
       <h3 id="nginx-hosts-heading">{t.nginxHosts}</h3>
       {nginx.status === 'OBSERVED' ? <>
@@ -246,6 +260,16 @@ function Detail({ resource, t, lang, now, expired, session }: {
           <dd>{t.localHttpsState[site.state]}{site.expires_at !== null && <p>{t.localHttpsExpires} {time(site.expires_at)}</p>}</dd>
         </div>)}
       </dl> : <p>{t.localHttpsStatus[localHttps.status]}</p>}
+    </section>}
+    {appLinks && appLinks.status !== 'NOT_CONFIGURED' && <section className="software" aria-labelledby="app-links-heading">
+      <h3 id="app-links-heading">{t.appLinks}</h3>
+      {appLinks.status === 'DECLARED' ? <>
+        <p>{t.appLinksScope}</p>
+        <dl>{appLinks.links.map(link => <div key={JSON.stringify([link.project, link.service, link.host, link.port])}>
+          <dt><code>{link.project} / {link.service}</code></dt>
+          <dd><code>{link.host}:{link.port}</code></dd>
+        </div>)}</dl>
+      </> : <p>{t.appLinksStatus[appLinks.status]}</p>}
     </section>}
     {sample && <ComposeInventory compose={sample.compose}
       scoped={docker?.status === 'OBSERVED' ? docker.containers : []} historical={current.status !== 'REACHABLE'} t={t}/>}

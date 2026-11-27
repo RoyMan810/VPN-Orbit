@@ -75,6 +75,21 @@ export interface Observation {
     docker: DockerObservation
     compose: ComposeObservation
     local_https: LocalHttpsObservation
+    app_links: {
+      status: 'DECLARED' | 'NOT_CONFIGURED' | 'POLICY_INVALID' | 'UNAVAILABLE' | 'LIMIT_EXCEEDED'
+      links: { project: string; service: string; host: string; port: number }[]
+    }
+    firewall: {
+      status: 'OBSERVED' | 'NOT_CONFIGURED' | 'POLICY_INVALID' | 'UNAVAILABLE' | 'LIMIT_EXCEEDED'
+      chains: {
+        family: string
+        table: string
+        name: string
+        hook: string
+        policy: 'accept' | 'drop'
+        prio: number
+      }[]
+    }
     nginx: {
       status: 'OBSERVED' | 'NOT_CONFIGURED' | 'POLICY_INVALID' | 'UNAVAILABLE' | 'LIMIT_EXCEEDED'
       names: string[]
