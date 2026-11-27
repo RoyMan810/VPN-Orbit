@@ -8,21 +8,8 @@ import time
 import asyncssh
 
 from ..errors import Denied
-from .protocol import SHA256, ULID, application_payload, canonical, compose_summary, decode, docker_summary, fields, firewall_payload, integer, restart_payload, software_summary, text
+from .protocol import MAX_PROBE_REPLY, PROBE_COMMAND, PROBE_REQUEST, PROBE_VERSION, SHA256, ULID, application_payload, canonical, compose_summary, decode, docker_summary, fields, firewall_payload, integer, restart_payload, software_summary, text
 from .storage import new_private_file, protected_bytes
-
-
-PROBES = (
-    (9, "vpn-orbit.v9.probe", b'{"operation":"probe","version":9}\n'),
-    (8, "vpn-orbit.v8.probe", b'{"operation":"probe","version":8}\n'),
-    (7, "vpn-orbit.v7.probe", b'{"operation":"probe","version":7}\n'),
-    (6, "vpn-orbit.v6.probe", b'{"operation":"probe","version":6}\n'),
-    (5, "vpn-orbit.v5.probe", b'{"operation":"probe","version":5}\n'),
-    (4, "vpn-orbit.v4.probe", b'{"operation":"probe","version":4}\n'),
-    (3, "vpn-orbit.v3.probe", b'{"operation":"probe","version":3}\n'),
-    (2, "vpn-orbit.v2.probe", b'{"operation":"probe","version":2}\n'),
-    (1, "vpn-orbit.v1.probe", b'{"operation":"probe","version":1}\n'),
-)
 
 
 def validate_private_key(key):
@@ -61,18 +48,13 @@ async def connect(target, key, known_hosts, username):
 async def exchange(target, key, known_hosts):
     connection = await connect(target, key, known_hosts, "vpn-orbit-svc")
     try:
-        for version, command, request in PROBES:
-            process = await connection.create_process(command, input=request, encoding=None, request_pty=False)
-            limit = {9: 15360, 3: 4096, 2: 2048, 1: 2048}.get(version, 12288)
-            output, error, _ = await asyncio.gather(
-                bounded_read(process.stdout, limit),
-                bounded_read(process.stderr), process.wait_closed())
-            if process.exit_status == 0:
-                return version, output
-            # The old forced command silently rejects an unsupported command with 65.
-            if version == 1 or process.exit_status != 65 or output or error:
-                break
-        raise Denied("SSH_REMOTE_PROBE_FAILED")
+        process = await connection.create_process(PROBE_COMMAND, input=PROBE_REQUEST, encoding=None, request_pty=False)
+        output, _, _ = await asyncio.gather(
+            bounded_read(process.stdout, MAX_PROBE_REPLY),
+            bounded_read(process.stderr), process.wait_closed())
+        if process.exit_status != 0:
+            raise Denied("SSH_REMOTE_PROBE_FAILED")
+        return output
     finally:
         connection.close()
         try:
@@ -86,7 +68,7 @@ def probe(target, private_key, known_hosts):
     async def bounded():
         return await asyncio.wait_for(exchange(target, key, known_hosts), 12)
     try:
-        version, output = asyncio.run(bounded())
+        output = asyncio.run(bounded())
     except asyncssh.HostKeyNotVerifiable:
         raise Denied("SSH_HOST_KEY_MISMATCH") from None
     except asyncssh.PermissionDenied:
@@ -105,7 +87,7 @@ def probe(target, private_key, known_hosts):
         raise Denied(code) from None
     except asyncssh.Error:
         raise Denied("SSH_CONNECTION_FAILED") from None
-    return parse_probe(output, version, now=int(time.time()))
+    return parse_probe(output, now=int(time.time()))
 
 
 async def exchange_restart(target, key, known_hosts, request):
@@ -309,33 +291,20 @@ def apply_firewall(target, private_key, known_hosts, payload):
     return {"outcome": "SUCCEEDED", "code": confirmed["code"]}
 
 
-def parse_probe(output, version, *, now):
+def parse_probe(output, *, now):
     # Arbitrary third-party stdout/stderr is never a public result, log payload or exception message.
     try:
         value = decode(output.rstrip(b"\n"))
     except Denied:
         raise Denied("SSH_UNSUPPORTED_OUTPUT") from None
-    names = ("v", "uid", "boot_id", "observed_at")
-    if version not in (1, 2, 3, 4, 5, 6, 7, 8, 9):
-        raise Denied("SSH_PROBE_INVALID")
-    if version >= 9:
-        names += ("software", "docker", "compose")
-    else:
-        names += ("software", "docker")[:version - 1]
-    fields(value, names)
-    if type(value["v"]) is not int or value["v"] != version or type(value["uid"]) is not int or value["uid"] != 0:
+    fields(value, ("v", "uid", "boot_id", "observed_at", "software", "docker", "compose"))
+    if type(value["v"]) is not int or value["v"] != PROBE_VERSION or type(value["uid"]) is not int or value["uid"] != 0:
         raise Denied("SSH_PROBE_INVALID")
     text(value["boot_id"], r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}")
     integer(value["observed_at"], now - 300, now + 2)
-    result = {"status": "REACHABLE", "source": "restricted_helper", "observed_at": value["observed_at"], "boot_id": value["boot_id"]}
-    if version >= 2:
-        result["software"] = software_summary(value["software"])
-    if version >= 3:
-        result["docker"] = docker_summary(value["docker"], include_ports=version >= 4, include_mounts=version >= 5,
-                                         include_network=version >= 6, include_dependencies=version >= 7, include_started_at=version >= 8)
-    if version >= 9:
-        result["compose"] = compose_summary(value["compose"])
-    return result
+    return {"status": "REACHABLE", "source": "restricted_helper", "observed_at": value["observed_at"],
+            "boot_id": value["boot_id"], "software": software_summary(value["software"]),
+            "docker": docker_summary(value["docker"], complete=True), "compose": compose_summary(value["compose"])}
 
 
 def provision_known_hosts(path, policy):

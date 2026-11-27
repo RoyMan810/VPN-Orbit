@@ -9,7 +9,7 @@ from unittest.mock import patch
 import asyncssh
 
 from vpn_orbit.errors import Denied
-from vpn_orbit.runtime.protocol import canonical
+from vpn_orbit.runtime.protocol import PROBE_VERSION, canonical
 from vpn_orbit.runtime.ssh import exchange, exchange_restart, parse_probe
 
 
@@ -18,23 +18,20 @@ SOFTWARE = {'docker': 'PRESENT', 'nginx': 'NOT_DETECTED'}
 
 
 class DiscoveryPayloadTests(unittest.TestCase):
-    def parse(self, version, **extra):
-        return parse_probe(canonical({'v': version, 'uid': 0, 'boot_id': BOOT, 'observed_at': 1000, **extra}),
-                           version, now=1000)
-
-    def test_legacy_probe_remains_compatible(self):
-        self.assertEqual(self.parse(1), {'status': 'REACHABLE', 'source': 'restricted_helper',
-                                         'observed_at': 1000, 'boot_id': BOOT})
-
-    def test_v2_accepts_only_fixed_component_states(self):
-        self.assertEqual(self.parse(2, software=SOFTWARE)['software'], SOFTWARE)
-        for extra in ({}, {'software': {'docker': '/private/key', 'nginx': 'UNKNOWN'}},
-                      {'software': {**SOFTWARE, 'shell': 'PRESENT'}}, {'software': {'docker': 'PRESENT'}},
-                      {'software': {**SOFTWARE, 'nginx': []}}, {'software': SOFTWARE, 'raw': 'canary'}):
-            with self.subTest(extra=extra), self.assertRaises(Denied):
-                self.parse(2, **extra)
-        with self.assertRaises(Denied):
-            self.parse(1, software=SOFTWARE)
+    def test_current_probe_requires_complete_scoped_observation(self):
+        value = {"v": PROBE_VERSION, "uid": 0, "boot_id": BOOT, "observed_at": 1000, "software": SOFTWARE,
+                 "docker": {"status": "NOT_CONFIGURED", "containers": []},
+                 "compose": {"status": "NOT_CONFIGURED", "containers": []}}
+        self.assertEqual(parse_probe(canonical(value), now=1000)["software"], SOFTWARE)
+        for invalid in (
+            {**value, "software": {**SOFTWARE, "docker": "/private/key"}},
+            {**value, "docker": {"status": "OBSERVED", "containers": [
+                {"id": "a" * 64, "project": "fixture", "service": "web", "state": "RUNNING"}]}},
+            {**value, "v": 9},
+            {k: v for k, v in value.items() if k != "compose"},
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(Denied):
+                parse_probe(canonical(invalid), now=1000)
 
     def test_remote_helper_only_checks_fixed_file_metadata(self):
         helper = runpy.run_path(str(Path(__file__).resolve().parents[2] / 'remote/typed-helper'))
@@ -80,21 +77,12 @@ class ProbeNegotiationTests(unittest.IsolatedAsyncioTestCase):
     async def probe(self):
         return await asyncio.wait_for(exchange(self.target, self.client_key, self.known_hosts), 5)
 
-    async def test_v9_uses_one_fixed_request(self):
-        self.assertEqual(await self.probe(), (9, b'probe'))
-        self.assertEqual(self.requests, [('vpn-orbit.v9.probe', b'{"operation":"probe","version":9}\n')])
-
-    async def test_silent_unsupported_probe_versions_fall_back(self):
-        for version in (8, 7, 6, 5, 4, 3, 2, 1):
-            with self.subTest(version=version):
-                self.requests.clear()
-                self.reply = lambda command: (0, b'legacy') if command == f'vpn-orbit.v{version}.probe' else (65, b'')
-                self.assertEqual(await self.probe(), (version, b'legacy'))
-                self.assertEqual([r[0] for r in self.requests],
-                                 [f'vpn-orbit.v{step}.probe' for step in range(9, version - 1, -1)])
+    async def test_v10_uses_one_fixed_request(self):
+        self.assertEqual(await self.probe(), b'probe')
+        self.assertEqual(self.requests, [('vpn-orbit.v10.probe', b'{"operation":"probe","version":10}\n')])
 
     async def test_failed_or_noisy_probe_does_not_fall_back(self):
-        for status, data in ((65, b'canary'), (1, b'')):
+        for status, data in ((65, b''), (65, b'canary'), (1, b'')):
             with self.subTest(status=status):
                 self.requests.clear()
                 self.reply = lambda command: (status, data)

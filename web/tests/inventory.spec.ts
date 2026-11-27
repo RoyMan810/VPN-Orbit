@@ -539,6 +539,7 @@ test('shows imported Docker state and labels it historical when the sample expir
 })
 
 test('shows verified Compose services per project from the selected VPS observation', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 })
   const policyErrors: string[] = []
   page.on('console', message => {
     if (message.type() === 'error' && message.text().includes('Content Security Policy')) {
@@ -555,6 +556,7 @@ test('shows verified Compose services per project from the selected VPS observat
   })
   const projects = page.getByRole('region', { name: 'Compose projects' })
   await expect(projects.getByRole('row')).toHaveCount(3)
+  await expect(projects.getByRole('columnheader', { name: 'Docker networks' })).toHaveCount(0)
   await expect(projects.getByRole('row', { name: 'fixture web, worker' })).toBeVisible()
   await expect(projects.getByRole('row', { name: 'another-project web' })).toBeVisible()
   await expect(projects.getByText('unverified-project')).toHaveCount(0)
@@ -567,7 +569,14 @@ test('shows verified Compose services per project from the selected VPS observat
   await page.clock.fastForward(301_000)
   await expect(russianProjects.getByText('Эти наблюдения проектов устарели.')).toBeVisible()
   await page.getByRole('button', { name: new RegExp(stale) }).click()
-  await expect(russianProjects.getByRole('row', { name: 'external web' })).toBeVisible()
+  const external = russianProjects.getByRole('row').filter({ has: page.getByRole('rowheader', { name: 'external', exact: true }) })
+  await expect(external.getByText('web, worker', { exact: true })).toBeVisible()
+  await expect(external.getByText('external_frontend', { exact: true })).toBeVisible()
+  await expect(external.getByText('external_data', { exact: true })).toBeVisible()
+  await expect(external.getByText('Неполные данные', { exact: true })).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320)
+  await expect(russianProjects.getByRole('columnheader', { name: 'Сети Docker' })).toBeVisible()
+  await expect(russianProjects.getByRole('columnheader', { name: 'Тома Docker' })).toBeVisible()
   await expect(russianProjects.getByText('Наблюдение контейнеров с метками Compose на этой VPS.')).toBeVisible()
   await expect(russianProjects.getByText('fixture', { exact: true })).toHaveCount(0)
   await expect(page.getByRole('button', { name: /external/ })).toHaveCount(0)

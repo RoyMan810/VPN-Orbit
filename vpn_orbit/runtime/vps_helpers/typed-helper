@@ -17,11 +17,15 @@ from urllib.parse import urlencode
 
 DOCKER_SCOPE = Path("/etc/vpn-orbit/docker-discovery.json")
 COMPOSE_DISCOVERY = Path("/etc/vpn-orbit/compose-discovery.enabled")
+COMPOSE_RESOURCE_SCOPE = b"enabled-with-resources\n"
 DOCKER_SOCKET = Path("/run/docker.sock")
 MAX_CONTAINERS = 8
 MAX_COMPOSE_CONTAINERS = 12
 MAX_PUBLISHED_PORTS = 8
 MAX_DOCKER_REPLY = 256 * 1024
+MAX_PROBE_REPLY = 15360
+MAX_ATTACHMENT_NAMES = 8
+DOCKER_RESOURCE = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
 DOCKER_STATES = {"created", "restarting", "running", "removing", "paused", "exited", "dead"}
 DOCKER_ID = r"[0-9a-f]{64}"
 COMPOSE_PROJECT = r"[a-z0-9][a-z0-9_-]{0,62}"
@@ -304,9 +308,31 @@ def observe_docker(scope_path=DOCKER_SCOPE, socket_path=DOCKER_SOCKET, *, includ
         return {"status": "UNAVAILABLE", "containers": []}
 
 
+def attachment_names(names):
+    result = set()
+    for name in names:
+        if not isinstance(name, str) or re.fullmatch(DOCKER_RESOURCE, name) is None:
+            return None
+        result.add(name)
+        if len(result) > MAX_ATTACHMENT_NAMES:
+            return None
+    return sorted(result)
+
+
+def compose_attachments(row):
+    settings = row.get("NetworkSettings")
+    networks = settings.get("Networks") if isinstance(settings, dict) else None
+    mounts = row.get("Mounts")
+    volumes = None
+    if isinstance(mounts, list) and all(isinstance(mount, dict) and isinstance(mount.get("Type"), str) for mount in mounts):
+        volumes = attachment_names(mount.get("Name") for mount in mounts if mount["Type"] == "volume")
+    return {"networks": attachment_names(networks) if isinstance(networks, dict) else None, "volumes": volumes}
+
+
 def observe_compose(switch=COMPOSE_DISCOVERY, socket_path=DOCKER_SOCKET):
     try:
-        if read_root_config(switch, 8) != b"enabled\n":
+        scope = read_root_config(switch, len(COMPOSE_RESOURCE_SCOPE))
+        if scope not in (b"enabled\n", COMPOSE_RESOURCE_SCOPE):
             raise ValueError("invalid Compose discovery setting")
     except FileNotFoundError:
         return {"status": "NOT_CONFIGURED", "containers": []}
@@ -339,7 +365,10 @@ def observe_compose(switch=COMPOSE_DISCOVERY, socket_path=DOCKER_SOCKET):
                     for key, pattern in patterns.items()) or item["id"] in rows
                     or not isinstance(state, str) or state not in DOCKER_STATES):
                 raise ValueError("invalid or duplicate Compose container")
-            rows[item["id"]] = {**item, "state": state.upper()}
+            item["state"] = state.upper()
+            if scope == COMPOSE_RESOURCE_SCOPE:
+                item.update(compose_attachments(row))
+            rows[item["id"]] = item
         return {"status": "OBSERVED", "containers": sorted(rows.values(), key=lambda row: (row["project"], row["service"], row["id"]))}
     except (OSError, ValueError, RecursionError, http.client.HTTPException):
         return {"status": "UNAVAILABLE", "containers": []}
@@ -358,48 +387,51 @@ def tool_status(path):
     return "UNKNOWN"
 
 
+def probe_reply(value):
+    output = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    if len(output) + 1 > MAX_PROBE_REPLY:
+        # Keep the container inventory within the existing SSH and IPC limits.
+        for row in value["compose"]["containers"]:
+            for name in ("networks", "volumes"):
+                if row.get(name):
+                    row[name] = None
+        output = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return output
+
+
 def main():
     if os.geteuid() != 0 or len(sys.argv) != 1:
         return 65
-    request = b'{"operation":"probe","version":1}\n'
+    request = b'{"operation":"probe","version":10}\n'
     signal.alarm(5)
     payload = sys.stdin.buffer.read(len(request) + 1)
     signal.alarm(0)
-    versions = {request: 1, b'{"operation":"probe","version":2}\n': 2,
-                b'{"operation":"probe","version":3}\n': 3, b'{"operation":"probe","version":4}\n': 4,
-                b'{"operation":"probe","version":5}\n': 5, b'{"operation":"probe","version":6}\n': 6,
-                b'{"operation":"probe","version":7}\n': 7, b'{"operation":"probe","version":8}\n': 8,
-                b'{"operation":"probe","version":9}\n': 9}
-    version = versions.get(payload)
-    if version is None:
+    if payload != request:
         return 65
-    value = {"v": version, "uid": 0, "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
-             "observed_at": int(time.time())}
-    if version >= 2:
-        value["software"] = {"docker": tool_status("/usr/bin/docker"), "nginx": tool_status("/usr/sbin/nginx")}
-    if version >= 3:
-        # A total deadline also bounds responses which deliver bytes slowly.
-        def timed_out(_signum, _frame):
-            raise TimeoutError("Docker observation timed out")
+    value = {"v": 10, "uid": 0, "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+             "observed_at": int(time.time()),
+             "software": {"docker": tool_status("/usr/bin/docker"), "nginx": tool_status("/usr/sbin/nginx")}}
 
-        previous = signal.signal(signal.SIGALRM, timed_out)
-        deadline = time.monotonic() + 4
-        signal.alarm(4)
-        try:
-            value["docker"] = observe_docker(include_ports=version >= 4, include_mounts=version >= 5,
-                                             include_network=version >= 6, include_dependencies=version >= 7,
-                                             include_started_at=version >= 8)
-            if version >= 9:
-                value["compose"] = (observe_compose() if time.monotonic() < deadline
-                                    else {"status": "UNAVAILABLE", "containers": []})
-        except TimeoutError:
-            if version < 9 or "docker" not in value:
-                raise
-            value["compose"] = {"status": "UNAVAILABLE", "containers": []}
-        finally:
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, previous)
-    print(json.dumps(value, sort_keys=True, separators=(",", ":")))
+    # A total deadline also bounds responses which deliver bytes slowly.
+    def timed_out(_signum, _frame):
+        raise TimeoutError("Docker observation timed out")
+
+    previous = signal.signal(signal.SIGALRM, timed_out)
+    deadline = time.monotonic() + 4
+    signal.alarm(4)
+    try:
+        value["docker"] = observe_docker(include_ports=True, include_mounts=True, include_network=True,
+                                         include_dependencies=True, include_started_at=True)
+        value["compose"] = (observe_compose() if time.monotonic() < deadline
+                            else {"status": "UNAVAILABLE", "containers": []})
+    except TimeoutError:
+        if "docker" not in value:
+            raise
+        value["compose"] = {"status": "UNAVAILABLE", "containers": []}
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+    print(probe_reply(value))
     return 0
 
 

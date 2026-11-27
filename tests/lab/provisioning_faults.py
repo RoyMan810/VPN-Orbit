@@ -160,8 +160,8 @@ def probe(directory, key, fingerprint):
         ["ssh", "-F", "/dev/null", "-p", str(PORT), "-i", str(directory / "output" / "probe"),
          "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes",
          "-o", "GlobalKnownHostsFile=/dev/null", "-o", f"UserKnownHostsFile={known}",
-         f"{SERVICE}@{ADDRESS}", "vpn-orbit.v9.probe"],
-        input='{"operation":"probe","version":9}\n', capture_output=True, text=True)
+         f"{SERVICE}@{ADDRESS}", "vpn-orbit.v10.probe"],
+        input='{"operation":"probe","version":10}\n', capture_output=True, text=True)
 
 
 def state(directory):
@@ -469,7 +469,7 @@ def main():
         expect(state(directory)["status"] == "VERIFIED", "Retry must verify the postcondition")
         result = probe(directory, key, fingerprint)
         observation = json.loads(result.stdout) if result.returncode == 0 else {}
-        expect(observation.get("v") == 9 and observation.get("uid") == 0
+        expect(observation.get("v") == 10 and observation.get("uid") == 0
                and observation.get("compose") == {"status": "NOT_CONFIGURED", "containers": []},
                "A fresh SSH connection must observe uid 0 and opt-in Compose disabled", result)
         removed = provision(directory, key, fingerprint, cleanup=True)

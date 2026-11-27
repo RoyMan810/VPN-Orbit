@@ -164,6 +164,11 @@ export const copy = {
     composeProjects: 'Compose projects',
     composeProject: 'Project',
     composeServices: 'Observed services',
+    composeNetworks: 'Docker networks',
+    composeVolumes: 'Docker volumes',
+    composeAttachmentsEmpty: 'None',
+    composeAttachmentsUnavailable: 'Unavailable',
+    composeAttachmentsIncomplete: 'Partial data',
     composeScope: 'Read-only view of services verified in the approved Docker scope.',
     composeAllScope: 'Read-only discovery of containers with Compose labels on this VPS.',
     composeDiscoveryStatus: {
@@ -434,6 +439,11 @@ export const copy = {
     composeProjects: 'Проекты Compose',
     composeProject: 'Проект',
     composeServices: 'Обнаруженные сервисы',
+    composeNetworks: 'Сети Docker',
+    composeVolumes: 'Тома Docker',
+    composeAttachmentsEmpty: 'Нет',
+    composeAttachmentsUnavailable: 'Недоступно',
+    composeAttachmentsIncomplete: 'Неполные данные',
     composeScope: 'Просмотр сервисов, подтверждённых в разрешённой области Docker.',
     composeAllScope: 'Наблюдение контейнеров с метками Compose на этой VPS.',
     composeDiscoveryStatus: {
