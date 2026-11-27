@@ -178,6 +178,8 @@ class Inventory:
             raise Denied('COMPOSE_PROJECT_NOT_FOUND', 404)
 
         evidence = compose.get('adoption_evidence', {})
+        definition = evidence.get('definition', {})
+        observed_dependencies = definition.get('dependencies', {})
         observed_configuration = evidence.get('configuration', {})
         configuration = {
             row['id']: observed_configuration.get(row['id'], {'service_config': 'UNKNOWN', 'bind_mounts': 'UNKNOWN'})
@@ -215,6 +217,8 @@ class Inventory:
             'containers': containers,
             'compatibility': assess_profiles(containers, evidence.get('images', {})),
             'configuration': configuration,
+            'source': definition.get('sources', {}).get(project, 'UNVERIFIED'),
+            'dependencies': {row['id']: observed_dependencies.get(row['id']) for row in containers},
             'attachments': attachments,
         }
         value = {**preview, 'preview_digest': checksum(preview)}

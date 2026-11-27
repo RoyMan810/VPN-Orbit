@@ -66,6 +66,11 @@ export interface ComposeAdoptionPreview {
       status: 'PIN_MATCH' | 'PIN_NOT_VERIFIED' | 'UNKNOWN' | 'AMBIGUOUS' | 'OTHER_IMAGE'
     }[]
   }
+  source: 'NOT_CONFIGURED' | 'POLICY_INVALID' | 'CONFIRMED' | 'LABEL_MISMATCH' | 'UNVERIFIED'
+  dependencies: Record<string, {
+    service: string
+    status: 'NOT_OBSERVED' | 'SHARED_NETWORK' | 'NETWORK_UNVERIFIED'
+  }[] | null>
   configuration: Record<string, {
     service_config: 'LABEL_PRESENT' | 'DIVERGENT' | 'UNKNOWN'
     bind_mounts: 'NONE' | 'READ_ONLY' | 'WRITABLE' | 'UNKNOWN'

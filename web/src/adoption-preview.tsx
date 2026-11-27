@@ -86,18 +86,25 @@ export function AdoptionPreview({ project, resource, sample, expired, t }: Adopt
       {(checked === 'rateLimited' || checked === 'error') && <p role="alert" className="error">
         {checked === 'rateLimited' ? t.rateLimited : t.requestError}
       </p>}
+      <h5>{t.adoptionSource}</h5>
+      <p>{t.adoptionSourceStatus[preview.source]}</p>
       <h5>{t.adoptionCompatibility}</h5>
       <p>{t.adoptionProfileStatus[preview.compatibility.status]}</p>
       {preview.compatibility.profiles.length > 0 && <p><code>{preview.compatibility.profiles.join(', ')}</code></p>}
       <ul>{preview.containers.map(container => {
         const evidence = preview.compatibility.services.find(item => item.container_id === container.id)
         const configuration = preview.configuration[container.id]
+        const dependencies = preview.dependencies[container.id]
         return <li key={container.id}>
           <strong>{container.service}</strong> · {t.containerState[container.state]}
           {evidence && <div>{evidence.role && <><code>{evidence.role}</code> · </>}
             {t.adoptionImageStatus[evidence.status]}</div>}
           <div>{t.adoptionConfigStatus[configuration.service_config]}</div>
           <div>{t.adoptionBindStatus[configuration.bind_mounts]}</div>
+          {dependencies == null ? <div>{t.adoptionDependenciesUnknown}</div> : dependencies.length > 0 ?
+            <ul aria-label={t.adoptionDependencies}>{dependencies.map(({ service, status }) =>
+              <li key={service}><code>{service}</code> · {t.adoptionDependencyStatus[status]}</li>,
+            )}</ul> : <div>{t.adoptionDependenciesEmpty}</div>}
           <div>{t.adoptionImage} <code>{container.image_id}</code></div>
           <div>{t.adoptionContainer} <code>{container.id}</code></div>
         </li>

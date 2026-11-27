@@ -22,6 +22,7 @@ from urllib.parse import urlencode
 
 DOCKER_SCOPE = Path("/etc/vpn-orbit/docker-discovery.json")
 COMPOSE_DISCOVERY = Path("/etc/vpn-orbit/compose-discovery.enabled")
+COMPOSE_SOURCE_SCOPE = Path("/etc/vpn-orbit/compose-sources.json")
 COMPOSE_BASIC_SCOPE = b"enabled\n"
 COMPOSE_RESOURCE_SCOPE = b"enabled-with-resources\n"
 COMPOSE_ADOPTION_SCOPE = b"enabled-with-adoption\n"
@@ -33,6 +34,8 @@ LOCAL_HTTPS_SCOPE = Path("/etc/vpn-orbit/local-https.names")
 DOCKER_SOCKET = Path("/run/docker.sock")
 MAX_CONTAINERS = 8
 MAX_COMPOSE_CONTAINERS = 12
+MAX_COMPOSE_FILES = 4
+MAX_COMPOSE_DEPENDENCIES = 8
 MAX_ATTACHMENT_CONSUMERS = 32
 MAX_PUBLISHED_PORTS = 8
 MAX_DOCKER_REPLY = 256 * 1024
@@ -532,7 +535,139 @@ def compose_configuration(rows):
     }
 
 
-def observe_compose(switch=COMPOSE_DISCOVERY, socket_path=DOCKER_SOCKET):
+def compose_file_paths(values):
+    if not isinstance(values, list) or not 1 <= len(values) <= MAX_COMPOSE_FILES:
+        raise ValueError("invalid Compose source list")
+    for value in values:
+        if (not isinstance(value, str) or not value.startswith("/") or len(value.encode("utf-8")) > 256
+                or "," in value or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+            raise ValueError("invalid Compose source path")
+        parts = value[1:].split("/")
+        if len(parts) > 12 or any(part in ("", ".", "..") for part in parts):
+            raise ValueError("invalid Compose source path")
+    if len(values) != len(set(values)):
+        raise ValueError("duplicate Compose source path")
+    return values
+
+
+def protected_compose_source(path):
+    # Traverse only an administrator-approved path; inspect metadata without opening the file.
+    parts = path[1:].split("/")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    with ExitStack() as stack:
+        fd = os.open("/", flags)
+        stack.callback(os.close, fd)
+        for component in parts[:-1]:
+            fd = os.open(component, flags, dir_fd=fd)
+            stack.callback(os.close, fd)
+            if not protected_directory(os.fstat(fd)):
+                return False
+        entry = os.stat(parts[-1], dir_fd=fd, follow_symlinks=False)
+        return stat.S_ISREG(entry.st_mode) and entry.st_uid == 0 and entry.st_nlink == 1 and not entry.st_mode & 0o022
+
+
+def compose_sources(rows, scope):
+    labels = {}
+    for row in rows:
+        keys = row["Labels"]
+        labels.setdefault(keys["com.docker.compose.project"], []).append(keys.get("com.docker.compose.project.config_files"))
+    try:
+        policy = json.loads(read_root_config(scope, 16384), object_pairs_hook=unique_object)
+        if not isinstance(policy, dict) or len(policy) > MAX_COMPOSE_CONTAINERS:
+            raise ValueError("invalid Compose source policy")
+        for project, paths in policy.items():
+            if not re.fullmatch(COMPOSE_PROJECT, project):
+                raise ValueError("invalid Compose source project")
+            compose_file_paths(paths)
+    except FileNotFoundError:
+        return dict.fromkeys(labels, "NOT_CONFIGURED")
+    except TimeoutError:
+        raise
+    except (OSError, ValueError, RecursionError):
+        return dict.fromkeys(labels, "POLICY_INVALID")
+
+    result = {}
+    for project, values in labels.items():
+        approved = policy.get(project)
+        if approved is None:
+            result[project] = "NOT_CONFIGURED"
+            continue
+        status = "CONFIRMED"
+        observed = []
+        for value in values:
+            if isinstance(value, str) and len(value) <= MAX_COMPOSE_FILES * 257:
+                try:
+                    observed.append(compose_file_paths(value.split(",")))
+                except ValueError:
+                    pass
+        if any(paths != approved for paths in observed):
+            status = "LABEL_MISMATCH"
+        elif len(observed) != len(values):
+            status = "UNVERIFIED"
+        else:
+            try:
+                if not all(protected_compose_source(path) for path in approved):
+                    status = "UNVERIFIED"
+            except TimeoutError:
+                raise
+            except OSError:
+                status = "UNVERIFIED"
+        result[project] = status
+    return result
+
+
+def declared_dependencies(label):
+    if label == "":
+        return []
+    if not isinstance(label, str) or len(label) > MAX_COMPOSE_DEPENDENCIES * 112:
+        return None
+    entries = label.split(",")
+    if len(entries) > MAX_COMPOSE_DEPENDENCIES:
+        return None
+    result = set()
+    for entry in entries:
+        parts = entry.split(":")
+        if (len(parts) != 3 or not re.fullmatch(COMPOSE_SERVICE, parts[0])
+                or parts[1] not in ("service_started", "service_healthy", "service_completed_successfully", "running_or_healthy")
+                or parts[2] not in ("true", "false") or parts[0] in result):
+            return None
+        result.add(parts[0])
+    return sorted(result)
+
+
+def compose_dependencies(rows):
+    identities, networks = {}, {}
+    for row in rows:
+        labels = row["Labels"]
+        key = (labels["com.docker.compose.project"], labels["com.docker.compose.service"])
+        identities.setdefault(key, []).append(row["Id"])
+        settings = row.get("NetworkSettings")
+        endpoints = settings.get("Networks") if isinstance(settings, dict) else None
+        networks[row["Id"]] = {
+            identity for name, endpoint in endpoints.items()
+            if name not in BUILTIN_NETWORKS and (identity := network_identity(endpoint)) is not None
+        } if isinstance(endpoints, dict) else set()
+
+    result = {}
+    for row in rows:
+        labels = row["Labels"]
+        names = declared_dependencies(labels.get("com.docker.compose.depends_on"))
+        if names is None or labels["com.docker.compose.service"] in names:
+            result[row["Id"]] = None
+            continue
+        edges = []
+        for name in names:
+            peers = identities.get((labels["com.docker.compose.project"], name), ())
+            status = "NOT_OBSERVED"
+            if peers:
+                status = ("SHARED_NETWORK" if any(networks[row["Id"]] & networks[peer] for peer in peers)
+                          else "NETWORK_UNVERIFIED")
+            edges.append({"service": name, "status": status})
+        result[row["Id"]] = edges
+    return result
+
+
+def observe_compose(switch=COMPOSE_DISCOVERY, socket_path=DOCKER_SOCKET, *, sources=COMPOSE_SOURCE_SCOPE):
     try:
         scope = read_root_config(switch, max(map(len, COMPOSE_SCOPES)))
         if scope not in COMPOSE_SCOPES:
@@ -584,6 +719,8 @@ def observe_compose(switch=COMPOSE_DISCOVERY, socket_path=DOCKER_SOCKET):
             try:
                 evidence.update(compose_adoption_evidence(socket_path, containers, network_ids))
                 evidence["usage"] = attachment_usage(socket_path, containers, network_ids)
+                evidence["definition"] = {"sources": compose_sources(values, sources),
+                                          "dependencies": compose_dependencies(values)}
             except TimeoutError:
                 # Keep the metadata already collected when the shared deadline expires.
                 pass
@@ -836,13 +973,13 @@ def probe_reply(value):
 def main():
     if os.geteuid() != 0 or len(sys.argv) != 1:
         return 65
-    request = b'{"operation":"probe","version":17}\n'
+    request = b'{"operation":"probe","version":18}\n'
     signal.alarm(5)
     payload = sys.stdin.buffer.read(len(request) + 1)
     signal.alarm(0)
     if payload != request:
         return 65
-    value = {"v": 17, "uid": 0, "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+    value = {"v": 18, "uid": 0, "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
              "observed_at": int(time.time()),
              "software": {"docker": tool_status("/usr/bin/docker"), "nginx": tool_status("/usr/sbin/nginx"),
                           "nginx_service": nginx_service_state()}}

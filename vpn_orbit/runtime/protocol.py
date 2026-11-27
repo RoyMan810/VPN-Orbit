@@ -10,7 +10,7 @@ from ..errors import Denied
 
 
 MAX_FRAME = 16384
-PROBE_VERSION = 17
+PROBE_VERSION = 18
 PROBE_COMMAND = f"vpn-orbit.v{PROBE_VERSION}.probe"
 PROBE_REQUEST = b'{"operation":"probe","version":%d}\n' % PROBE_VERSION
 MAX_PROBE_REPLY = 15360
@@ -19,6 +19,7 @@ ULID = r"[0-7][0-9A-HJKMNP-TV-Z]{25}"
 SHA256 = r"[0-9a-f]{64}"
 DNS_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 COMPOSE_PROJECT = r"[a-z0-9][a-z0-9_-]{0,62}"
+COMPOSE_SERVICE = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}"
 DOCKER_RESOURCE = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
 BOOT_ID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
 DOCKER_STARTED_AT = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z"
@@ -216,7 +217,7 @@ def compose_summary(value):
         identity = text(row["id"], SHA256)
         text(row["image_id"], "sha256:" + SHA256)
         text(row["project"], COMPOSE_PROJECT)
-        text(row["service"], r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}")
+        text(row["service"], COMPOSE_SERVICE)
         if identity in seen or row["state"] not in ("CREATED", "RESTARTING", "RUNNING", "REMOVING", "PAUSED", "EXITED", "DEAD"):
             raise Denied("PROBE_COMPOSE_INVALID")
         seen.add(identity)
@@ -228,7 +229,7 @@ def compose_summary(value):
 
 
 def compose_evidence(evidence, rows):
-    optional = tuple(key for key in ("usage", "configuration") if isinstance(evidence, dict) and key in evidence)
+    optional = tuple(key for key in ("usage", "configuration", "definition") if isinstance(evidence, dict) and key in evidence)
     fields(evidence, ("images", "networks", "volumes") + optional)
     if "usage" in evidence:
         fields(evidence["usage"], ("networks", "volumes"))
@@ -241,6 +242,8 @@ def compose_evidence(evidence, rows):
             if (container["service_config"] not in ("LABEL_PRESENT", "DIVERGENT", "UNKNOWN")
                     or container["bind_mounts"] not in ("NONE", "READ_ONLY", "WRITABLE", "UNKNOWN")):
                 raise Denied("PROBE_COMPOSE_INVALID")
+    if "definition" in evidence:
+        compose_definition(evidence["definition"], rows)
     images = evidence["images"]
     if not isinstance(images, dict) or not images.keys() <= {row["image_id"] for row in rows}:
         raise Denied("PROBE_COMPOSE_INVALID")
@@ -264,6 +267,33 @@ def compose_evidence(evidence, rows):
             if (not isinstance(observed, dict) or not observed.keys() <= names
                     or any(status not in ("COMPOSE_ONLY", "OUTSIDE_COMPOSE") for status in observed.values())):
                 raise Denied("PROBE_COMPOSE_INVALID")
+
+
+def compose_definition(definition, rows):
+    fields(definition, ("sources", "dependencies"))
+    sources, dependencies = definition["sources"], definition["dependencies"]
+    if (not isinstance(sources, dict) or sources.keys() != {row["project"] for row in rows}
+            or any(status not in ("NOT_CONFIGURED", "POLICY_INVALID", "CONFIRMED", "LABEL_MISMATCH", "UNVERIFIED")
+                   for status in sources.values())
+            or not isinstance(dependencies, dict) or dependencies.keys() != {row["id"] for row in rows}):
+        raise Denied("PROBE_COMPOSE_INVALID")
+    services = {(row["project"], row["service"]) for row in rows}
+    for row in rows:
+        edges = dependencies[row["id"]]
+        if edges is None:
+            continue
+        if not isinstance(edges, list) or len(edges) > 8:
+            raise Denied("PROBE_COMPOSE_INVALID")
+        previous = ""
+        for edge in edges:
+            fields(edge, ("service", "status"))
+            name = text(edge["service"], COMPOSE_SERVICE, "PROBE_COMPOSE_INVALID")
+            observed = (row["project"], name) in services
+            if (name <= previous or name == row["service"]
+                    or edge["status"] not in ("NOT_OBSERVED", "SHARED_NETWORK", "NETWORK_UNVERIFIED")
+                    or observed == (edge["status"] == "NOT_OBSERVED")):
+                raise Denied("PROBE_COMPOSE_INVALID")
+            previous = name
 
 
 def docker_summary(value):
