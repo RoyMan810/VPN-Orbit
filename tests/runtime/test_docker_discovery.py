@@ -45,7 +45,7 @@ class DockerPayloadTests(unittest.TestCase):
         scoped = {"status": "NOT_CONFIGURED", "containers": []}
         compose = {"status": "OBSERVED", "containers": [{**ROW, "image_id": "sha256:" + FOREIGN}]}
         value = {"v": PROBE_VERSION, "uid": 0, "boot_id": "12345678-1234-1234-1234-123456789abc",
-                 "observed_at": 1000, "software": {"docker": "PRESENT", "nginx": "NOT_DETECTED"},
+                 "observed_at": 1000, "software": {"docker": "PRESENT", "nginx": "NOT_DETECTED", "nginx_service": "NOT_FOUND"},
                  "docker": scoped, "compose": compose}
         result = parse_probe(canonical(value), now=1000)
         self.assertEqual(result["docker"], scoped)
@@ -62,11 +62,11 @@ class DockerPayloadTests(unittest.TestCase):
         row = {**base, "networks": ["backend", "frontend"], "volumes": None}
         scoped = {"status": "NOT_CONFIGURED", "containers": []}
         value = {"v": PROBE_VERSION, "uid": 0, "boot_id": "12345678-1234-1234-1234-123456789abc",
-                 "observed_at": 1000, "software": {"docker": "PRESENT", "nginx": "NOT_DETECTED"},
+                 "observed_at": 1000, "software": {"docker": "PRESENT", "nginx": "NOT_DETECTED", "nginx_service": "NOT_FOUND"},
                  "docker": scoped, "compose": {"status": "OBSERVED", "containers": [row]}}
         self.assertEqual(parse_probe(canonical(value), now=1000)["compose"], value["compose"])
         with self.assertRaises(Denied):
-            parse_probe(canonical({**value, "v": 9}), now=1000)
+            parse_probe(canonical({**value, "v": 10}), now=1000)
         for rows in ([{**base, "networks": []}], [row, {**base, "id": FOREIGN}],
                      [{**row, "volumes": ["/host/private"]}], [{**row, "volumes": ["x" * 65]}],
                      [{**row, "volumes": ["data", "data"]}], [{**row, "volumes": ["web", "data"]}],
@@ -85,7 +85,7 @@ class DockerPayloadTests(unittest.TestCase):
                    "started_at": "2026-11-18T01:02:03.123456789Z"} for i in range(8)]
         compose = [{**row, "id": f"{i:064x}", "image_id": "sha256:" + FOREIGN} for i in range(12)]
         value = {"v": PROBE_VERSION, "uid": 0, "boot_id": "12345678-1234-1234-1234-123456789abc", "observed_at": 1000,
-                 "software": {"docker": "PRESENT", "nginx": "NOT_DETECTED"},
+                 "software": {"docker": "PRESENT", "nginx": "NOT_DETECTED", "nginx_service": "NOT_FOUND"},
                  "docker": {"status": "OBSERVED", "containers": scoped},
                  "compose": {"status": "OBSERVED", "containers": compose}}
         result = parse_probe(canonical(value), now=1000)

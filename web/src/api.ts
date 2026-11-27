@@ -9,6 +9,7 @@ export interface Session {
 
 export type Status = 'REACHABLE' | 'NOT_CHECKED' | 'UNKNOWN'
 export type Presence = 'PRESENT' | 'NOT_DETECTED' | 'UNKNOWN'
+type NginxServiceState = 'ACTIVE' | 'INACTIVE' | 'FAILED' | 'TRANSITIONING' | 'NOT_FOUND' | 'UNKNOWN'
 export type ContainerState = 'CREATED' | 'RESTARTING' | 'RUNNING' | 'REMOVING' | 'PAUSED' | 'EXITED' | 'DEAD' | 'UNKNOWN' | 'NOT_FOUND'
 export interface DockerContainer {
   id: string
@@ -56,7 +57,7 @@ export interface Observation {
   last_success: {
     observed_at: number
     boot_id: string
-    software?: Record<'docker' | 'nginx', Presence>
+    software?: Record<'docker' | 'nginx', Presence> & { nginx_service?: NginxServiceState }
     docker?: DockerObservation
     compose?: ComposeObservation
   } | null

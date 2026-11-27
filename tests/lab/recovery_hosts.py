@@ -142,7 +142,7 @@ async def probe(process):
         process.exit(65)
         return
     result={'v':PROBE_VERSION,'uid':0,'observed_at':int(time.time()),
-            'software':{'docker':'UNKNOWN','nginx':'UNKNOWN'},
+            'software':{'docker':'UNKNOWN','nginx':'UNKNOWN','nginx_service':'UNKNOWN'},
             'docker':{'status':'NOT_CONFIGURED','containers':[]},
             'compose':{'status':'NOT_CONFIGURED','containers':[]},
             'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip()}

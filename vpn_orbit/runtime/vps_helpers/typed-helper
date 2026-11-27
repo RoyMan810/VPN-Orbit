@@ -10,6 +10,7 @@ import re
 import signal
 import socket
 import stat
+import subprocess
 import sys
 import time
 from urllib.parse import urlencode
@@ -387,6 +388,30 @@ def tool_status(path):
     return "UNKNOWN"
 
 
+def nginx_service_state():
+    try:
+        result = subprocess.run(
+            ["/usr/bin/systemctl", "--no-pager", "show", "--property=LoadState,ActiveState", "--", "nginx.service"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}, timeout=1,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "UNKNOWN"
+    lines = result.stdout.splitlines()
+    if result.returncode or len(lines) != 2:
+        return "UNKNOWN"
+    properties = dict(line.split(b"=", 1) for line in lines if b"=" in line)
+    load, active = properties.get(b"LoadState"), properties.get(b"ActiveState")
+    if load == b"not-found" and active == b"inactive":
+        return "NOT_FOUND"
+    if load == b"loaded":
+        return {
+            b"active": "ACTIVE", b"inactive": "INACTIVE", b"failed": "FAILED",
+            b"activating": "TRANSITIONING", b"deactivating": "TRANSITIONING", b"reloading": "TRANSITIONING",
+        }.get(active, "UNKNOWN")
+    return "UNKNOWN"
+
+
 def probe_reply(value):
     output = json.dumps(value, sort_keys=True, separators=(",", ":"))
     if len(output) + 1 > MAX_PROBE_REPLY:
@@ -402,15 +427,16 @@ def probe_reply(value):
 def main():
     if os.geteuid() != 0 or len(sys.argv) != 1:
         return 65
-    request = b'{"operation":"probe","version":10}\n'
+    request = b'{"operation":"probe","version":11}\n'
     signal.alarm(5)
     payload = sys.stdin.buffer.read(len(request) + 1)
     signal.alarm(0)
     if payload != request:
         return 65
-    value = {"v": 10, "uid": 0, "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+    value = {"v": 11, "uid": 0, "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
              "observed_at": int(time.time()),
-             "software": {"docker": tool_status("/usr/bin/docker"), "nginx": tool_status("/usr/sbin/nginx")}}
+             "software": {"docker": tool_status("/usr/bin/docker"), "nginx": tool_status("/usr/sbin/nginx"),
+                          "nginx_service": nginx_service_state()}}
 
     # A total deadline also bounds responses which deliver bytes slowly.
     def timed_out(_signum, _frame):

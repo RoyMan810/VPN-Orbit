@@ -554,6 +554,7 @@ test('shows verified Compose services per project from the selected VPS observat
       mutations.push(request.url())
     }
   })
+  await expect(page.locator('.software dl > div').filter({ hasText: 'Nginx systemd service' }).locator('dd')).toHaveText('Active')
   const projects = page.getByRole('region', { name: 'Compose projects' })
   await expect(projects.getByRole('row')).toHaveCount(3)
   await expect(projects.getByRole('columnheader', { name: 'Docker networks' })).toHaveCount(0)
@@ -564,6 +565,7 @@ test('shows verified Compose services per project from the selected VPS observat
   await page.getByLabel('Language').selectOption('ru')
   await page.getByLabel('Тема').selectOption('dark')
   await expect(page.locator('html')).toHaveAttribute('data-mantine-color-scheme', 'dark')
+  await expect(page.locator('.software dl > div').filter({ hasText: 'Служба Nginx в systemd' }).locator('dd')).toHaveText('Активна')
   const russianProjects = page.getByRole('region', { name: 'Проекты Compose' })
   await expect(russianProjects.getByRole('columnheader', { name: 'Обнаруженные сервисы' })).toBeVisible()
   await page.clock.fastForward(301_000)
