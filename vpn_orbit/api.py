@@ -223,7 +223,7 @@ class FirewallExecution(Input):
 class ApplicationDraft(Input):
     installation_id: Annotated[str, Field(pattern="^" + ULID + "$", max_length=26)]
     spec_digest: Annotated[str, Field(pattern="^[0-9a-f]{64}$")]
-    action: Literal["install", "start", "remove", "adopt", "detach", "start-adopted", "stop-adopted"]
+    action: Literal["install", "start", "remove", "adopt", "detach", "start-adopted", "stop-adopted", "restart-adopted"]
     project: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,62}$")] | None = None
 
 

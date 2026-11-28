@@ -30,7 +30,10 @@ MAX_FIREWALL_RULES = 32
 
 START_ADOPTED = "start-adopted"
 STOP_ADOPTED = "stop-adopted"
-ADOPTED_NODE_ACTIONS = (START_ADOPTED, STOP_ADOPTED)
+RESTART_ADOPTED = "restart-adopted"
+ADOPTED_NODE_ACTIONS = (START_ADOPTED, STOP_ADOPTED, RESTART_ADOPTED)
+RUN_BOUND_ADOPTED_ACTIONS = (STOP_ADOPTED, RESTART_ADOPTED)
+NEW_RUN_ADOPTED_ACTIONS = (START_ADOPTED, RESTART_ADOPTED)
 APPLICATION_SUCCESS = {
     "install": ("APP_HEALTH_VERIFIED", "APP_READBACK_VERIFIED"),
     "start": ("APP_HEALTH_VERIFIED", "APP_READBACK_VERIFIED"),
@@ -39,6 +42,7 @@ APPLICATION_SUCCESS = {
     "detach": ("APP_ADOPTION_DETACHED",),
     START_ADOPTED: ("APP_ADOPTED_START_VERIFIED",),
     STOP_ADOPTED: ("APP_ADOPTED_STOP_VERIFIED",),
+    RESTART_ADOPTED: ("APP_ADOPTED_RESTART_VERIFIED",),
 }
 
 
@@ -49,7 +53,7 @@ def application_payload(value):
         extra = ("review",)
     elif action in ADOPTED_NODE_ACTIONS:
         extra = ("registration_id",)
-        if action == STOP_ADOPTED:
+        if action in RUN_BOUND_ADOPTED_ACTIONS:
             extra += ("running_receipt_id",)
     fields(value, ("operation_id", "installation_id", "spec_digest", "action") + extra)
     for key in extra:

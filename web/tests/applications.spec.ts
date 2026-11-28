@@ -103,6 +103,7 @@ test('adoption uses the exact tag and project from the reviewed preview', async 
 for (const [action, label, warning] of [
   ['start-adopted', 'Start adopted Node', 'I confirm this operation and its host network risk'],
   ['stop-adopted', 'Stop adopted Node', 'I confirm stopping this Node and interrupting its VPN connections'],
+  ['restart-adopted', 'Restart adopted Node', 'I confirm restarting this Node and interrupting its VPN connections'],
 ]) {
   test(`selecting ${label} uses the registration and shows the operation warning`, async ({ page }) => {
     const binding = 'b'.repeat(64)

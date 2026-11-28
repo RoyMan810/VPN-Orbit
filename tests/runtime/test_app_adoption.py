@@ -32,6 +32,9 @@ class NodeDocker:
     def __init__(self):
         self.starts = []
         self.stops = []
+        self.restarts = []
+        self.lose_restart_reply = False
+        self.restart_health = "healthy"
         self.lose_reply = False
         self.lose_stop_reply = False
         self.container = {
@@ -79,6 +82,15 @@ class NodeDocker:
             if self.lose_stop_reply:
                 raise Denied("APP_DOCKER_FAILED")
             return CONTAINER
+        if (kind, verb) == ("container", "restart"):
+            assert args == ("--timeout", "30", CONTAINER)
+            assert self.container["State"]["Status"] == "running"
+            self.restarts.append(args[-1])
+            self.container["RestartCount"] = 0
+            self.container["State"].update(StartedAt=LATER, FinishedAt=ZERO_TIME, Health={"Status": self.restart_health})
+            if self.lose_restart_reply:
+                raise Denied("APP_DOCKER_UNAVAILABLE")
+            return CONTAINER
         raise AssertionError("unexpected Docker operation")
 
 
@@ -89,7 +101,7 @@ class ExternalLifecycleTests(unittest.TestCase):
         self.source = self.enterContext(patch("vpn_orbit.app_adoption.source_digest", return_value="1" * 64))
         self.app, self.binding, self.review = self.staged(INSTALLATION)
 
-    def staged(self, identity, *, allow_start=False, allow_stop=False):
+    def staged(self, identity, *, allow_start=False, allow_stop=False, allow_restart=False):
         # Use an isolated journal and the production capture, without requiring
         # a root-owned ancestor for this test process's temporary root.
         directory = self.root / identity
@@ -101,6 +113,8 @@ class ExternalLifecycleTests(unittest.TestCase):
             layout["allow_start"] = True
         if allow_stop:
             layout["allow_stop"] = True
+        if allow_restart:
+            layout["allow_restart"] = True
         baseline = app.capture(layout)
         definition = {"layout": layout, "baseline": baseline, "nonce": "a" * 64}
         binding = digest(definition)
@@ -258,6 +272,66 @@ class ExternalLifecycleTests(unittest.TestCase):
                 self.assertEqual(app.reconcile(START, action="stop-adopted", binding=binding, **options), result)
         self.assertEqual(app.reconcile(START, action="stop-adopted", binding=binding, **options)["outcome"], "SUCCEEDED")
         self.assertEqual(self.docker.stops, [CONTAINER])
+
+    def test_restart_permissions_and_running_generation(self):
+        self.app.execute(ADOPT, "adopt", self.binding, self.review)
+        options = {"registration_id": ADOPT, "running_receipt_id": ADOPT}
+        with self.assertRaisesRegex(Denied, "APP_ADOPTED_RESTART_UNSUPPORTED"):
+            self.app.execute(START, "restart-adopted", self.binding, **options)
+        self.app.execute(DETACH, "detach", self.binding)
+
+        self.docker.container["RestartCount"] = 3
+        app, binding, review = self.staged(OTHER, allow_stop=True, allow_restart=True)
+        app.execute(ADOPT, "adopt", binding, review)
+        with patch.dict(self.docker.container["State"], StartedAt=LATER), self.assertRaisesRegex(Denied, "APP_ADOPTION_DRIFT"):
+            app.execute(START, "restart-adopted", binding, **options)
+        self.assertEqual(self.docker.restarts, [])
+        result = app.execute(START, "restart-adopted", binding, **options)
+        self.assertEqual(result["code"], "APP_ADOPTED_RESTART_VERIFIED")
+        self.assertEqual(app.execute(START, "restart-adopted", binding, **options), result)
+        for action in ("stop-adopted", "restart-adopted"):
+            with self.subTest(action=action), self.assertRaisesRegex(Denied, "APP_ADOPTED_RUN_CHANGED"):
+                app.execute(NEXT, action, binding, **options)
+        with self.assertRaisesRegex(Denied, "APP_ADOPTED_START_UNSUPPORTED"):
+            app.execute(NEXT, "start-adopted", binding, registration_id=ADOPT)
+        self.assertEqual(app.execute(NEXT, "stop-adopted", binding, registration_id=ADOPT,
+                                     running_receipt_id=START)["code"], "APP_ADOPTED_STOP_VERIFIED")
+        self.assertEqual(self.docker.restarts, [CONTAINER])
+        self.assertEqual(self.docker.stops, [CONTAINER])
+        self.assertEqual(self.docker.starts, [])
+
+    def test_uncertain_restart_reconciles_only_a_new_healthy_run(self):
+        app, binding, review = self.staged(OTHER, allow_restart=True)
+        app.execute(ADOPT, "adopt", binding, review)
+        options = {"registration_id": ADOPT, "running_receipt_id": ADOPT}
+        self.docker.lose_restart_reply = True
+        result = app.execute(START, "restart-adopted", binding, **options)
+        self.assertEqual(result["code"], "APP_ADOPTED_RESTART_UNVERIFIED")
+        self.assertEqual(app.execute(START, "restart-adopted", binding, **options), result)
+        with self.assertRaisesRegex(Denied, "APP_RECONCILIATION_REQUIRED"):
+            app.execute(DETACH, "detach", binding)
+        for change in ({"StartedAt": STARTED_AT}, {"Health": {"Status": "unhealthy"}}, {"Running": False}):
+            with self.subTest(change=change), patch.dict(self.docker.container["State"], change):
+                self.assertEqual(app.reconcile(START, action="restart-adopted", binding=binding, **options), result)
+        self.assertEqual(app.reconcile(START, action="restart-adopted", binding=binding, **options)["outcome"], "SUCCEEDED")
+        with self.assertRaisesRegex(Denied, "APP_ADOPTED_RUN_CHANGED"):
+            app.execute(NEXT, "restart-adopted", binding, **options)
+        self.assertEqual(self.docker.restarts, [CONTAINER])
+
+    def test_restart_reconciliation_cannot_confirm_a_different_observed_run(self):
+        app, binding, review = self.staged(OTHER, allow_restart=True)
+        app.execute(ADOPT, "adopt", binding, review)
+        options = {"registration_id": ADOPT, "running_receipt_id": ADOPT}
+        self.docker.restart_health = "starting"
+
+        def another_run(_):
+            self.docker.container["State"].update(StartedAt=FINISHED_AT, Health={"Status": "healthy"})
+
+        with patch("vpn_orbit.app_adoption.time.sleep", side_effect=another_run):
+            result = app.execute(START, "restart-adopted", binding, **options)
+        self.assertEqual(result["outcome"], "UNKNOWN_OUTCOME")
+        self.assertEqual(app.reconcile(START, action="restart-adopted", binding=binding, **options), result)
+        self.assertEqual(self.docker.restarts, [CONTAINER])
 
     def test_rejects_changed_runtime_configuration_and_missing_receipt(self):
         with self.assertRaisesRegex(Denied, "APP_ADOPTION_DRIFT"):

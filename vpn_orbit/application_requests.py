@@ -7,7 +7,10 @@ from .change_drafts import _latest, _public, _stored
 from .database import Store, identifier
 from .errors import Denied
 from .inventory import Inventory
-from .runtime.protocol import ADOPTED_NODE_ACTIONS, START_ADOPTED, STOP_ADOPTED, ULID, application_payload, canonical, checksum, text
+from .runtime.protocol import (
+    ADOPTED_NODE_ACTIONS, NEW_RUN_ADOPTED_ACTIONS, RUN_BOUND_ADOPTED_ACTIONS, ULID,
+    application_payload, canonical, checksum, text,
+)
 
 
 REQUESTED = "change_plan.application_requested"
@@ -62,7 +65,7 @@ def reviewed_snapshot(db, inventory, actor, baseline):
         registered = active_registration(db, baseline)
         if registered is None or registered["job_id"] != baseline["registration_id"]:
             raise Denied("APP_ADOPTION_STATE_INVALID", 409)
-        if (baseline["action"] == STOP_ADOPTED
+        if (baseline["action"] in RUN_BOUND_ADOPTED_ACTIONS
                 and running_receipt(db, baseline) != baseline["running_receipt_id"]):
             raise Denied("APP_ADOPTED_RUN_CHANGED", 409)
 
@@ -73,7 +76,7 @@ def application_intent(baseline, operation):
         payload["review"] = baseline["review"]
     elif baseline["action"] in ADOPTED_NODE_ACTIONS:
         payload["registration_id"] = baseline["registration_id"]
-        if baseline["action"] == STOP_ADOPTED:
+        if baseline["action"] in RUN_BOUND_ADOPTED_ACTIONS:
             payload["running_receipt_id"] = baseline["running_receipt_id"]
     return application_payload(payload)
 
@@ -105,7 +108,7 @@ def save(db, auth, token, csrf, resource, installation, binding, action, *, proj
         if registered is None:
             raise Denied("APP_ADOPTION_STATE_INVALID", 409)
         baseline.update(project=registered["project"], registration_id=registered["job_id"])
-        if action == STOP_ADOPTED:
+        if action in RUN_BOUND_ADOPTED_ACTIONS:
             baseline["running_receipt_id"] = running_receipt(db, baseline)
     application_intent(baseline, resource)
     value = application_value(identity, 1, baseline)
@@ -240,19 +243,19 @@ def registered_applications(db, resource):
 
 
 def running_receipt(db, baseline):
-    """A confirmed start after adoption establishes a new running generation."""
+    """A confirmed start or restart establishes a new running generation."""
     row = db.execute("""
         SELECT completion.correlation_id AS id
         FROM audit req
         JOIN audit completion ON completion.correlation_id=json_extract(req.details,'$.operation_id')
              AND completion.target_id=req.target_id
         WHERE req.event=? AND req.target_id=?
-          AND json_extract(req.details,'$.application.action')=?
+          AND json_extract(req.details,'$.application.action') IN (?,?)
           AND json_extract(req.details,'$.application.registration_id')=?
           AND ((completion.event='job.finished' AND completion.outcome='SUCCEEDED')
                OR (completion.event='application.reconciled' AND completion.outcome='RECONCILED_SUCCEEDED'))
         ORDER BY completion.seq DESC LIMIT 1
-        """, (REQUESTED, baseline["resource_id"], START_ADOPTED, baseline["registration_id"])).fetchone()
+        """, (REQUESTED, baseline["resource_id"], *NEW_RUN_ADOPTED_ACTIONS, baseline["registration_id"])).fetchone()
     return row["id"] if row else baseline["registration_id"]
 
 
