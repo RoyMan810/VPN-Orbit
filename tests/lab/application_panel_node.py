@@ -35,10 +35,12 @@ class NoRedirect(HTTPRedirectHandler):
 PANEL_HTTP = build_opener(ProxyHandler({}), NoRedirect())
 
 
-def panel_api(path, *, token=None, body=None):
+def panel_api(path, *, token=None, body=None, admin=False):
     headers = {"Host": "panel.test.invalid", "X-Forwarded-Proto": "https", "X-Forwarded-For": "127.0.0.1"}
     if token is not None:
         headers["Authorization"] = "Bearer " + token
+    if admin:
+        headers["X-Remnawave-Client-Type"] = "browser"
     data = None
     if body is not None:
         headers["Content-Type"] = "application/json"
@@ -139,8 +141,13 @@ def acceptance():
         inspection = json.loads(docker("container", "inspect", panel_container))[0]
         address = inspection["NetworkSettings"]["Networks"]["fixture-panel-apps"]["Gateway"]
         assert address
-        token = panel_api("auth/register", body={"username": "fixture-admin",
+        admin = panel_api("auth/register", body={"username": "fixture-admin",
                                                "password": "Va9-" + secrets.token_urlsafe(32)})["accessToken"]
+        token = panel_api("tokens", token=admin, admin=True, body={
+            "name": "Orbit link acceptance", "expiresInDays": 1,
+            "scopes": ["keygen:get", "config-profiles:create", "config-profiles:get",
+                       "nodes:create", "nodes:get"],
+        })["token"]
         secret = panel_api("keygen", token=token)["secretKey"]
         profile = panel_api("config-profiles", token=token, body={"name": "Orbit Link Fixture", "config": {
             "log": {"loglevel": "warning"},
@@ -153,7 +160,8 @@ def acceptance():
 
         node = start_external(stack, docker, directory, "fixture-node", NODE_ID, "remnawave-node",
                               {"remnawave-node": images["remnawave-node"]},
-                              {"secret_key": secret, "port": NODE_PORT}, allow_start=True, allow_stop=True)
+                              {"secret_key": secret, "port": NODE_PORT},
+                              allow_start=True, allow_stop=True, allow_restart=True)
         created = panel_api("nodes", token=token, body={
             "name": "Orbit Link Node", "address": address, "port": NODE_PORT,
             "configProfile": {"activeConfigProfileUuid": profile_id, "activeInbounds": [inbound_id]},
@@ -196,12 +204,22 @@ def acceptance():
         result = dispatch({"operation": "execute", "application": start})
         assert result["code"] == "APP_ADOPTED_START_VERIFIED", result
         await_link(read_node, connected=True)
+        resumed = node_runtime.capture(node)["containers"]["remnawave-node"]
+        print("PASS Panel detects the adopted Node offline and restores its existing Xray listener after exact-ID start.")
+
+        restart = {"action": "restart-adopted", "operation_id": NODE_ID[:-1] + "R", **scope,
+                   "running_receipt_id": start["operation_id"]}
+        result = dispatch({"operation": "execute", "application": restart})
+        assert result["code"] == "APP_ADOPTED_RESTART_VERIFIED", result
+        await_link(read_node, connected=True)
         current = node_runtime.capture(node)
         before, after = node_before["containers"]["remnawave-node"], current["containers"]["remnawave-node"]
-        assert (after["Id"], after["configuration"]) == (before["Id"], before["configuration"])
-        assert after["started_at"] != before["started_at"]
+        identity = before["Id"], before["configuration"]
+        assert (resumed["Id"], resumed["configuration"]) == identity
+        assert (after["Id"], after["configuration"]) == identity
+        assert len({before["started_at"], resumed["started_at"], after["started_at"]}) == 3
         assert panel_runtime.capture(panel) == panel_before
-        print("PASS Panel detects the adopted Node offline and restores its existing Xray listener after exact-ID start.")
+        print("PASS Panel restores the listener after an adopted Node restart with the same container and profile.")
 
         detach(node_runtime, node, node_binding)
         detach(panel_runtime, panel, panel_binding)
