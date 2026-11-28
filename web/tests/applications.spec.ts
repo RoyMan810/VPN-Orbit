@@ -103,6 +103,7 @@ test('adoption uses the exact tag and project from the reviewed preview', async 
 for (const [action, label, warning] of [
   ['start-adopted', 'Start adopted Node', 'I confirm this operation and its host network risk'],
   ['stop-adopted', 'Stop adopted Node', 'I confirm stopping this Node and interrupting its VPN connections'],
+  ['restart-adopted', 'Restart adopted Node', 'I confirm restarting this Node and interrupting its VPN connections'],
 ]) {
   test(`selecting ${label} uses the registration and shows the operation warning`, async ({ page }) => {
     const binding = 'b'.repeat(64)
@@ -120,6 +121,7 @@ for (const [action, label, warning] of [
         },
       })
     })
+    await page.setViewportSize({ width: 320, height: 844 })
     await login(page)
     const apps = page.getByRole('region', { name: 'Applications', exact: true })
     await apps.getByRole('button', { name: 'Adopted projects', exact: true }).click()
@@ -128,5 +130,6 @@ for (const [action, label, warning] of [
     await apps.getByRole('button', { name: 'Review operation', exact: true }).click()
     await expect(apps.getByLabel(warning)).toBeVisible()
     await expect(apps.getByRole('button', { name: 'Approve revision', exact: true })).toBeDisabled()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320)
   })
 }

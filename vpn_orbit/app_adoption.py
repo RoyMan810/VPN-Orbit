@@ -20,14 +20,24 @@ from .app_profiles import CABINET_CONFIG, canonical, digest, panel_origin
 from .errors import Denied
 from .runtime.protocol import (
     ADOPTED_NODE_ACTIONS, APPLICATION_SUCCESS, COMPOSE_PROJECT, COMPOSE_SERVICE, DOCKER_RESOURCE,
-    DOCKER_STARTED_AT, SHA256, START_ADOPTED, STOP_ADOPTED, ULID,
+    DOCKER_STARTED_AT, NEW_RUN_ADOPTED_ACTIONS, RESTART_ADOPTED, RUN_BOUND_ADOPTED_ACTIONS,
+    SHA256, START_ADOPTED, STOP_ADOPTED, ULID,
 )
 from .runtime.storage import Journal, directory_sync, process_lock, protected_bytes
 
 
 EXTERNAL_ACTIONS = {action: APPLICATION_SUCCESS[action][0] for action in ("adopt", "detach", *ADOPTED_NODE_ACTIONS)}
-NODE_PERMISSION = {START_ADOPTED: "allow_start", STOP_ADOPTED: "allow_stop"}
-NODE_UNVERIFIED = {START_ADOPTED: "APP_ADOPTED_START_UNVERIFIED", STOP_ADOPTED: "APP_ADOPTED_STOP_UNVERIFIED"}
+NODE_PERMISSION = {START_ADOPTED: "allow_start", STOP_ADOPTED: "allow_stop", RESTART_ADOPTED: "allow_restart"}
+NODE_UNSUPPORTED = {
+    START_ADOPTED: "APP_ADOPTED_START_UNSUPPORTED",
+    STOP_ADOPTED: "APP_ADOPTED_STOP_UNSUPPORTED",
+    RESTART_ADOPTED: "APP_ADOPTED_RESTART_UNSUPPORTED",
+}
+NODE_UNVERIFIED = {
+    START_ADOPTED: "APP_ADOPTED_START_UNVERIFIED",
+    STOP_ADOPTED: "APP_ADOPTED_STOP_UNVERIFIED",
+    RESTART_ADOPTED: "APP_ADOPTED_RESTART_UNVERIFIED",
+}
 BUILTIN_NETWORKS = {"bridge", "host", "none"}
 LAYOUT_FIELDS = {"version", "id", "project", "compose_files", "extra_files", "service_hashes"}
 
@@ -444,13 +454,13 @@ class ExternalLifecycle(Lifecycle):
 
     @staticmethod
     def operation_binding(action, binding, registration_id, running_receipt_id):
-        if action != STOP_ADOPTED and running_receipt_id is not None:
+        if action not in RUN_BOUND_ADOPTED_ACTIONS and running_receipt_id is not None:
             refuse("APP_ACTION_INVALID")
         if action in ADOPTED_NODE_ACTIONS:
             if not isinstance(registration_id, str) or not re.fullmatch(ULID, registration_id):
                 refuse("APP_ADOPTION_STATE_INVALID")
             intent = {"spec_digest": binding, "registration_id": registration_id}
-            if action == STOP_ADOPTED:
+            if action in RUN_BOUND_ADOPTED_ACTIONS:
                 if not isinstance(running_receipt_id, str) or not re.fullmatch(ULID, running_receipt_id):
                     refuse("APP_ADOPTED_RUN_CHANGED")
                 intent["running_receipt_id"] = running_receipt_id
@@ -498,48 +508,49 @@ class ExternalLifecycle(Lifecycle):
                            (operation, action, binding, EXTERNAL_ACTIONS[action]))
             return {"operation_id": operation, "outcome": "SUCCEEDED", "code": EXTERNAL_ACTIONS[action]}
 
-    def verify_node(self, layout, inventory, action, *, after):
+    def verify_node(self, layout, inventory, action, *, after, running_since=None):
         stopped = action == STOP_ADOPTED if after else action == START_ADOPTED
-        current = self.capture(layout, stopped=stopped, expected=inventory, require_health=action == START_ADOPTED)
+        new_run = after and action in NEW_RUN_ADOPTED_ACTIONS
+        current = self.capture(layout, stopped=stopped, expected=inventory, require_health=new_run)
         service, old = next(iter(inventory["containers"].items()))
         node = current["containers"].get(service, {})
-        stable_fields = {"Id", "configuration", "restart_count"}
         unchanged = all(current[key] == inventory[key] for key in
                         ("sources", "roles", "dependencies", "networks", "volumes"))
-        if not unchanged or any(node.get(key) != old[key] for key in stable_fields):
+        # Docker's explicit restart resets the daemon restart counter.
+        expected_restarts = 0 if after and action == RESTART_ADOPTED else old["restart_count"]
+        if (not unchanged or any(node.get(key) != old[key] for key in ("Id", "configuration"))
+                or node.get("restart_count") != expected_restarts):
             refuse("APP_ADOPTION_DRIFT")
         previous, observed = timestamp(old["started_at"]), timestamp(node["started_at"])
-        if stopped:
-            if observed != previous or node["host_network"] not in (None, old["host_network"]):
-                refuse("APP_ADOPTION_DRIFT")
-        elif node["host_network"] != old["host_network"]:
+        networks = (None, old["host_network"]) if stopped else (old["host_network"],)
+        if node["host_network"] not in networks or (not new_run and observed != previous):
             refuse("APP_ADOPTION_DRIFT")
-        if action == START_ADOPTED and after and observed <= previous:
+        if new_run and (observed <= previous or (running_since is not None and observed != timestamp(running_since))):
             refuse(NODE_UNVERIFIED[action])
+        if not after and action in RUN_BOUND_ADOPTED_ACTIONS and node["network_bindings"] != old["network_bindings"]:
+            refuse("APP_ADOPTION_DRIFT")
         if action == STOP_ADOPTED:
             prior_finish = timestamp(old["finished_at"], code=NODE_UNVERIFIED[action])
             finished = timestamp(node["finished_at"], code=NODE_UNVERIFIED[action])
-            if after:
-                if finished <= max(previous, prior_finish):
-                    refuse(NODE_UNVERIFIED[action])
-            elif (observed != previous or finished != prior_finish
-                    or node["network_bindings"] != old["network_bindings"]):
+            if after and finished <= max(previous, prior_finish):
+                refuse(NODE_UNVERIFIED[action])
+            if not after and finished != prior_finish:
                 refuse("APP_ADOPTION_DRIFT")
         return current
 
     def change_node(self, operation, action, binding, layout, inventory, registration_id, running_receipt_id):
         if not layout.get(NODE_PERMISSION[action]):
-            refuse("APP_ADOPTED_START_UNSUPPORTED" if action == START_ADOPTED else "APP_ADOPTED_STOP_UNSUPPORTED")
+            refuse(NODE_UNSUPPORTED[action])
         if inventory is None:
             refuse("APP_ADOPTION_STATE_INVALID")
         with self.journal.connect() as db:
             registration = db.execute("""SELECT id FROM operations WHERE action='adopt' AND state='SUCCEEDED'
                                          ORDER BY rowid DESC LIMIT 1""").fetchone()
-            running = db.execute("""SELECT id FROM operations WHERE action IN ('adopt',?) AND state='SUCCEEDED'
-                                    ORDER BY rowid DESC LIMIT 1""", (START_ADOPTED,)).fetchone()
+            running = db.execute("""SELECT id FROM operations WHERE action IN ('adopt',?,?) AND state='SUCCEEDED'
+                                    ORDER BY rowid DESC LIMIT 1""", NEW_RUN_ADOPTED_ACTIONS).fetchone()
         if registration is None or registration["id"] != registration_id:
             refuse("APP_ADOPTION_STATE_INVALID")
-        if action == STOP_ADOPTED and (running is None or running["id"] != running_receipt_id):
+        if action in RUN_BOUND_ADOPTED_ACTIONS and (running is None or running["id"] != running_receipt_id):
             refuse("APP_ADOPTED_RUN_CHANGED")
         inventory = json.loads(inventory)
         self.verify_node(layout, inventory, action, after=False)
@@ -548,26 +559,56 @@ class ExternalLifecycle(Lifecycle):
         with self.journal.write() as db:
             db.execute("INSERT INTO operations(id,action,binding,state,code) VALUES(?,?,?,'DISPATCHING','APP_PENDING')",
                        (operation, action, binding))
+            if action == RESTART_ADOPTED:
+                db.execute("""CREATE TABLE IF NOT EXISTS restart_observations(
+                    operation_id TEXT PRIMARY KEY REFERENCES operations(id), started_at TEXT NOT NULL)""")
         try:
             if action == START_ADOPTED:
                 self.docker("container", "start", node["Id"], timeout=45)
-                self.wait_for_node_health(node["Id"])
-            else:
+            elif action == STOP_ADOPTED:
                 self.docker("container", "stop", "--timeout", "30", node["Id"], timeout=45)
-            current = self.verify_node(layout, inventory, action, after=True)
+            else:
+                self.docker("container", "restart", "--timeout", "30", node["Id"], timeout=60)
+            running_since = None
+            if action in NEW_RUN_ADOPTED_ACTIONS:
+                running_since = self.wait_for_node_health(operation, action, node)
+            current = self.verify_node(layout, inventory, action, after=True, running_since=running_since)
         except Exception:
             return self.finish(operation, "UNKNOWN_OUTCOME", NODE_UNVERIFIED[action])
         return self.record_node_outcome(operation, action, current)
 
-    def wait_for_node_health(self, identity):
+    def pin_restart_generation(self, operation, node, value):
+        code = NODE_UNVERIFIED[RESTART_ADOPTED]
+        state = value["State"]
+        if (value["Id"] != node["Id"] or state["Status"] != "running" or state.get("Running") is not True
+                or any(state.get(key) for key in ("Paused", "Restarting", "Dead"))):
+            refuse(code)
+        observed_at = state["StartedAt"]
+        observed = timestamp(observed_at, code=code)
+        if observed <= timestamp(node["started_at"], code=code):
+            refuse(code)
+        # Keep the first observed run through a lost reply or subsequent manual restart.
+        with self.journal.write() as db:
+            db.execute("INSERT OR IGNORE INTO restart_observations VALUES(?,?)", (operation, observed_at))
+            row = db.execute("SELECT started_at FROM restart_observations WHERE operation_id=?", (operation,)).fetchone()
+        if observed != timestamp(row["started_at"], code=code):
+            refuse(code)
+        return row["started_at"]
+
+    def wait_for_node_health(self, operation, action, node):
         deadline = time.monotonic() + 90
+        started_at = None
         while True:
-            value = self.inspect("container", identity)
+            value = self.inspect("container", node["Id"])
             state = value["State"]
-            if value["Id"] != identity or state["Status"] != "running":
-                refuse(NODE_UNVERIFIED[START_ADOPTED])
+            if value["Id"] != node["Id"] or state["Status"] != "running":
+                refuse(NODE_UNVERIFIED[action])
+            if action == RESTART_ADOPTED and started_at is None:
+                started_at = self.pin_restart_generation(operation, node, value)
+            if started_at is not None and state["StartedAt"] != started_at:
+                refuse(NODE_UNVERIFIED[action])
             if (state.get("Health") or {}).get("Status") == "healthy":
-                return
+                return started_at
             if time.monotonic() >= deadline:
                 refuse("APP_HEALTH_UNVERIFIED")
             time.sleep(1)
@@ -575,7 +616,7 @@ class ExternalLifecycle(Lifecycle):
     def record_node_outcome(self, operation, action, inventory):
         code = EXTERNAL_ACTIONS[action]
         with self.journal.write() as db:
-            if action == START_ADOPTED:
+            if action in NEW_RUN_ADOPTED_ACTIONS:
                 db.execute("UPDATE installation SET inventory=? WHERE id=1", (canonical(inventory).decode(),))
             db.execute("UPDATE operations SET state='SUCCEEDED',code=? WHERE id=?", (code, operation))
         return {"operation_id": operation, "outcome": "SUCCEEDED", "code": code}
@@ -605,8 +646,14 @@ class ExternalLifecycle(Lifecycle):
                 return result
             if installation is None or installation["spec_digest"] != binding or installation["inventory"] is None:
                 refuse("APP_ADOPTION_DRIFT")
+            inventory = json.loads(installation["inventory"])
             try:
-                current = self.verify_node(definition["layout"], json.loads(installation["inventory"]), action, after=True)
+                running_since = None
+                if action == RESTART_ADOPTED:
+                    node = next(iter(inventory["containers"].values()))
+                    value = self.inspect("container", node["Id"])
+                    running_since = self.pin_restart_generation(operation, node, value)
+                current = self.verify_node(definition["layout"], inventory, action, after=True, running_since=running_since)
             except Denied:
                 return result
             return self.record_node_outcome(operation, action, current)

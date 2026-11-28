@@ -237,7 +237,7 @@ class InventoryTests(Fixture):
         self.assertEqual(response.status_code, 202, response.text)
         return response.json()["id"]
 
-    def finish_registered_application(self, job, code, *, preview=None, registration=None):
+    def finish_registered_application(self, job, code, *, preview=None, registration=None, running_receipt=None):
         claim, row = self.queue.claim(identifier())
         self.assertEqual(row["id"], job)
         class Gate:
@@ -250,6 +250,7 @@ class InventoryTests(Fixture):
         else:
             self.assertNotIn("review", intent["application"])
         self.assertEqual(intent["application"].get("registration_id"), registration)
+        self.assertEqual(intent["application"].get("running_receipt_id"), running_receipt)
         self.queue.advance(claim, "INTENT_PREPARED", permit={"claims": intent}, binding=intent, validate=validate)
         for state in ("DISPATCHING", "EXECUTING", "VERIFYING"):
             self.queue.advance(claim, state)
@@ -304,6 +305,21 @@ class InventoryTests(Fixture):
         self.assertEqual(stop.status_code, 201, stop.text)
         self.assertEqual(stop.json()["diff"], {"operation": "stop-adopted", "installation_id": OTHER, "project": "fixture",
                                                "registration_id": job, "running_receipt_id": start_job})
+
+    def test_restart_receipt_invalidates_previous_stop_plan(self):
+        _, preview = self.adoption_fixture()
+        register = self.adoption_draft(preview)
+        registration = self.request_application(register, self.confirm_application(register))
+        self.finish_registered_application(registration, "APP_ADOPTION_REGISTERED", preview=preview)
+
+        stale = self.adoption_draft(None, action="stop-adopted")
+        restart = self.adoption_draft(None, action="restart-adopted")
+        job = self.request_application(restart, self.confirm_application(restart))
+        self.finish_registered_application(job, "APP_ADOPTED_RESTART_VERIFIED", registration=registration,
+                                           running_receipt=registration)
+        self.assertEqual(self.confirm_application(stale).json()["code"], "APP_ADOPTED_RUN_CHANGED")
+        future = self.adoption_draft(None, action="restart-adopted")
+        self.assertEqual(future.json()["diff"]["running_receipt_id"], job)
 
     def test_adoption_requires_ready_evidence_and_rechecks_at_approval_and_dispatch(self):
         _, incomplete = self.adoption_fixture(ready=False)

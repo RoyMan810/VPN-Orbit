@@ -50,7 +50,7 @@ def adoption_acceptance(spec):
             baseline = probe.inspect("container", container)
             hashes = dict(row.split() for row in docker(*args, "config", "--hash=*").splitlines())
             layout = {"version": 1, "id": external_id, "project": project, "compose_files": [str(source)],
-                      "extra_files": [], "service_hashes": hashes, "allow_start": True, "allow_stop": True}
+                      "extra_files": [], "service_hashes": hashes, "allow_start": True, "allow_stop": True, "allow_restart": True}
             original = source.rename(source.with_suffix(".original"))
             source.symlink_to(original)
             try:
@@ -100,8 +100,44 @@ def adoption_acceptance(spec):
                 assert probe.healthy({"containers": {"node": {"Id": container}}})
                 assert dispatch({"operation": "reconcile", "application": payload}) == result
                 after = current
-            assert app.execute(IDENTITY[:-1] + "A", "detach", binding)["code"] == "APP_ADOPTION_DETACHED"
             print("PASS two explicit stop/start cycles of the exact adopted Node, verified exit, health and read-back.")
+
+            restart = {"action": "restart-adopted", "operation_id": IDENTITY[:-1] + "B", **scope,
+                       "running_receipt_id": running_receipt}
+            result = dispatch({"operation": "execute", "application": restart})
+            assert result["code"] == "APP_ADOPTED_RESTART_VERIFIED", result
+            current = probe.inspect("container", container)
+            assert current["State"]["StartedAt"] != after["State"]["StartedAt"]
+            assert probe.stable(current) == probe.stable(after)
+
+            effects = []
+
+            def lose_restart_reply(*arguments, **options):
+                response = docker(*arguments, **options)
+                if arguments[:2] == ("container", "restart"):
+                    effects.append(arguments[-1])
+                    raise Denied("APP_DOCKER_UNAVAILABLE")
+                return response
+
+            interrupted = ExternalLifecycle(external_id, docker=lose_restart_reply)
+            receipt = {"registration_id": registration, "running_receipt_id": restart["operation_id"]}
+            operation = IDENTITY[:-1] + "C"
+            unknown = interrupted.execute(operation, "restart-adopted", binding, **receipt)
+            assert unknown["outcome"] == "UNKNOWN_OUTCOME"
+            assert interrupted.execute(operation, "restart-adopted", binding, **receipt) == unknown
+            deadline = time.monotonic() + 90
+            while not probe.healthy({"containers": {"node": {"Id": container}}}):
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Restarted Node did not become healthy")
+                time.sleep(1)
+            confirmed = interrupted.reconcile(operation, action="restart-adopted", binding=binding, **receipt)
+            assert confirmed["code"] == "APP_ADOPTED_RESTART_VERIFIED", confirmed
+            assert effects == [container]
+            after = probe.inspect("container", container)
+            assert after["State"]["StartedAt"] != current["State"]["StartedAt"]
+            assert probe.stable(after) == probe.stable(current)
+            assert app.execute(IDENTITY[:-1] + "A", "detach", binding)["code"] == "APP_ADOPTION_DETACHED"
+            print("PASS two exact-ID Node restarts including a lost reply verified without a second Docker command.")
         finally:
             docker(*args, "down")
 
