@@ -50,7 +50,7 @@ def adoption_acceptance(spec):
             baseline = probe.inspect("container", container)
             hashes = dict(row.split() for row in docker(*args, "config", "--hash=*").splitlines())
             layout = {"version": 1, "id": external_id, "project": project, "compose_files": [str(source)],
-                      "extra_files": [], "service_hashes": hashes, "allow_start": True}
+                      "extra_files": [], "service_hashes": hashes, "allow_start": True, "allow_stop": True}
             original = source.rename(source.with_suffix(".original"))
             source.symlink_to(original)
             try:
@@ -78,10 +78,20 @@ def adoption_acceptance(spec):
             binding = staged["spec_digest"]
             registration = IDENTITY[:-1] + "V"
             app.execute(registration, "adopt", binding, review)
-            for operation in (IDENTITY[:-1] + "W", IDENTITY[:-1] + "X"):
-                docker("container", "stop", container, timeout=45)
-                payload = {"action": "start-adopted", "operation_id": operation, "installation_id": external_id,
-                           "spec_digest": binding, "registration_id": registration}
+            running_receipt = registration
+            for stop_suffix, start_suffix in (("W", "X"), ("Y", "Z")):
+                scope = {"installation_id": external_id, "spec_digest": binding, "registration_id": registration}
+                stop = {"action": "stop-adopted", "operation_id": IDENTITY[:-1] + stop_suffix, **scope,
+                        "running_receipt_id": running_receipt}
+                result = dispatch({"operation": "execute", "application": stop})
+                assert result["code"] == "APP_ADOPTED_STOP_VERIFIED", result
+                exited = probe.inspect("container", container)
+                assert exited["State"]["Status"] == "exited"
+                assert exited["State"]["StartedAt"] == after["State"]["StartedAt"]
+                assert probe.stable(exited) == probe.stable(after)
+                assert dispatch({"operation": "reconcile", "application": stop}) == result
+                running_receipt = IDENTITY[:-1] + start_suffix
+                payload = {"action": "start-adopted", "operation_id": running_receipt, **scope}
                 result = dispatch({"operation": "execute", "application": payload})
                 assert result["code"] == "APP_ADOPTED_START_VERIFIED", result
                 current = probe.inspect("container", container)
@@ -90,8 +100,8 @@ def adoption_acceptance(spec):
                 assert probe.healthy({"containers": {"node": {"Id": container}}})
                 assert dispatch({"operation": "reconcile", "application": payload}) == result
                 after = current
-            assert app.execute(IDENTITY[:-1] + "Y", "detach", binding)["code"] == "APP_ADOPTION_DETACHED"
-            print("PASS two explicit starts of the exact adopted Node, verified health and read-back.")
+            assert app.execute(IDENTITY[:-1] + "A", "detach", binding)["code"] == "APP_ADOPTION_DETACHED"
+            print("PASS two explicit stop/start cycles of the exact adopted Node, verified exit, health and read-back.")
         finally:
             docker(*args, "down")
 

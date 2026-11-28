@@ -18,8 +18,7 @@ def dispatch(request):
     if payload["action"] in EXTERNAL_ACTIONS:
         app = ExternalLifecycle(payload["installation_id"])
         options = {"action": payload["action"], "binding": payload["spec_digest"], "review": payload.get("review")}
-        if "registration_id" in payload:
-            options["registration_id"] = payload["registration_id"]
+        options.update({key: payload[key] for key in ("registration_id", "running_receipt_id") if key in payload})
         if request["operation"] == "execute":
             result = app.execute(payload["operation_id"], **options)
         elif request["operation"] == "reconcile":
