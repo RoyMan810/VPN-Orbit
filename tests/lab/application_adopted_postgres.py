@@ -28,14 +28,58 @@ def query(container, database, role, sql):
                            "--command", sql, timeout=20).decode().strip()
 
 
-def require_unregistered(app, binding, archive, recipient):
+def require_unregistered(app, service, binding, archive, recipient):
     try:
-        capture(app, "panel-db", binding, archive, recipient)
+        capture(app, service, binding, archive, recipient)
     except Denied as error:
         assert error.code == "APP_POSTGRES_SCOPE_MISMATCH"
     else:
-        raise AssertionError("An unregistered Panel was backed up")
+        raise AssertionError("An unregistered database was backed up")
     assert not archive.exists()
+
+
+def backup_key(private):
+    keygen = os.environ["VPN_ORBIT_PG_AGE_KEYGEN"]
+    identity = private / "fixture.identity"
+    subprocess.run([keygen, "-o", identity], check=True, capture_output=True)
+    return identity, subprocess.check_output([keygen, "-y", identity], text=True).strip()
+
+
+def capture_archive(app, service, binding, archive, recipient):
+    output = StringIO()
+    with redirect_stdout(output):
+        code = cli(["capture", "--id", app.identity, "--service", service, "--spec-sha256", binding,
+                    "--archive", str(archive), "--recipient", recipient, "--confirm"])
+    result = json.loads(output.getvalue())
+    assert code == 0 and result["status"] == "CAPTURED", result
+    assert archive.stat().st_mode & 0o777 == 0o600
+    return result["sha256"]
+
+
+def restore_isolated(stack, docker, private, archive, identity, sha256, expected):
+    recovery = docker("run", "--detach", "--pull", "never", "--network", "none",
+                      "--env", "POSTGRES_PASSWORD=" + secrets.token_hex(32), "--env", "POSTGRES_DB=orbit",
+                      expected["image"]).strip()
+    stack.callback(docker, "container", "rm", "--force", "--volumes", recovery)
+    deadline = time.monotonic() + 90
+    while True:
+        try:
+            docker("exec", recovery, "pg_isready", "--host", "127.0.0.1", "--dbname", "orbit")
+        except Denied:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("The separate recovery PostgreSQL did not start") from None
+            time.sleep(1)
+        else:
+            break
+    with tempfile.TemporaryFile(dir=private) as payload:
+        with decrypt(archive, identity, sha256) as (header, stream):
+            assert {key: header.get(key) for key in expected} == expected
+            assert stream.peek(5)[:5] == b"PGDMP"
+            shutil.copyfileobj(stream, payload)
+        payload.seek(0)
+        postgres_docker("exec", "-i", recovery, *local_postgres("pg_restore", "orbit", "postgres"),
+                        "--exit-on-error", "--single-transaction", "--no-owner", "--no-acl", stdin=payload)
+    return recovery
 
 
 def acceptance():
@@ -72,55 +116,26 @@ def acceptance():
         query(primary, "postgres", "postgres",
               "CREATE TABLE orbit_backup_fixture(value text); INSERT INTO orbit_backup_fixture VALUES('captured')")
 
-        keygen = os.environ["VPN_ORBIT_PG_AGE_KEYGEN"]
-        identity = private / "fixture.identity"
+        identity, recipient = backup_key(private)
         archive = private / "panel.age"
-        subprocess.run([keygen, "-o", identity], check=True, capture_output=True)
-        recipient = subprocess.check_output([keygen, "-y", identity], text=True).strip()
-        require_unregistered(app, staged["spec_digest"], archive, recipient)
+        require_unregistered(app, "panel-db", staged["spec_digest"], archive, recipient)
         binding = register(layout, app, staged)
-        output = StringIO()
-        with redirect_stdout(output):
-            code = cli(["capture", "--id", INSTALLATION, "--service", "panel-db", "--spec-sha256", binding,
-                        "--archive", str(archive), "--recipient", recipient, "--confirm"])
-        result = json.loads(output.getvalue())
-        assert code == 0 and result["status"] == "CAPTURED", result
-        assert archive.stat().st_mode & 0o777 == 0o600
+        sha256 = capture_archive(app, "panel-db", binding, archive, recipient)
         assert app.capture(layout) == before
         query(primary, "postgres", "postgres", "UPDATE orbit_backup_fixture SET value='live'")
         print("PASS the root CLI captured the adopted Panel's PostgreSQL database without altering its Docker inventory.",
               flush=True)
 
-        recovery = docker("run", "--detach", "--pull", "never", "--network", "none",
-                          "--env", "POSTGRES_PASSWORD=" + secrets.token_hex(32), "--env", "POSTGRES_DB=orbit",
-                          images["postgres"]).strip()
-        stack.callback(docker, "container", "rm", "--force", "--volumes", recovery)
-        deadline = time.monotonic() + 90
-        while True:
-            try:
-                docker("exec", recovery, "pg_isready", "--host", "127.0.0.1", "--dbname", "orbit")
-            except Denied:
-                if time.monotonic() >= deadline:
-                    raise RuntimeError("The separate recovery PostgreSQL did not start") from None
-                time.sleep(1)
-            else:
-                break
-        with tempfile.TemporaryFile(dir=private) as payload:
-            with decrypt(archive, identity, result["sha256"]) as (header, stream):
-                assert header["source"] == "adopted" and header["registration"] == INSTALLATION
-                assert header["spec_sha256"] == binding and header["database"] == header["role"] == "postgres"
-                assert header["image"] == images["postgres"]
-                assert stream.peek(5)[:5] == b"PGDMP"
-                shutil.copyfileobj(stream, payload)
-            payload.seek(0)
-            postgres_docker("exec", "-i", recovery, *local_postgres("pg_restore", "orbit", "postgres"),
-                            "--exit-on-error", "--single-transaction", "--no-owner", "--no-acl", stdin=payload)
+        recovery = restore_isolated(stack, docker, private, archive, identity, sha256, {
+            "source": "adopted", "registration": INSTALLATION, "spec_sha256": binding, "service": "panel-db",
+            "database": "postgres", "role": "postgres", "image": images["postgres"],
+        })
         assert query(recovery, "orbit", "postgres", "SELECT value FROM orbit_backup_fixture") == "captured"
         assert query(primary, "postgres", "postgres", "SELECT value FROM orbit_backup_fixture") == "live"
         assert isinstance(panel_api("auth/status"), dict)
         assert app.capture(layout) == before
         detach(app, layout, binding)
-        require_unregistered(app, binding, private / "detached.age", recipient)
+        require_unregistered(app, "panel-db", binding, private / "detached.age", recipient)
         print("PASS the archive restored in a separate networkless PostgreSQL and the source database remained live.",
               flush=True)
 

@@ -14,6 +14,7 @@ from threading import Thread
 import time
 import traceback
 
+from tests.lab.application_adopted_postgres import backup_key, capture_archive, query, require_unregistered, restore_isolated
 from tests.lab.application_panel_node import detach, identifier, panel_api, register, start_external
 from vpn_orbit.app_adoption import ExternalLifecycle
 from vpn_orbit.app_lifecycle import Docker, ROOT
@@ -25,6 +26,8 @@ PANEL_ID = "01JCYQZ4T9V8MNVYEH3D2M7Q1P"
 BEDOLAGA_ID = "01JCYQZ4T9V8MNVYEH3D2M7Q1B"
 PROJECT = "fixture-bedolaga"
 GATEWAY = "192.0.2.1"
+BOT_DATABASE = "remnawave_bot"
+BOT_DATABASE_ROLE = "remnawave_user"
 
 
 class FixtureHandler(BaseHTTPRequestHandler):
@@ -97,6 +100,9 @@ def create_bedolaga(stack, docker, directory, images, panel_token):
             "settings": {"bedolaga-bot": app_secret, "bedolaga-cabinet": {}}}
     document = render(spec, "a" * 64)
     document["name"] = PROJECT
+    postgres = document["services"]["bot-db"]
+    postgres["environment"].update(POSTGRES_DB=BOT_DATABASE, POSTGRES_USER=BOT_DATABASE_ROLE)
+    postgres["healthcheck"]["test"] = ["CMD", "pg_isready", "-U", BOT_DATABASE_ROLE, "-d", BOT_DATABASE]
     for service in document["services"].values():
         service.pop("labels")
         service.pop("ports", None)
@@ -120,7 +126,8 @@ def create_bedolaga(stack, docker, directory, images, panel_token):
     tls.load_cert_chain(cert, key)
     bot = document["services"]["bedolaga-bot"]
     bot["environment"].update(TELEGRAM_API_URL=f"http://{GATEWAY}:18090", VERSION_CHECK_ENABLED="false",
-                              SSL_CERT_FILE=PANEL_CA_MOUNT)
+                              SSL_CERT_FILE=PANEL_CA_MOUNT, DATABASE_MODE="auto",
+                              POSTGRES_DB=BOT_DATABASE, POSTGRES_USER=BOT_DATABASE_ROLE)
     bot["volumes"].append({"type": "bind", "source": str(cert), "target": PANEL_CA_MOUNT, "read_only": True,
                            "bind": {"create_host_path": False}})
     source = directory / "bedolaga.json"
@@ -148,11 +155,13 @@ def check_cabinet(bot_ip, cabinet_ip):
     assert via_cabinet[0] == direct[0] and json.loads(via_cabinet[1]) == json.loads(direct[1])
 
 
-def check_squad(docker, before, squad_id):
-    database = before["containers"]["bot-db"]["Id"]
-    sql = f"SELECT count(*) FROM server_squads WHERE squad_uuid = '{squad_id}'"
+def squad_query(squad_id):
+    return f"SELECT count(*) FROM server_squads WHERE squad_uuid = '{squad_id}'"
+
+
+def check_squad(primary, squad_id):
     deadline = time.monotonic() + 15
-    while docker("exec", database, "psql", "-U", "orbit", "-d", "orbit", "-Atc", sql).strip() != "1":
+    while query(primary, BOT_DATABASE, BOT_DATABASE_ROLE, squad_query(squad_id)) != "1":
         if time.monotonic() >= deadline:
             raise RuntimeError("Bedolaga did not retain the squad fetched from the authenticated Panel API")
         time.sleep(1)
@@ -165,6 +174,7 @@ def acceptance():
     docker = Docker()
     with ExitStack() as stack:
         directory = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="vo-bedolaga-", dir="/var/lib")))
+        private = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="vo-bedolaga-backup-", dir="/run")))
         for role in ("remnawave-panel", "bedolaga-bot", "bedolaga-cabinet", "postgres", "redis"):
             docker("pull", "--platform", "linux/amd64", images[role], timeout=300)
         start_external(stack, docker, directory, "fixture-panel", PANEL_ID, "remnawave-panel",
@@ -190,17 +200,36 @@ def acceptance():
         assert before["dependencies"]["bedolaga-cabinet"] == ["bedolaga-bot"]
         bot_ip = project_address(docker, "bedolaga-bot")
         cabinet_ip = project_address(docker, "bedolaga-cabinet")
-        check_squad(docker, before, squad)
+        primary = before["containers"]["bot-db"]["Id"]
+        check_squad(primary, squad)
         check_cabinet(bot_ip, cabinet_ip)
         print("PASS real Bedolaga imports a Panel squad via TLS and preserves the Cabinet API authentication boundary.", flush=True)
 
+        identity, recipient = backup_key(private)
+        archive = private / "bedolaga.age"
+        require_unregistered(runtime, "bot-db", staged["spec_digest"], archive, recipient)
         binding = register(layout, runtime, staged)
         assert runtime.capture(layout) == before
-        check_squad(docker, before, squad)
+        check_squad(primary, squad)
         check_cabinet(bot_ip, cabinet_ip)
+
+        query(primary, BOT_DATABASE, BOT_DATABASE_ROLE,
+              "CREATE TABLE orbit_backup_fixture(value text); INSERT INTO orbit_backup_fixture VALUES('captured')")
+        sha256 = capture_archive(runtime, "bot-db", binding, archive, recipient)
+        query(primary, BOT_DATABASE, BOT_DATABASE_ROLE, "UPDATE orbit_backup_fixture SET value='live'")
+        recovery = restore_isolated(stack, docker, private, archive, identity, sha256, {
+            "source": "adopted", "registration": BEDOLAGA_ID, "spec_sha256": binding, "service": "bot-db",
+            "database": BOT_DATABASE, "role": BOT_DATABASE_ROLE, "image": images["postgres"],
+        })
+        assert query(recovery, "orbit", "postgres", squad_query(squad)) == "1"
+        assert query(recovery, "orbit", "postgres", "SELECT value FROM orbit_backup_fixture") == "captured"
+        assert query(primary, BOT_DATABASE, BOT_DATABASE_ROLE, "SELECT value FROM orbit_backup_fixture") == "live"
+        print("PASS the encrypted backup restored the imported Panel squad and data in a separate PostgreSQL.", flush=True)
+
         detach(runtime, layout, binding)
         assert runtime.capture(layout) == before
-        check_squad(docker, before, squad)
+        require_unregistered(runtime, "bot-db", binding, private / "detached.age", recipient)
+        check_squad(primary, squad)
         check_cabinet(bot_ip, cabinet_ip)
         print("PASS adoption and detachment preserve the Bedolaga routes, squad data, containers, network, and volumes.",
               flush=True)
