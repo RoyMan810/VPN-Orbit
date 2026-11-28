@@ -1,6 +1,8 @@
 """Acceptance of an existing Remnawave link on a disposable GitHub VM."""
 
 from contextlib import ExitStack
+from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
@@ -8,6 +10,7 @@ import secrets
 import socket
 import subprocess
 import tempfile
+from threading import Thread
 import time
 import traceback
 from urllib.error import HTTPError
@@ -25,6 +28,7 @@ PANEL_ID = "01JCYQZ4T9V8MNVYEH3D2M7Q1P"
 NODE_ID = "01JCYQZ4T9V8MNVYEH3D2M7Q1N"
 NODE_PORT = 2222
 XRAY_PORT = 18444
+SOCKS_PORT = 18445
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -58,9 +62,9 @@ def identifier(value):
     return str(UUID(value["uuid"]))
 
 
-def listening():
+def listening(port=XRAY_PORT):
     try:
-        with socket.create_connection(("127.0.0.1", XRAY_PORT), timeout=1):
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
             return True
     except OSError:
         return False
@@ -75,6 +79,81 @@ def await_link(read_node, *, connected):
             return state
         time.sleep(1)
     raise RuntimeError("Panel link or Xray listener did not reach " + ("online" if connected else "offline"))
+
+
+def start_origin(stack, marker):
+    """Serve one short response on loopback for the authenticated traffic check."""
+    class Origin(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path != "/acceptance":
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(marker)))
+            self.end_headers()
+            self.wfile.write(marker)
+
+        def log_message(self, format, *args):
+            pass
+
+    server = stack.enter_context(ThreadingHTTPServer(("127.0.0.1", 0), Origin))
+    Thread(target=server.serve_forever, daemon=True).start()
+    stack.callback(server.shutdown)
+    return server.server_port
+
+
+def start_client(stack, docker, directory, image, user):
+    """Run the Xray binary from the pinned Node image as a loopback-only client."""
+    config = {
+        "log": {"loglevel": "warning"},
+        "inbounds": [{"listen": "127.0.0.1", "port": SOCKS_PORT, "protocol": "socks",
+                      "settings": {"auth": "noauth", "udp": False}}],
+        "outbounds": [{"protocol": "vless", "settings": {"vnext": [{
+            "address": "127.0.0.1", "port": XRAY_PORT,
+            "users": [{"id": user, "encryption": "none"}],
+        }]}}],
+    }
+    source = directory / "xray-client.json"
+    source.touch(mode=0o600)
+    source.write_text(json.dumps(config))
+    client = docker("run", "--detach", "--pull", "never", "--network", "host", "--read-only",
+                    "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+                    "--mount", f"type=bind,source={source},target=/probe.json,readonly",
+                    "--entrypoint", "/usr/local/bin/xray", image, "run", "-config", "/probe.json").strip()
+    stack.callback(docker, "container", "rm", "--force", client)
+    return client
+
+
+def request_through_node(port):
+    return subprocess.run(
+        ["curl", "--disable", "--noproxy", "", "--socks5", f"127.0.0.1:{SOCKS_PORT}",
+         "--connect-timeout", "2", "--max-time", "4", "--silent", "--show-error", "--fail",
+         "--url", f"http://127.0.0.1:{port}/acceptance"],
+        capture_output=True, timeout=5, check=False,
+    )
+
+
+def await_traffic(port, marker, docker, client):
+    deadline = time.monotonic() + 30
+    status = None
+    phase = ""
+    while time.monotonic() < deadline:
+        result = request_through_node(port)
+        status = result.returncode
+        failure = result.stderr.lower()
+        phase = "SOCKS handshake" if b"socks" in failure else "transfer"
+        if status == 0:
+            if result.stdout != marker:
+                raise RuntimeError("The VPN client received an unexpected HTTP body")
+            return
+        time.sleep(1)
+    state = json.loads(docker("container", "inspect", client))[0]["State"]
+    logs = docker("container", "logs", client)
+    hints = ("failed to load config", "permission denied", "failed to listen", "configuration error",
+             "failed to find", "failed to dial", "connection refused", "invalid", "rejected")
+    matched = ", ".join(hint for hint in hints if hint in logs.lower())
+    raise RuntimeError(f"VPN traffic failed ({phase}, curl exit {status}, client {state['Status']}:{state['ExitCode']}, "
+                       f"SOCKS listening {listening(SOCKS_PORT)}, origin listening {listening(port)}, hints {matched})")
 
 
 def start_external(stack, docker, directory, project, identity, role, images, settings, **permissions):
@@ -146,17 +225,35 @@ def acceptance():
         token = panel_api("tokens", token=admin, admin=True, body={
             "name": "Orbit link acceptance", "expiresInDays": 1,
             "scopes": ["keygen:get", "config-profiles:create", "config-profiles:get",
-                       "nodes:create", "nodes:get"],
+                       "nodes:create", "nodes:get", "internal-squads:create", "users:create"],
         })["token"]
         secret = panel_api("keygen", token=token)["secretKey"]
+        marker = secrets.token_hex(16).encode()
+        origin = start_origin(stack, marker)
         profile = panel_api("config-profiles", token=token, body={"name": "Orbit Link Fixture", "config": {
             "log": {"loglevel": "warning"},
-            "inbounds": [{"tag": "fixture-inbound", "port": XRAY_PORT, "listen": "127.0.0.1", "protocol": "shadowsocks",
-                          "settings": {"clients": [], "method": "chacha20-ietf-poly1305", "network": "tcp"}}],
-            "outbounds": [{"tag": "DIRECT", "protocol": "freedom"}],
+            "inbounds": [{"tag": "fixture-inbound", "port": XRAY_PORT, "listen": "127.0.0.1", "protocol": "vless",
+                          "settings": {"clients": [], "decryption": "none"}}],
+            # The pinned Xray denies private destinations for VLESS by default.
+            # This disposable outbound dials only the isolated HTTP fixture.
+            "outbounds": [{"tag": "ORIGIN", "protocol": "freedom", "settings": {
+                "redirect": f"127.0.0.1:{origin}",
+                "finalRules": [{"action": "allow", "network": "tcp",
+                                "ip": ["127.0.0.1/32"], "port": str(origin)}],
+            }}],
         }})
         profile_id = identifier(profile)
         inbound_id = identifier(profile["inbounds"][0])
+        squad = panel_api("internal-squads", token=token, body={"name": "Orbit Link Users", "inbounds": [inbound_id]})
+        user = panel_api("users", token=token, body={
+            "username": "orbit_fixture_user",
+            "expireAt": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            "activeInternalSquads": [identifier(squad)],
+        })
+        client = start_client(stack, docker, directory, images["remnawave-node"], str(UUID(user["vlessUuid"])))
+
+        def verify_traffic():
+            await_traffic(origin, marker, docker, client)
 
         node = start_external(stack, docker, directory, "fixture-node", NODE_ID, "remnawave-node",
                               {"remnawave-node": images["remnawave-node"]},
@@ -183,6 +280,7 @@ def acceptance():
             assert [identifier(inbound) for inbound in saved["inbounds"]] == [inbound_id]
 
         await_link(read_node, connected=True)
+        verify_traffic()
 
         panel_stage = ExternalLifecycle.stage(panel)
         node_stage = ExternalLifecycle.stage(node)
@@ -193,17 +291,21 @@ def acceptance():
         assert panel_runtime.capture(panel) == panel_before
         assert node_runtime.capture(node) == node_before
         await_link(read_node, connected=True)
-        print("PASS external Panel and Node adopted with the existing Panel node/profile, Docker IDs, and volumes intact.")
+        verify_traffic()
+        print("PASS adoption preserves authenticated VPN traffic, the existing Panel profile, Docker IDs, and volumes.")
 
         scope = {"installation_id": NODE_ID, "spec_digest": node_binding, "registration_id": NODE_ID}
         stop = {"action": "stop-adopted", "operation_id": NODE_ID[:-1] + "S", **scope, "running_receipt_id": NODE_ID}
         result = dispatch({"operation": "execute", "application": stop})
         assert result["code"] == "APP_ADOPTED_STOP_VERIFIED", result
         await_link(read_node, connected=False)
+        if request_through_node(origin).returncode == 0:
+            raise RuntimeError("The VPN client unexpectedly reached the origin with the Node stopped")
         start = {"action": "start-adopted", "operation_id": NODE_ID[:-1] + "T", **scope}
         result = dispatch({"operation": "execute", "application": start})
         assert result["code"] == "APP_ADOPTED_START_VERIFIED", result
         await_link(read_node, connected=True)
+        verify_traffic()
         resumed = node_runtime.capture(node)["containers"]["remnawave-node"]
         print("PASS Panel detects the adopted Node offline and restores its existing Xray listener after exact-ID start.")
 
@@ -212,6 +314,7 @@ def acceptance():
         result = dispatch({"operation": "execute", "application": restart})
         assert result["code"] == "APP_ADOPTED_RESTART_VERIFIED", result
         await_link(read_node, connected=True)
+        verify_traffic()
         current = node_runtime.capture(node)
         before, after = node_before["containers"]["remnawave-node"], current["containers"]["remnawave-node"]
         identity = before["Id"], before["configuration"]
@@ -219,15 +322,16 @@ def acceptance():
         assert (after["Id"], after["configuration"]) == identity
         assert len({before["started_at"], resumed["started_at"], after["started_at"]}) == 3
         assert panel_runtime.capture(panel) == panel_before
-        print("PASS Panel restores the listener after an adopted Node restart with the same container and profile.")
+        print("PASS authenticated VPN traffic resumes through the same Node after exact-ID stop/start and restart.")
 
         detach(node_runtime, node, node_binding)
         detach(panel_runtime, panel, panel_binding)
         await_link(read_node, connected=True)
+        verify_traffic()
         assert_profile_unchanged()
         assert node_runtime.capture(node) == current
         assert panel_runtime.capture(panel) == panel_before
-        print("PASS detaching both registrations preserves the live Panel link, profile, and Docker resources.")
+        print("PASS detaching both registrations preserves the Panel link, VPN traffic, profile, and Docker resources.")
 
 
 def main():
