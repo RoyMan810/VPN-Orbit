@@ -156,11 +156,14 @@ def await_traffic(port, marker, docker, client):
                        f"SOCKS listening {listening(SOCKS_PORT)}, origin listening {listening(port)}, hints {matched})")
 
 
-def start_external(stack, docker, directory, project, identity, role, images, settings, **permissions):
+def start_external(stack, docker, directory, project, identity, role, images, settings, *,
+                   customize=None, **permissions):
     """Use the pinned profiles in pre-existing projects with Compose's ownership labels."""
     spec = {"v": 1, "id": identity, "profiles": [role], "images": images, "settings": {role: settings}}
     document = render(spec, "a" * 64)
     document["name"] = project
+    if customize is not None:
+        customize(document)
     for service in document["services"].values():
         service.pop("labels")
     if permissions:
