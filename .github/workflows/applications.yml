@@ -33,6 +33,8 @@ jobs:
             module: application_lifecycle
           - name: Remnawave Node / host network and mutual TLS
             module: application_node
+          - name: Remnawave Panel and Node / existing link through adoption
+            module: application_panel_node
           - name: Application SSH / durable jobs and reconciliation
             module: application_ssh
           - name: Bedolaga Bot / webhook receiver and header authentication
