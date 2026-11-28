@@ -174,11 +174,12 @@ dd { margin: 5px 0 0; font-size: 14px; font-weight: 650; }
 .docker-preview { display: grid; justify-items: start; gap: 8px; margin-top: 8px; }
 .docker-preview-result { display: grid; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
 
+#application-plan { overflow-wrap: anywhere; }
 #application-plan form {
   display: grid; grid-template-columns: minmax(0, 1fr); justify-items: start; gap: 8px;
 }
 #application-plan :is(button, input, select) { max-width: 100%; }
-#application-plan pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+#application-plan pre { white-space: pre-wrap; }
 
 .restart-plan, .restart-plan form, .restart-plan label:has(input[type="password"]) {
   display: grid;
