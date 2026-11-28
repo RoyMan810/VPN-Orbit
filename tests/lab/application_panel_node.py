@@ -234,8 +234,13 @@ def acceptance():
             "log": {"loglevel": "warning"},
             "inbounds": [{"tag": "fixture-inbound", "port": XRAY_PORT, "listen": "127.0.0.1", "protocol": "vless",
                           "settings": {"clients": [], "decryption": "none"}}],
-            "outbounds": [{"tag": "ORIGIN", "protocol": "freedom",
-                           "settings": {"redirect": f"127.0.0.1:{origin}"}}],
+            # The pinned Xray denies private destinations for VLESS by default.
+            # This disposable outbound dials only the isolated HTTP fixture.
+            "outbounds": [{"tag": "ORIGIN", "protocol": "freedom", "settings": {
+                "redirect": f"127.0.0.1:{origin}",
+                "finalRules": [{"action": "allow", "network": "tcp",
+                                "ip": ["127.0.0.1/32"], "port": str(origin)}],
+            }}],
         }})
         profile_id = identifier(profile)
         inbound_id = identifier(profile["inbounds"][0])
