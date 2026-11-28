@@ -1,4 +1,4 @@
 -r requirements-app.txt
-certifi==2026.10.23
+certifi==2026.11.20
 httpcore==1.0.9
 httpx==0.28.1
