@@ -126,8 +126,8 @@ def start_client(stack, docker, directory, image, user):
 
 def request_through_node(port):
     return subprocess.run(
-        ["curl", "--disable", "--noproxy", "", "--socks5-hostname", f"127.0.0.1:{SOCKS_PORT}",
-         "--connect-timeout", "2", "--max-time", "4", "--silent", "--fail",
+        ["curl", "--disable", "--noproxy", "", "--socks5", f"127.0.0.1:{SOCKS_PORT}",
+         "--connect-timeout", "2", "--max-time", "4", "--silent", "--show-error", "--fail",
          "--url", f"http://127.0.0.1:{port}/acceptance"],
         capture_output=True, timeout=5, check=False,
     )
@@ -136,9 +136,12 @@ def request_through_node(port):
 def await_traffic(port, marker, docker, client):
     deadline = time.monotonic() + 30
     status = None
+    phase = ""
     while time.monotonic() < deadline:
         result = request_through_node(port)
         status = result.returncode
+        failure = result.stderr.lower()
+        phase = "SOCKS handshake" if b"socks" in failure else "transfer"
         if status == 0:
             if result.stdout != marker:
                 raise RuntimeError("The VPN client received an unexpected HTTP body")
@@ -149,7 +152,7 @@ def await_traffic(port, marker, docker, client):
     hints = ("failed to load config", "permission denied", "failed to listen", "configuration error",
              "failed to find", "failed to dial", "connection refused", "invalid", "rejected")
     matched = ", ".join(hint for hint in hints if hint in logs.lower())
-    raise RuntimeError(f"VPN traffic failed (curl exit {status}, client {state['Status']}:{state['ExitCode']}, "
+    raise RuntimeError(f"VPN traffic failed ({phase}, curl exit {status}, client {state['Status']}:{state['ExitCode']}, "
                        f"SOCKS listening {listening(SOCKS_PORT)}, origin listening {listening(port)}, hints {matched})")
 
 
@@ -231,8 +234,8 @@ def acceptance():
             "log": {"loglevel": "warning"},
             "inbounds": [{"tag": "fixture-inbound", "port": XRAY_PORT, "listen": "127.0.0.1", "protocol": "vless",
                           "settings": {"clients": [], "decryption": "none"}}],
-            "outbounds": [{"tag": "BLOCK", "protocol": "blackhole"}, {"tag": "ORIGIN", "protocol": "freedom"}],
-            "routing": {"rules": [{"type": "field", "ip": ["127.0.0.1"], "port": str(origin), "outboundTag": "ORIGIN"}]},
+            "outbounds": [{"tag": "ORIGIN", "protocol": "freedom",
+                           "settings": {"redirect": f"127.0.0.1:{origin}"}}],
         }})
         profile_id = identifier(profile)
         inbound_id = identifier(profile["inbounds"][0])
