@@ -20,6 +20,8 @@ START = INSTALLATION[:-1] + "E"
 NEXT = INSTALLATION[:-1] + "F"
 STARTED_AT = "2026-11-27T10:00:00.12345678Z"
 LATER = "2026-11-27T10:00:00.123456781Z"
+FINISHED_AT = "2026-11-27T10:00:00.12345679Z"
+ZERO_TIME = "0001-01-01T00:00:00Z"
 CONTAINER = "c" * 64
 SOURCE = "/var/lib/fixture/compose.yaml"
 PROJECT = "fixture"
@@ -29,7 +31,9 @@ PIN = json.loads((Path(__file__).resolve().parents[2] / "vpn_orbit/application-i
 class NodeDocker:
     def __init__(self):
         self.starts = []
+        self.stops = []
         self.lose_reply = False
+        self.lose_stop_reply = False
         self.container = {
             "Id": CONTAINER, "Image": "sha256:" + "d" * 64,
             "Config": {"Labels": {"com.docker.compose.service": "node", "com.docker.compose.project": PROJECT,
@@ -37,13 +41,14 @@ class NodeDocker:
                                   "com.docker.compose.config-hash": "e" * 64},
                        "Env": ["SECRET_KEY=adoption-secret-canary"]},
             "HostConfig": {"NetworkMode": "host", "ReadonlyRootfs": True, "RestartPolicy": {"Name": "no"}},
-            "State": {"Running": True, "Status": "running", "Health": {"Status": "healthy"}, "StartedAt": STARTED_AT},
+            "State": {"Running": True, "Status": "running", "Health": {"Status": "healthy"},
+                      "StartedAt": STARTED_AT, "FinishedAt": ZERO_TIME},
             "RestartCount": 0,
             "NetworkSettings": {"Networks": {"host": {"NetworkID": "4" * 64}}}, "Mounts": [],
         }
 
     def stop(self):
-        self.container["State"].update(Running=False, Status="exited")
+        self.container["State"].update(Running=False, Status="exited", FinishedAt=FINISHED_AT)
         self.container["NetworkSettings"]["Networks"] = {}
 
     def __call__(self, kind, verb, *args, **options):
@@ -61,8 +66,17 @@ class NodeDocker:
             assert self.container["State"]["Status"] == "exited"
             self.starts.append(args)
             self.container["NetworkSettings"]["Networks"] = {"host": {"NetworkID": "4" * 64, "EndpointID": "5" * 64}}
-            self.container["State"].update(Running=True, Status="running", StartedAt=LATER)
+            self.container["State"].update(Running=True, Status="running", StartedAt=LATER, FinishedAt=ZERO_TIME,
+                                           Health={"Status": "healthy"})
             if self.lose_reply:
+                raise Denied("APP_DOCKER_FAILED")
+            return CONTAINER
+        if (kind, verb) == ("container", "stop"):
+            assert args == ("--timeout", "30", CONTAINER)
+            assert self.container["State"]["Status"] == "running"
+            self.stops.append(args[-1])
+            self.stop()
+            if self.lose_stop_reply:
                 raise Denied("APP_DOCKER_FAILED")
             return CONTAINER
         raise AssertionError("unexpected Docker operation")
@@ -75,7 +89,7 @@ class ExternalLifecycleTests(unittest.TestCase):
         self.source = self.enterContext(patch("vpn_orbit.app_adoption.source_digest", return_value="1" * 64))
         self.app, self.binding, self.review = self.staged(INSTALLATION)
 
-    def staged(self, identity, *, allow_start=False):
+    def staged(self, identity, *, allow_start=False, allow_stop=False):
         # Use an isolated journal and the production capture, without requiring
         # a root-owned ancestor for this test process's temporary root.
         directory = self.root / identity
@@ -85,6 +99,8 @@ class ExternalLifecycleTests(unittest.TestCase):
                   "service_hashes": {"node": "e" * 64}}
         if allow_start:
             layout["allow_start"] = True
+        if allow_stop:
+            layout["allow_stop"] = True
         baseline = app.capture(layout)
         definition = {"layout": layout, "baseline": baseline, "nonce": "a" * 64}
         binding = digest(definition)
@@ -114,8 +130,8 @@ class ExternalLifecycleTests(unittest.TestCase):
                 self.app.execute(OTHER, action, self.binding)
         self.assertNotIn(b"adoption-secret-canary", (self.app.directory / "external.json").read_bytes())
 
-    def startable(self):
-        app, binding, review = self.staged(OTHER, allow_start=True)
+    def startable(self, *, allow_stop=False):
+        app, binding, review = self.staged(OTHER, allow_start=True, allow_stop=allow_stop)
         app.execute(ADOPT, "adopt", binding, review)
         return app, binding
 
@@ -183,11 +199,65 @@ class ExternalLifecycleTests(unittest.TestCase):
     def test_interruption_after_docker_start_is_read_back_from_dispatching(self):
         app, binding = self.startable()
         self.docker.stop()
-        with patch.object(app, "record_started", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+        with patch.object(app, "record_node_outcome", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
             app.execute(START, "start-adopted", binding, registration_id=ADOPT)
         self.assertEqual(app.execute(START, "start-adopted", binding, registration_id=ADOPT)["outcome"], "UNKNOWN_OUTCOME")
         self.assertEqual(app.reconcile(START, action="start-adopted", binding=binding, registration_id=ADOPT)["outcome"], "SUCCEEDED")
         self.assertEqual(self.docker.starts, [(CONTAINER,)])
+
+    def test_stop_requires_separate_permission_and_the_approved_running_generation(self):
+        app, binding = self.startable()
+        options = {"registration_id": ADOPT, "running_receipt_id": ADOPT}
+        with self.assertRaisesRegex(Denied, "APP_ADOPTED_STOP_UNSUPPORTED"):
+            app.execute(START, "stop-adopted", binding, **options)
+        self.assertEqual(self.docker.stops, [])
+
+    def test_stop_only_permission_does_not_allow_start(self):
+        app, binding, review = self.staged(OTHER, allow_stop=True)
+        app.execute(ADOPT, "adopt", binding, review)
+        self.assertEqual(app.execute(DETACH, "stop-adopted", binding, registration_id=ADOPT,
+                                     running_receipt_id=ADOPT)["outcome"], "SUCCEEDED")
+        with self.assertRaisesRegex(Denied, "APP_ADOPTED_START_UNSUPPORTED"):
+            app.execute(START, "start-adopted", binding, registration_id=ADOPT)
+        self.assertEqual(self.docker.stops, [CONTAINER])
+        self.assertEqual(self.docker.starts, [])
+
+    def test_stop_and_start_keep_the_same_container_and_reject_stale_stop_approvals(self):
+        app, binding = self.startable(allow_stop=True)
+        options = {"registration_id": ADOPT, "running_receipt_id": ADOPT}
+        with patch.dict(self.docker.container["State"], StartedAt=LATER), self.assertRaisesRegex(Denied, "APP_ADOPTION_DRIFT"):
+            app.execute(DETACH, "stop-adopted", binding, **options)
+        self.assertEqual(self.docker.stops, [])
+        self.docker.container["State"]["Health"] = {"Status": "unhealthy"}
+        result = app.execute(DETACH, "stop-adopted", binding, **options)
+        self.assertEqual(result["code"], "APP_ADOPTED_STOP_VERIFIED")
+        self.assertEqual(app.reconcile(DETACH, action="stop-adopted", binding=binding, **options), result)
+        self.assertEqual(self.docker.stops, [CONTAINER])
+        self.assertEqual(app.execute(START, "start-adopted", binding, registration_id=ADOPT)["outcome"], "SUCCEEDED")
+        with self.assertRaisesRegex(Denied, "APP_ADOPTED_RUN_CHANGED"):
+            app.execute(NEXT, "stop-adopted", binding, **options)
+        self.assertEqual(self.docker.stops, [CONTAINER])
+        self.assertEqual(app.execute(DETACH, "stop-adopted", binding, **options), result)
+        self.assertEqual(app.execute(NEXT, "stop-adopted", binding, registration_id=ADOPT,
+                                     running_receipt_id=START)["outcome"], "SUCCEEDED")
+        self.assertEqual(self.docker.stops, [CONTAINER, CONTAINER])
+
+    def test_uncertain_stop_requires_a_confirmed_exit_and_never_repeats_the_command(self):
+        app, binding = self.startable(allow_stop=True)
+        options = {"registration_id": ADOPT, "running_receipt_id": ADOPT}
+        self.docker.lose_stop_reply = True
+        result = app.execute(START, "stop-adopted", binding, **options)
+        self.assertEqual(result["outcome"], "UNKNOWN_OUTCOME")
+        self.assertEqual(app.execute(START, "stop-adopted", binding, **options), result)
+        with self.assertRaisesRegex(Denied, "APP_RECONCILIATION_REQUIRED"):
+            app.execute(NEXT, "start-adopted", binding, registration_id=ADOPT)
+        with self.assertRaisesRegex(Denied, "APP_RECONCILIATION_REQUIRED"):
+            app.execute(DETACH, "detach", binding)
+        for change in ({"FinishedAt": ZERO_TIME}, {"StartedAt": LATER}, {"Dead": True}):
+            with self.subTest(change=change), patch.dict(self.docker.container["State"], change):
+                self.assertEqual(app.reconcile(START, action="stop-adopted", binding=binding, **options), result)
+        self.assertEqual(app.reconcile(START, action="stop-adopted", binding=binding, **options)["outcome"], "SUCCEEDED")
+        self.assertEqual(self.docker.stops, [CONTAINER])
 
     def test_rejects_changed_runtime_configuration_and_missing_receipt(self):
         with self.assertRaisesRegex(Denied, "APP_ADOPTION_DRIFT"):

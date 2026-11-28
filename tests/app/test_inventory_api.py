@@ -288,6 +288,23 @@ class InventoryTests(Fixture):
         self.assertEqual(self.confirm_application(stale).json()["code"], "APP_ADOPTION_STATE_INVALID")
         self.store.verify_audit()
 
+    def test_stop_draft_is_bound_to_the_latest_confirmed_run_of_the_registration(self):
+        _, preview = self.adoption_fixture()
+        registration = self.adoption_draft(preview)
+        job = self.request_application(registration, self.confirm_application(registration))
+        self.finish_registered_application(job, "APP_ADOPTION_REGISTERED", preview=preview)
+
+        stale = self.adoption_draft(None, action="stop-adopted")
+        self.assertEqual(stale.json()["diff"]["running_receipt_id"], job)
+        start = self.adoption_draft(None, action="start-adopted")
+        start_job = self.request_application(start, self.confirm_application(start))
+        self.finish_registered_application(start_job, "APP_ADOPTED_START_VERIFIED", registration=job)
+        self.assertEqual(self.confirm_application(stale).json()["code"], "APP_ADOPTED_RUN_CHANGED")
+        stop = self.adoption_draft(None, action="stop-adopted")
+        self.assertEqual(stop.status_code, 201, stop.text)
+        self.assertEqual(stop.json()["diff"], {"operation": "stop-adopted", "installation_id": OTHER, "project": "fixture",
+                                               "registration_id": job, "running_receipt_id": start_job})
+
     def test_adoption_requires_ready_evidence_and_rechecks_at_approval_and_dispatch(self):
         _, incomplete = self.adoption_fixture(ready=False)
         self.assertEqual(self.adoption_draft(None).status_code, 428)

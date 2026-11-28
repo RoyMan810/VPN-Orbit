@@ -28,24 +28,32 @@ DOCKER_STARTED_AT = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.
 MAX_FIREWALL_RULES = 32
 
 
+START_ADOPTED = "start-adopted"
+STOP_ADOPTED = "stop-adopted"
+ADOPTED_NODE_ACTIONS = (START_ADOPTED, STOP_ADOPTED)
 APPLICATION_SUCCESS = {
     "install": ("APP_HEALTH_VERIFIED", "APP_READBACK_VERIFIED"),
     "start": ("APP_HEALTH_VERIFIED", "APP_READBACK_VERIFIED"),
     "remove": ("APP_REMOVED_DATA_PRESERVED", "APP_READBACK_VERIFIED"),
     "adopt": ("APP_ADOPTION_REGISTERED",),
     "detach": ("APP_ADOPTION_DETACHED",),
-    "start-adopted": ("APP_ADOPTED_START_VERIFIED",),
+    START_ADOPTED: ("APP_ADOPTED_START_VERIFIED",),
+    STOP_ADOPTED: ("APP_ADOPTED_STOP_VERIFIED",),
 }
 
 
 def application_payload(value):
     action = value.get("action") if isinstance(value, dict) else None
-    extra = ("review",) if action == "adopt" else ("registration_id",) if action == "start-adopted" else ()
-    fields(value, ("operation_id", "installation_id", "spec_digest", "action") + extra)
+    extra = ()
     if action == "adopt":
-        text(value["review"], SHA256)
-    elif action == "start-adopted":
-        text(value["registration_id"], ULID)
+        extra = ("review",)
+    elif action in ADOPTED_NODE_ACTIONS:
+        extra = ("registration_id",)
+        if action == STOP_ADOPTED:
+            extra += ("running_receipt_id",)
+    fields(value, ("operation_id", "installation_id", "spec_digest", "action") + extra)
+    for key in extra:
+        text(value[key], SHA256 if key == "review" else ULID)
     text(value["operation_id"], ULID)
     text(value["installation_id"], ULID)
     text(value["spec_digest"], SHA256)
