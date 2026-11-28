@@ -1,18 +1,23 @@
 """Local-root PostgreSQL capture and restore for an owned product installation."""
 
 from contextlib import contextmanager
+from importlib.resources import files
 import hashlib
+from ipaddress import IPv4Address
 import json
 import os
 from pathlib import Path
+import re
 import resource
 import select
 import subprocess
 import tempfile
 import time
+from urllib.parse import unquote, urlsplit
 
+from .app_adoption import ExternalLifecycle, attached_networks
 from .app_lifecycle import Lifecycle, refuse
-from .app_profiles import canonical
+from .app_profiles import canonical, digest
 from .runtime import backup
 from .runtime.storage import directory_sync, new_private_file, protected_bytes
 
@@ -20,11 +25,13 @@ from .runtime.storage import directory_sync, new_private_file, protected_bytes
 SERVICES = {"panel-db", "bot-db"}
 MAGIC = b"vpn-orbit-app-postgres-v1\n"
 MAX_DUMP = 4 * 1024**3
+POSTGRES_NAME = re.compile(r"[a-z_][a-z0-9_]{0,62}")
+POSTGRES_ENV = ("env", "-i", "PATH=/usr/local/bin:/usr/bin:/bin", "PGPASSFILE=/dev/null")
 
 
-def execute(*argv, stdin=None, stdout=None, timeout=240):
+def execute(*argv, stdin=None, input_data=None, stdout=None, timeout=240):
     try:
-        result = subprocess.run(argv, stdin=stdin, stdout=stdout if stdout is not None else subprocess.PIPE,
+        result = subprocess.run(argv, stdin=stdin, input=input_data, stdout=stdout if stdout is not None else subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, timeout=timeout, env=backup.ENV)
     except (OSError, subprocess.SubprocessError):
         refuse("APP_POSTGRES_COMMAND_FAILED")
@@ -54,12 +61,133 @@ def settings(app, service, binding):
                       "image": spec["images"]["postgres"]}, inventory
 
 
-def write_encrypted(path, header, container, recipient):
+def panel_database(url):
+    if not isinstance(url, str) or any(ord(char) <= 32 or ord(char) == 127 for char in url):
+        refuse("APP_POSTGRES_SOURCE_UNVERIFIED")
+    try:
+        parsed = urlsplit(url)
+        database, role, alias = parsed.path.removeprefix("/"), parsed.username, parsed.hostname
+        password = unquote(parsed.password or "", errors="strict")
+        if (parsed.scheme not in ("postgres", "postgresql") or not parsed.hostname
+                or parsed.port not in (None, 5432) or parsed.query or parsed.fragment
+                or not isinstance(role, str) or not POSTGRES_NAME.fullmatch(role)
+                or not POSTGRES_NAME.fullmatch(database)
+                or any(char in password for char in ("\n", "\r", "\x00"))):
+            refuse("APP_POSTGRES_SOURCE_UNVERIFIED")
+    except ValueError:
+        refuse("APP_POSTGRES_SOURCE_UNVERIFIED")
+    return database, role, alias, password
+
+
+def local_postgres(tool, database, role, *, host="/var/run/postgresql"):
+    return (*POSTGRES_ENV, tool, "--host=" + host, "--port=5432", "--no-password",
+            "--username=" + role, "--dbname=" + database)
+
+
+def pinned_container(app, pinned):
+    actual = app.inspect("container", pinned["Id"])
+    if (app.stable(actual, expected=pinned["configuration"]) !=
+            {key: pinned[key] for key in ("Id", "configuration")}
+            or actual["State"].get("StartedAt") != pinned["started_at"]
+            or digest(attached_networks(actual)) != pinned["network_bindings"]):
+        refuse("APP_RESOURCE_DRIFT")
+    return actual
+
+
+def panel_peer_address(panel, postgres, alias):
+    source = attached_networks(panel)
+    endpoints = [endpoint for name, endpoint in attached_networks(postgres).items()
+                 if name in source and endpoint.get("NetworkID") == source[name].get("NetworkID")
+                 and alias in (endpoint.get("Aliases") or [])]
+    if len(endpoints) != 1 or endpoints[0].get("GlobalIPv6Address"):
+        refuse("APP_POSTGRES_SOURCE_UNVERIFIED")
+    try:
+        return str(IPv4Address(endpoints[0].get("IPAddress")))
+    except ValueError:
+        refuse("APP_POSTGRES_SOURCE_UNVERIFIED")
+
+
+def postgres_identity(container, database, role, address, password):
+    options = ("--no-psqlrc", "--no-align", "--tuples-only", "--set=ON_ERROR_STOP=1",
+               "--command", """SELECT current_database(), current_user, oid,
+                   (pg_catalog.pg_control_system()).system_identifier
+                   FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database()""")
+    identity = docker("exec", container, *local_postgres("psql", database, role), *options, timeout=20)
+    # Pass the existing credential on stdin, avoiding command arguments and Docker exec settings.
+    command = local_postgres("psql", database, role, host=address)
+    tcp = docker("exec", "-i", container, *POSTGRES_ENV, "sh", "-c",
+                 'IFS= read -r PGPASSWORD || exit 1; export PGPASSWORD; exec "$@"', "sh",
+                 *command[len(POSTGRES_ENV):], *options,
+                 input_data=(password + "\n").encode(), timeout=20)
+    fields = identity.decode().strip().split("|")
+    if (tcp != identity or len(fields) != 4 or fields[:2] != [database, role]
+            or any(not item.isascii() or not item.isdecimal() for item in fields[2:])):
+        refuse("APP_POSTGRES_SOURCE_UNVERIFIED")
+    return fields[2:]
+
+
+def adopted_scope(app, service, binding):
+    if service != "panel-db":
+        refuse("APP_POSTGRES_SERVICE_INVALID")
+    definition = app.definition()
+    with app.journal.connect() as db:
+        installation = db.execute("SELECT spec_digest,inventory FROM installation WHERE id=1").fetchone()
+        if (installation is None or installation["inventory"] is None
+                or installation["spec_digest"] != binding or digest(definition) != binding):
+            refuse("APP_POSTGRES_SCOPE_MISMATCH")
+        if db.execute("SELECT 1 FROM operations WHERE state IN ('DISPATCHING','UNKNOWN_OUTCOME')").fetchone():
+            refuse("APP_RECONCILIATION_REQUIRED")
+        registration = db.execute("""SELECT id FROM operations WHERE action='adopt' AND state='SUCCEEDED'
+                                     ORDER BY rowid DESC LIMIT 1""").fetchone()
+        if registration is None:
+            refuse("APP_POSTGRES_SCOPE_MISMATCH")
+    inventory = json.loads(installation["inventory"])
+    if app.capture(definition["layout"], expected=inventory) != inventory:
+        refuse("APP_RESOURCE_DRIFT")
+    panel = next((name for name, role in inventory["roles"].items() if role == "remnawave-panel"), None)
+    if panel is None:
+        refuse("APP_POSTGRES_SERVICE_INVALID")
+    peers = [name for name in inventory["dependencies"][panel] if inventory["roles"][name] == "postgres"]
+    if len(peers) != 1:
+        refuse("APP_POSTGRES_SOURCE_UNVERIFIED")
+
+    actual = pinned_container(app, inventory["containers"][panel])
+    env = dict(entry.split("=", 1) for entry in actual["Config"]["Env"])
+    database, role, alias, password = panel_database(env.get("DATABASE_URL"))
+    postgres = pinned_container(app, inventory["containers"][peers[0]])
+    container = postgres["Id"]
+    address = panel_peer_address(actual, postgres, alias)
+    database_oid, cluster = postgres_identity(container, database, role, address, password)
+    catalog = json.loads(files("vpn_orbit").joinpath("application-images.json").read_text(encoding="utf-8"))
+    return container, {"v": 1, "installation": app.identity, "spec_sha256": binding, "service": service,
+                       "source": "adopted", "registration": registration["id"], "database": database,
+                       "role": role, "database_oid": database_oid, "cluster": cluster,
+                       "image": catalog["images"]["postgres"]}
+
+
+def capture(app, service, binding, path, recipient):
+    with app.locked():
+        if not isinstance(app, ExternalLifecycle):
+            container, scope, _ = settings(app, service, binding)
+            return write_encrypted(path, scope, container, recipient)
+        container, scope = adopted_scope(app, service, binding)
+
+        def verify():
+            if adopted_scope(app, service, binding) != (container, scope):
+                refuse("APP_RESOURCE_DRIFT")
+
+        return write_encrypted(path, scope, container, recipient, verify=verify)
+
+
+def write_encrypted(path, header, container, recipient, *, verify=None):
     if not backup.RECIPIENT.fullmatch(recipient):
         refuse("BACKUP_RECIPIENT_UNSUPPORTED")
     destination = backup.secure_directory(path.absolute().parent, private=True) / path.name
     if os.path.lexists(destination):
         refuse("APP_POSTGRES_ARCHIVE_EXISTS")
+    command = ("pg_dump", "--username=orbit", "--dbname=orbit")
+    if header.get("source") == "adopted":
+        command = local_postgres("pg_dump", header["database"], header["role"])
     fd, temp = tempfile.mkstemp(prefix=".postgres-", dir=destination.parent)
     try:
         with os.fdopen(fd, "w+b") as out, subprocess.Popen(
@@ -68,7 +196,7 @@ def write_encrypted(path, header, container, recipient):
             try:
                 with subprocess.Popen(
                         ["/usr/bin/docker", "--host", "unix:///run/docker.sock", "exec", container,
-                         "pg_dump", "--format=custom", "--no-owner", "--no-acl", "--username=orbit", "--dbname=orbit"],
+                         *command, "--format=custom", "--no-owner", "--no-acl"],
                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=backup.ENV) as dump:
                     # Write magic and scope before streaming; never persist plaintext.
                     encryption.stdin.write(MAGIC + canonical(header) + b"\n")
@@ -99,6 +227,8 @@ def write_encrypted(path, header, container, recipient):
             os.fsync(out.fileno())
             out.seek(0)
             sha256 = hashlib.file_digest(out, "sha256").hexdigest()
+        if verify is not None:
+            verify()
         os.link(temp, destination)
     finally:
         Path(temp).unlink(missing_ok=True)
@@ -254,12 +384,14 @@ def main(argv=None):
         os.umask(0o077)
         backup.secure_directory(backup.AGE.parent)
         app = Lifecycle(args.id)
+        if os.path.lexists(app.directory / "external.json"):
+            if args.action != "capture":
+                refuse("APP_POSTGRES_ADOPTED_CAPTURE_ONLY")
+            app = ExternalLifecycle(args.id)
         if args.action == "capture":
             if not (args.recipient and args.archive):
                 refuse("BACKUP_RECIPIENT_UNSUPPORTED")
-            with app.locked():
-                container, header, _ = settings(app, args.service, args.spec_sha256)
-                sha256 = write_encrypted(args.archive, header, container, args.recipient)
+            sha256 = capture(app, args.service, args.spec_sha256, args.archive, args.recipient)
             result = {"status": "CAPTURED", "service": args.service, "sha256": sha256}
         elif args.action == "restore":
             if not (args.identity and args.sha256 and args.archive):
