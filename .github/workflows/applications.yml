@@ -39,7 +39,7 @@ jobs:
             module: application_adopted_postgres
           - name: Application SSH / durable jobs and reconciliation
             module: application_ssh
-          - name: Bedolaga Bot and Cabinet / existing stack through adoption
+          - name: Bedolaga Bot and Cabinet / adoption and isolated database restore
             module: application_bedolaga
           - name: Bedolaga Bot / webhook receiver and header authentication
             module: application_webhook
@@ -68,7 +68,7 @@ jobs:
           # Keep the action's private daemon and expose exactly that socket.
           sudo systemctl stop docker.service docker.socket || true
           sudo ln -sfn "${DOCKER_HOST#unix://}" /run/docker.sock
-          if [[ "$MODULE" = application_postgres || "$MODULE" = application_adopted_postgres ]]; then
+          if [[ "$MODULE" = application_postgres || "$MODULE" = application_adopted_postgres || "$MODULE" = application_bedolaga ]]; then
             python tools/fetch_age.py --output "$RUNNER_TEMP/pg-age.tar.gz"
             tar --no-same-owner -xzf "$RUNNER_TEMP/pg-age.tar.gz" -C "$RUNNER_TEMP" -- age/age age/age-keygen
             sudo chmod 0755 /opt

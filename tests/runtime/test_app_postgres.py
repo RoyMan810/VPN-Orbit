@@ -1,9 +1,9 @@
-"""The adopted Panel's connection string cannot override the local dump target."""
+"""Adopted database discovery stays within the registered PostgreSQL cluster."""
 
 import unittest
 from unittest.mock import patch
 
-from vpn_orbit.app_postgres import local_postgres, panel_database, postgres_identity
+from vpn_orbit.app_postgres import bedolaga_database, local_postgres, panel_database, postgres_identity
 from vpn_orbit.errors import Denied
 
 
@@ -55,3 +55,31 @@ class AdoptedPostgresTests(unittest.TestCase):
     def test_rejects_a_tcp_endpoint_served_by_a_different_cluster(self, docker):
         with self.assertRaisesRegex(Denied, "APP_POSTGRES_SOURCE_UNVERIFIED"):
             postgres_identity("container", "postgres", "postgres", "172.20.0.2", "secret")
+
+    @patch("vpn_orbit.app_postgres.docker")
+    def test_bedolaga_requires_one_live_database_and_matching_role(self, docker):
+        def container(env, address, aliases):
+            return {"Id": "pinned", "Config": {"Env": env}, "NetworkSettings": {"Networks": {
+                "apps": {"NetworkID": "bridge-id", "IPAddress": address, "Aliases": aliases},
+            }}}
+
+        bot = container(["POSTGRES_HOST=db", "POSTGRES_DB=bot", "POSTGRES_USER=bot_user", "DATABASE_MODE=auto",
+                         "DOCKER_ENV=true", "POSTGRES_PASSWORD=fixture-secret"], "192.0.2.2", ["bot"])
+        postgres = container(["POSTGRES_USER=admin"], "192.0.2.3", ["db"])
+        valid = b"bot|bot_user|42|11|128|t\n"
+        docker.return_value = valid
+        self.assertEqual(bedolaga_database(bot, postgres), ["bot", "bot_user", "42", "11", "128"])
+        args = docker.call_args.args
+        self.assertIn("--username=admin", args)
+        self.assertIn("client_addr='192.0.2.2'", args[-1])
+        self.assertNotIn("fixture-secret", " ".join(args))
+        for rows in (b"", b"bot|admin|42|10|128|t\n", b"bot|bot_user|42|11|128|f\n",
+                     valid + b"other|bot_user|43|11|128|f\n"):
+            with self.subTest(rows=rows), self.assertRaisesRegex(Denied, "APP_POSTGRES_SOURCE_UNVERIFIED"):
+                docker.return_value = rows
+                bedolaga_database(bot, postgres)
+        docker.reset_mock()
+        bot["Config"]["Env"].append("DATABASE_READ_REPLICA_URL=postgresql+asyncpg://other/bot")
+        with self.assertRaisesRegex(Denied, "APP_POSTGRES_SOURCE_UNVERIFIED"):
+            bedolaga_database(bot, postgres)
+        docker.assert_not_called()

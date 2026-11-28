@@ -22,7 +22,8 @@ from .runtime import backup
 from .runtime.storage import directory_sync, new_private_file, protected_bytes
 
 
-SERVICES = {"panel-db", "bot-db"}
+APPLICATION_ROLES = {"panel-db": "remnawave-panel", "bot-db": "bedolaga-bot"}
+SERVICES = APPLICATION_ROLES.keys()
 MAGIC = b"vpn-orbit-app-postgres-v1\n"
 MAX_DUMP = 4 * 1024**3
 POSTGRES_NAME = re.compile(r"[a-z_][a-z0-9_]{0,62}")
@@ -94,15 +95,21 @@ def pinned_container(app, pinned):
     return actual
 
 
-def panel_peer_address(panel, postgres, alias):
-    source = attached_networks(panel)
-    endpoints = [endpoint for name, endpoint in attached_networks(postgres).items()
+def database_endpoints(application, postgres, alias):
+    source = attached_networks(application)
+    endpoints = [(source[name], endpoint) for name, endpoint in attached_networks(postgres).items()
                  if name in source and endpoint.get("NetworkID") == source[name].get("NetworkID")
                  and alias in (endpoint.get("Aliases") or [])]
-    if len(endpoints) != 1 or endpoints[0].get("GlobalIPv6Address"):
+    if len(endpoints) != 1:
+        refuse("APP_POSTGRES_SOURCE_UNVERIFIED")
+    return endpoints[0]
+
+
+def endpoint_ipv4(endpoint):
+    if endpoint.get("GlobalIPv6Address"):
         refuse("APP_POSTGRES_SOURCE_UNVERIFIED")
     try:
-        return str(IPv4Address(endpoints[0].get("IPAddress")))
+        return str(IPv4Address(endpoint.get("IPAddress")))
     except ValueError:
         refuse("APP_POSTGRES_SOURCE_UNVERIFIED")
 
@@ -126,8 +133,42 @@ def postgres_identity(container, database, role, address, password):
     return fields[2:]
 
 
+def container_env(container):
+    return dict(entry.split("=", 1) for entry in container["Config"]["Env"])
+
+
+def bedolaga_database(application, postgres):
+    env = container_env(application)
+    database, role = env.get("POSTGRES_DB", ""), env.get("POSTGRES_USER", "")
+    if (env.get("DATABASE_URL") or env.get("DATABASE_READ_REPLICA_URL")
+            or env.get("DATABASE_MODE") not in ("postgresql", "auto")
+            or not POSTGRES_NAME.fullmatch(database) or not POSTGRES_NAME.fullmatch(role)):
+        refuse("APP_POSTGRES_SOURCE_UNVERIFIED")
+    source, _ = database_endpoints(application, postgres, env.get("POSTGRES_HOST"))
+    client = endpoint_ipv4(source)
+    administrator = container_env(postgres).get("POSTGRES_USER", "postgres")
+    if not POSTGRES_NAME.fullmatch(administrator):
+        refuse("APP_POSTGRES_SOURCE_UNVERIFIED")
+    # The pinned Bedolaga primary engine identifies its sessions as remnawave_bot.
+    # Observe that connection in the cluster used by pg_dump instead of inferring a DSN.
+    rows = docker("exec", postgres["Id"], *local_postgres("psql", "postgres", administrator),
+                  "--no-psqlrc", "--no-align", "--tuples-only", "--set=ON_ERROR_STOP=1",
+                  "--command", f"""SELECT datname, usename, datid, usesysid,
+                         (pg_catalog.pg_control_system()).system_identifier,
+                         bool_or(application_name='remnawave_bot')
+                         FROM pg_catalog.pg_stat_activity
+                         WHERE backend_type='client backend' AND client_addr='{client}'
+                           AND NOT pg_catalog.pg_is_in_recovery()
+                         GROUP BY datname, usename, datid, usesysid""", timeout=20).decode().splitlines()
+    fields = rows[0].split("|") if len(rows) == 1 else []
+    if (len(fields) != 6 or fields[:2] != [database, role] or fields[5] != "t"
+            or any(not item.isascii() or not item.isdecimal() for item in fields[2:5])):
+        refuse("APP_POSTGRES_SOURCE_UNVERIFIED")
+    return fields[:5]
+
+
 def adopted_scope(app, service, binding):
-    if service != "panel-db":
+    if service not in APPLICATION_ROLES:
         refuse("APP_POSTGRES_SERVICE_INVALID")
     definition = app.definition()
     with app.journal.connect() as db:
@@ -144,25 +185,29 @@ def adopted_scope(app, service, binding):
     inventory = json.loads(installation["inventory"])
     if app.capture(definition["layout"], expected=inventory) != inventory:
         refuse("APP_RESOURCE_DRIFT")
-    panel = next((name for name, role in inventory["roles"].items() if role == "remnawave-panel"), None)
-    if panel is None:
+    name = next((name for name, role in inventory["roles"].items() if role == APPLICATION_ROLES[service]), None)
+    if name is None:
         refuse("APP_POSTGRES_SERVICE_INVALID")
-    peers = [name for name in inventory["dependencies"][panel] if inventory["roles"][name] == "postgres"]
+    peers = [peer for peer in inventory["dependencies"][name] if inventory["roles"][peer] == "postgres"]
     if len(peers) != 1:
         refuse("APP_POSTGRES_SOURCE_UNVERIFIED")
 
-    actual = pinned_container(app, inventory["containers"][panel])
-    env = dict(entry.split("=", 1) for entry in actual["Config"]["Env"])
-    database, role, alias, password = panel_database(env.get("DATABASE_URL"))
+    application = pinned_container(app, inventory["containers"][name])
     postgres = pinned_container(app, inventory["containers"][peers[0]])
     container = postgres["Id"]
-    address = panel_peer_address(actual, postgres, alias)
-    database_oid, cluster = postgres_identity(container, database, role, address, password)
+    extra_scope = {}
+    if service == "panel-db":
+        database, role, alias, password = panel_database(container_env(application).get("DATABASE_URL"))
+        _, target = database_endpoints(application, postgres, alias)
+        database_oid, cluster = postgres_identity(container, database, role, endpoint_ipv4(target), password)
+    else:
+        database, role, database_oid, role_oid, cluster = bedolaga_database(application, postgres)
+        extra_scope["role_oid"] = role_oid
     catalog = json.loads(files("vpn_orbit").joinpath("application-images.json").read_text(encoding="utf-8"))
     return container, {"v": 1, "installation": app.identity, "spec_sha256": binding, "service": service,
                        "source": "adopted", "registration": registration["id"], "database": database,
                        "role": role, "database_oid": database_oid, "cluster": cluster,
-                       "image": catalog["images"]["postgres"]}
+                       "image": catalog["images"]["postgres"], **extra_scope}
 
 
 def capture(app, service, binding, path, recipient):
