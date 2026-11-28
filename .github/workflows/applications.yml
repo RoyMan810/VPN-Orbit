@@ -37,6 +37,8 @@ jobs:
             module: application_panel_node
           - name: Application SSH / durable jobs and reconciliation
             module: application_ssh
+          - name: Bedolaga Bot and Cabinet / existing stack through adoption
+            module: application_bedolaga
           - name: Bedolaga Bot / webhook receiver and header authentication
             module: application_webhook
           - name: Remnawave and Bedolaga / actual PostgreSQL backup and restore
