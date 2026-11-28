@@ -25,17 +25,26 @@ permissions:
 
 jobs:
   bootstrap:
-    name: Fresh Ubuntu 24.04 / bootstrap install and HTTPS
-    runs-on: ubuntu-24.04
+    name: Fresh Ubuntu ${{ matrix.version }} / bootstrap install and HTTPS
+    runs-on: ubuntu-${{ matrix.version }}
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["24.04", "26.04"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Prepare the disposable Ubuntu VM
+        env:
+          EXPECTED_UBUNTU: ${{ matrix.version }}
         run: |
           test "$RUNNER_ENVIRONMENT" = github-hosted
+          . /etc/os-release
+          test "$ID" = ubuntu
+          test "$VERSION_ID" = "$EXPECTED_UBUNTU"
           sudo chmod 0755 /opt
           sudo systemctl stop docker.service docker.socket containerd.service || true
           mapfile -t installed < <(dpkg-query -W -f='${binary:Package} ${db:Status-Status}\n' \
