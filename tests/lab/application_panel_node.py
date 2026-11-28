@@ -62,9 +62,9 @@ def identifier(value):
     return str(UUID(value["uuid"]))
 
 
-def listening():
+def listening(port=XRAY_PORT):
     try:
-        with socket.create_connection(("127.0.0.1", XRAY_PORT), timeout=1):
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
             return True
     except OSError:
         return False
@@ -121,6 +121,7 @@ def start_client(stack, docker, directory, image, user):
                     "--mount", f"type=bind,source={source},target=/probe.json,readonly",
                     "--entrypoint", "/usr/local/bin/xray", image, "run", "-config", "/probe.json").strip()
     stack.callback(docker, "container", "rm", "--force", client)
+    return client
 
 
 def request_through_node(port):
@@ -132,16 +133,24 @@ def request_through_node(port):
     )
 
 
-def await_traffic(port, marker):
+def await_traffic(port, marker, docker, client):
     deadline = time.monotonic() + 30
+    status = None
     while time.monotonic() < deadline:
         result = request_through_node(port)
-        if result.returncode == 0:
+        status = result.returncode
+        if status == 0:
             if result.stdout != marker:
                 raise RuntimeError("The VPN client received an unexpected HTTP body")
             return
         time.sleep(1)
-    raise RuntimeError("The VPN client could not reach the loopback HTTP origin")
+    state = json.loads(docker("container", "inspect", client))[0]["State"]
+    logs = docker("container", "logs", client)
+    hints = ("failed to load config", "permission denied", "failed to listen", "configuration error",
+             "failed to find", "failed to dial", "connection refused", "invalid", "rejected")
+    matched = ", ".join(hint for hint in hints if hint in logs.lower())
+    raise RuntimeError(f"VPN traffic failed (curl exit {status}, client {state['Status']}:{state['ExitCode']}, "
+                       f"SOCKS listening {listening(SOCKS_PORT)}, origin listening {listening(port)}, hints {matched})")
 
 
 def start_external(stack, docker, directory, project, identity, role, images, settings, **permissions):
@@ -233,7 +242,10 @@ def acceptance():
             "expireAt": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
             "activeInternalSquads": [identifier(squad)],
         })
-        start_client(stack, docker, directory, images["remnawave-node"], str(UUID(user["vlessUuid"])))
+        client = start_client(stack, docker, directory, images["remnawave-node"], str(UUID(user["vlessUuid"])))
+
+        def verify_traffic():
+            await_traffic(origin, marker, docker, client)
 
         node = start_external(stack, docker, directory, "fixture-node", NODE_ID, "remnawave-node",
                               {"remnawave-node": images["remnawave-node"]},
@@ -260,7 +272,7 @@ def acceptance():
             assert [identifier(inbound) for inbound in saved["inbounds"]] == [inbound_id]
 
         await_link(read_node, connected=True)
-        await_traffic(origin, marker)
+        verify_traffic()
 
         panel_stage = ExternalLifecycle.stage(panel)
         node_stage = ExternalLifecycle.stage(node)
@@ -271,7 +283,7 @@ def acceptance():
         assert panel_runtime.capture(panel) == panel_before
         assert node_runtime.capture(node) == node_before
         await_link(read_node, connected=True)
-        await_traffic(origin, marker)
+        verify_traffic()
         print("PASS adoption preserves authenticated VPN traffic, the existing Panel profile, Docker IDs, and volumes.")
 
         scope = {"installation_id": NODE_ID, "spec_digest": node_binding, "registration_id": NODE_ID}
@@ -285,7 +297,7 @@ def acceptance():
         result = dispatch({"operation": "execute", "application": start})
         assert result["code"] == "APP_ADOPTED_START_VERIFIED", result
         await_link(read_node, connected=True)
-        await_traffic(origin, marker)
+        verify_traffic()
         resumed = node_runtime.capture(node)["containers"]["remnawave-node"]
         print("PASS Panel detects the adopted Node offline and restores its existing Xray listener after exact-ID start.")
 
@@ -294,7 +306,7 @@ def acceptance():
         result = dispatch({"operation": "execute", "application": restart})
         assert result["code"] == "APP_ADOPTED_RESTART_VERIFIED", result
         await_link(read_node, connected=True)
-        await_traffic(origin, marker)
+        verify_traffic()
         current = node_runtime.capture(node)
         before, after = node_before["containers"]["remnawave-node"], current["containers"]["remnawave-node"]
         identity = before["Id"], before["configuration"]
@@ -307,7 +319,7 @@ def acceptance():
         detach(node_runtime, node, node_binding)
         detach(panel_runtime, panel, panel_binding)
         await_link(read_node, connected=True)
-        await_traffic(origin, marker)
+        verify_traffic()
         assert_profile_unchanged()
         assert node_runtime.capture(node) == current
         assert panel_runtime.capture(panel) == panel_before
